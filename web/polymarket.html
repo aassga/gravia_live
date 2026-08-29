@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gravia · Polymarket BTC Up/Down — 即時</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-track{background:#080808;}
+::-webkit-scrollbar-thumb{background:#ff2d7855;border-radius:2px;}
+html{background:#080808;height:100%;}
+body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;font-size:12.5px;overflow-x:hidden;min-height:100%;}
+#bg-canvas{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;}
+.db{padding:6px 8px;display:flex;flex-direction:column;gap:5px;min-height:100vh;position:relative;z-index:1;}
+.panel{background:#0d0d0dee;border:1px solid #ff2d7840;border-radius:4px;padding:8px 10px;position:relative;overflow:hidden;
+  box-shadow:0 0 12px #ff2d7830, inset 0 0 20px #ff2d780a;}
+.panel-g{border-color:#00ff9d30;box-shadow:0 0 12px #00ff9d15, inset 0 0 20px #00ff9d08;}
+.panel-r{border-color:#ff3a5c40;box-shadow:0 0 12px #ff3a5c20, inset 0 0 20px #ff3a5c08;}
+/* 四角取景框角標（HUD 風格），套用在所有面板上 */
+.panel::before{
+  content:'';position:absolute;inset:0;pointer-events:none;
+  background:
+    linear-gradient(to right,#ff2d7899 11px,transparent 11px) top left/16px 2px no-repeat,
+    linear-gradient(to bottom,#ff2d7899 11px,transparent 11px) top left/2px 16px no-repeat,
+    linear-gradient(to left,#ff2d7899 11px,transparent 11px) top right/16px 2px no-repeat,
+    linear-gradient(to bottom,#ff2d7899 11px,transparent 11px) top right/2px 16px no-repeat,
+    linear-gradient(to right,#ff2d7899 11px,transparent 11px) bottom left/16px 2px no-repeat,
+    linear-gradient(to top,#ff2d7899 11px,transparent 11px) bottom left/2px 16px no-repeat,
+    linear-gradient(to left,#ff2d7899 11px,transparent 11px) bottom right/16px 2px no-repeat,
+    linear-gradient(to top,#ff2d7899 11px,transparent 11px) bottom right/2px 16px no-repeat;
+}
+.panel-g::before{
+  background:
+    linear-gradient(to right,#00ff9d99 11px,transparent 11px) top left/16px 2px no-repeat,
+    linear-gradient(to bottom,#00ff9d99 11px,transparent 11px) top left/2px 16px no-repeat,
+    linear-gradient(to left,#00ff9d99 11px,transparent 11px) top right/16px 2px no-repeat,
+    linear-gradient(to bottom,#00ff9d99 11px,transparent 11px) top right/2px 16px no-repeat,
+    linear-gradient(to right,#00ff9d99 11px,transparent 11px) bottom left/16px 2px no-repeat,
+    linear-gradient(to top,#00ff9d99 11px,transparent 11px) bottom left/2px 16px no-repeat,
+    linear-gradient(to left,#00ff9d99 11px,transparent 11px) bottom right/16px 2px no-repeat,
+    linear-gradient(to top,#00ff9d99 11px,transparent 11px) bottom right/2px 16px no-repeat;
+}
+.panel-r::before{
+  background:
+    linear-gradient(to right,#ff3a5c99 11px,transparent 11px) top left/16px 2px no-repeat,
+    linear-gradient(to bottom,#ff3a5c99 11px,transparent 11px) top left/2px 16px no-repeat,
+    linear-gradient(to left,#ff3a5c99 11px,transparent 11px) top right/16px 2px no-repeat,
+    linear-gradient(to bottom,#ff3a5c99 11px,transparent 11px) top right/2px 16px no-repeat,
+    linear-gradient(to right,#ff3a5c99 11px,transparent 11px) bottom left/16px 2px no-repeat,
+    linear-gradient(to top,#ff3a5c99 11px,transparent 11px) bottom left/2px 16px no-repeat,
+    linear-gradient(to left,#ff3a5c99 11px,transparent 11px) bottom right/16px 2px no-repeat,
+    linear-gradient(to top,#ff3a5c99 11px,transparent 11px) bottom right/2px 16px no-repeat;
+}
+.lbl{font-family:'Share Tech Mono';font-size:11px;letter-spacing:2px;color:#555;text-transform:uppercase;}
+.pink{color:#ff2d78;}.green{color:#00ff9d;}.red{color:#ff3a5c;}.yellow{color:#ffd700;}.gray{color:#555;}
+.row1{display:grid;grid-template-columns:1fr 1fr 260px 240px;gap:6px;}
+.row2{display:grid;grid-template-columns:1fr 220px 260px;gap:6px;}
+.live-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff2d78;box-shadow:0 0 6px #ff2d78;animation:pulse 1.5s infinite;}
+.live-dot-g{background:#00ff9d !important;box-shadow:0 0 6px #00ff9d !important;}
+.dot-gray{background:#444 !important;box-shadow:none !important;animation:none !important;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.badge-live{display:inline-flex;align-items:center;gap:4px;background:#ff2d7822;border:1px solid #ff2d78;border-radius:2px;padding:1px 6px;font-size:11px;color:#ff2d78;font-family:'Share Tech Mono';letter-spacing:2px;}
+.badge-conn{background:#00ff9d15 !important;border-color:#00ff9d60 !important;color:#00ff9d !important;}
+.badge-disc{background:#ff3a5c15 !important;border-color:#ff3a5c60 !important;color:#ff3a5c !important;}
+.up-b{background:#00ff9d22;color:#00ff9d;border:1px solid #00ff9d44;border-radius:2px;padding:0 4px;font-size:10px;}
+.dn-b{background:#ff3a5c22;color:#ff3a5c;border:1px solid #ff3a5c44;border-radius:2px;padding:0 4px;font-size:10px;}
+.log-entry{animation:fadeIn .3s ease;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<canvas id="bg-canvas"></canvas>
+<div class="db">
+
+  <!-- TOP BAR -->
+  <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 6px;border-bottom:1px solid #ff2d7840;">
+    <div style="display:flex;align-items:center;gap:10px;font-family:'Share Tech Mono';">
+      <span style="color:#ff2d78;font-size:15.5px;font-weight:700;">◈ GRAVIA</span>
+      <span class="gray">·</span>
+      <span class="gray">POLYMARKET BTC UP/DOWN</span>
+      <span id="conn-badge" class="badge-live badge-disc">
+        <span id="conn-dot" class="live-dot dot-gray"></span>連接中
+      </span>
+      <span style="font-size:11px;color:#444;">Polymarket 公開 API（Gamma + CLOB）</span>
+    </div>
+    <div style="display:flex;gap:20px;align-items:baseline;font-family:'JetBrains Mono';">
+      <span class="gray">交易次數 <span id="tb-trades" style="color:#f0f0f0">0</span></span>
+      <span class="gray">勝率 <span id="tb-winrate" class="green">—</span></span>
+      <span id="tb-time" class="pink" style="font-size:17px;font-weight:700;"></span>
+    </div>
+  </div>
+
+  <!-- STATUS BAR -->
+  <div style="display:flex;gap:14px;padding:0 4px;color:#444;font-family:'Share Tech Mono';font-size:10.5px;letter-spacing:1px;align-items:center;">
+    <span id="status-text" style="color:#555;">等待數據中...</span>
+    <span>BTC 現貨 <span id="btc-price" style="color:#f0f0f0">—</span> <span id="btc-change">—</span></span>
+    <span style="flex:1"></span>
+    <span id="mkt-question" style="color:#888;">—</span>
+    <span>剩餘 <span id="mkt-countdown" class="yellow">—</span></span>
+  </div>
+
+  <!-- BTC CHART -->
+  <div class="panel panel-g" style="padding:6px 8px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+      <div style="display:flex;align-items:baseline;gap:10px;">
+        <span class="gray" style="font-family:'Share Tech Mono';">BTC/USDT 1分鐘 · 即時</span>
+        <span id="chart-price" style="font-size:16px;font-weight:700;">—</span>
+      </div>
+      <span style="font-size:10px;color:#00ff9d;background:#00ff9d0a;padding:1px 5px;border-radius:2px;">真實數據</span>
+    </div>
+    <canvas id="chart-canvas" style="width:100%;height:120px;"></canvas>
+  </div>
+
+  <!-- ROW 1: UP / DOWN / ORDER BOOKS / POSITION -->
+  <div class="row1">
+
+    <!-- UP -->
+    <div class="panel panel-g">
+      <div class="lbl green" style="margin-bottom:4px;">◆ UP</div>
+      <div id="up-price" style="font-size:34px;font-weight:700;letter-spacing:-1px;">—</div>
+      <div style="font-size:10px;color:#444;margin-top:4px;">隱含機率 ≈ <span id="up-prob" class="green">—</span></div>
+    </div>
+
+    <!-- DOWN -->
+    <div class="panel panel-r">
+      <div class="lbl red" style="margin-bottom:4px;">◆ DOWN</div>
+      <div id="down-price" style="font-size:34px;font-weight:700;letter-spacing:-1px;">—</div>
+      <div style="font-size:10px;color:#444;margin-top:4px;">隱含機率 ≈ <span id="down-prob" class="red">—</span></div>
+    </div>
+
+    <!-- ORDER BOOKS -->
+    <div class="panel" style="padding:6px 8px;">
+      <div class="lbl" style="margin-bottom:4px;">◦ 訂單簿 · 真實</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:9.5px;font-family:'JetBrains Mono';">
+        <div>
+          <div class="lbl green" style="font-size:8px;margin-bottom:2px;">UP</div>
+          <div id="up-asks"></div>
+          <div style="border-top:1px solid #2a2a2a;border-bottom:1px solid #2a2a2a;margin:2px 0;"></div>
+          <div id="up-bids"></div>
+        </div>
+        <div>
+          <div class="lbl red" style="font-size:8px;margin-bottom:2px;">DOWN</div>
+          <div id="down-asks"></div>
+          <div style="border-top:1px solid #2a2a2a;border-bottom:1px solid #2a2a2a;margin:2px 0;"></div>
+          <div id="down-bids"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- POSITION -->
+    <div class="panel" style="border-color:#ff2d7880;">
+      <div class="lbl pink" style="margin-bottom:4px;">◈ 模擬倉位</div>
+      <div id="pos-empty" style="font-size:9px;color:#555;">— 觀望中，等待訊號 —</div>
+      <div id="pos-active" style="display:none;">
+        <div style="display:flex;justify-content:space-between;font-size:9.5px;">
+          <span>方向 <span id="pos-side" class="green" style="font-weight:700;">—</span></span>
+          <span id="pos-hedge-badge" class="up-b" style="display:none;">已鎖利</span>
+        </div>
+        <div style="font-size:9px;color:#444;margin-top:3px;">進場價 <span id="pos-entry" style="color:#ccc">—</span></div>
+        <div id="pos-hedge-row" style="font-size:9px;color:#444;display:none;">鎖利價 <span id="pos-hedge-price" style="color:#ccc">—</span></div>
+        <div style="font-size:9px;color:#444;">股數 <span id="pos-shares" style="color:#ccc">—</span></div>
+        <div style="font-size:13px;font-weight:700;margin-top:4px;">預估損益 <span id="pos-pnl">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 2: RECENT TRADES / PNL SUMMARY -->
+  <div class="row2">
+
+    <!-- RECENT TRADES -->
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+        <span class="lbl">◦ 已結算窗口</span>
+        <span id="rt-count" class="gray">0</span>
+      </div>
+      <div id="rt-list" style="font-size:10.5px;display:flex;flex-direction:column;gap:1px;max-height:180px;overflow-y:auto;">
+        <div style="color:#444;padding:4px 0;">尚無交易</div>
+      </div>
+    </div>
+
+    <!-- ASSETS -->
+    <div class="panel">
+      <div class="lbl" style="margin-bottom:6px;">◦ 模擬資產</div>
+      <div class="lbl gray" style="margin-bottom:2px;">資產組合</div>
+      <div id="asset-portfolio" style="font-size:20px;font-weight:700;letter-spacing:-1px;margin-bottom:8px;">$100.00</div>
+      <div class="lbl gray" style="margin-bottom:2px;">現金</div>
+      <div id="asset-cash" style="font-size:16px;font-weight:700;">$100.00</div>
+      <div style="margin-top:8px;border-top:1px solid #1a1a1a;padding-top:6px;font-size:9px;color:#444;">
+        起始 $<span id="asset-start">100</span> · 下一注 ≈ $<span id="asset-stake-hint">3.00</span>（複利）
+      </div>
+      <div style="margin-top:6px;display:flex;gap:4px;align-items:center;">
+        <select id="cfg-stake-pct"
+          style="flex:1;background:#0d0d0d;border:1px solid #444;color:#f0f0f0;font-family:'JetBrains Mono';font-size:10px;padding:2px 4px;border-radius:2px;">
+          <option value="1">1% 資產／注</option>
+          <option value="2">2% 資產／注</option>
+          <option value="3" selected>3% 資產／注</option>
+          <option value="5">5% 資產／注</option>
+          <option value="8">8% 資產／注</option>
+          <option value="10">10% 資產／注</option>
+          <option value="15">15% 資產／注</option>
+          <option value="20">20% 資產／注</option>
+        </select>
+        <button id="cfg-stake-apply" type="button"
+          style="background:#ff2d7822;border:1px solid #ff2d78;color:#ff2d78;font-size:10px;padding:3px 8px;border-radius:2px;cursor:pointer;font-family:'JetBrains Mono';">
+          套用
+        </button>
+      </div>
+      <div style="margin-top:8px;border-top:1px solid #1a1a1a;padding-top:6px;">
+        <div class="lbl" style="margin-bottom:4px;">自訂起始資產（會重置歷史）</div>
+        <div style="display:flex;gap:4px;">
+          <input id="cfg-start-balance" type="number" min="1" step="1" value="100"
+            style="width:70px;background:#0d0d0d;border:1px solid #444;color:#f0f0f0;font-family:'JetBrains Mono';font-size:10px;padding:2px 4px;border-radius:2px;">
+          <button id="cfg-balance-apply" type="button"
+            style="flex:1;background:#ff3a5c22;border:1px solid #ff3a5c;color:#ff3a5c;font-size:10px;padding:3px 8px;border-radius:2px;cursor:pointer;font-family:'JetBrains Mono';">
+            重置
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- PNL SUMMARY -->
+    <div class="panel panel-g">
+      <div class="lbl green" style="margin-bottom:6px;">◦ 損益總計</div>
+      <div id="sum-pnl" style="font-size:26px;font-weight:700;letter-spacing:-1px;">$0.00</div>
+      <div style="display:flex;gap:14px;margin-top:8px;">
+        <div><div class="lbl">交易數</div><div id="sum-trades" style="font-size:14px;">0</div></div>
+        <div><div class="lbl">勝率</div><div id="sum-winrate" class="green" style="font-size:14px;">—</div></div>
+        <div><div class="lbl">結算中</div><div id="sum-pending" class="yellow" style="font-size:14px;">0</div></div>
+      </div>
+      <div style="margin-top:8px;border-top:1px solid #1a1a1a;padding-top:6px;font-size:9px;color:#444;">
+        策略：單邊 ≤ <span id="sum-entry-th">$0.40</span> 先進場，兩邊合計 ≤ <span id="sum-lock-th">$0.90</span> 配對鎖利
+        <br>下注 <span id="sum-stake">3%</span> 資產（複利，模擬不動用真實資金）
+      </div>
+    </div>
+  </div>
+
+  <!-- EXECUTION LOG -->
+  <div class="panel" style="padding:6px 10px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span class="live-dot"></span>
+        <span class="lbl" style="color:#f0f0f0;font-size:12.5px;">執行紀錄 · 即時</span>
+      </div>
+      <div style="display:flex;gap:12px;color:#444;font-size:10.5px;">
+        <span>伺服器 <span style="color:#555">ws://localhost:8766</span></span>
+        <span>更新間隔 <span class="green">3s</span></span>
+      </div>
+    </div>
+    <div id="exec-log" style="display:flex;flex-direction:column;gap:2px;max-height:120px;overflow:hidden;font-size:11px;"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const fmtUSD=n=>'$'+Number(n).toFixed(3);
+  const fmtMoney=n=>(n>=0?'+':'-')+'$'+Math.abs(n).toFixed(2);
+  const fmtDuration=sec=>{
+    sec=Math.max(0,Math.floor(sec));
+    const m=Math.floor(sec/60), s=sec%60;
+    return m+'m'+String(s).padStart(2,'0')+'s';
+  };
+
+  let logEntries=[];
+  let lastSim=null;
+  let lastKlines=[];
+  let remainingSeconds=null;
+  let clockOffsetMs=0;  // 伺服器校正過的真實時間 - 本機時間；本機時鐘可能不準，別直接用 Date.now()
+
+  // ── WebSocket ──
+  const WS='ws://localhost:8766';
+  let ws=null;
+
+  function connect(){
+    addLog('系統','連接 '+WS+'...','#555');
+    try{ ws=new WebSocket(WS); } catch(e){ schedReconnect(); return; }
+
+    ws.onopen=()=>{
+      addLog('連線','WebSocket 已連接，等待即時數據...','#00ff9d');
+      setConn(true);
+    };
+    ws.onmessage=e=>{
+      try{ onFull(JSON.parse(e.data)); }catch(_){}
+    };
+    ws.onerror=()=>{ addLog('錯誤','WebSocket 錯誤','#ff3a5c'); };
+    ws.onclose=()=>{ setConn(false); addLog('斷線','連線中斷，5s 後重連','#ff3a5c'); schedReconnect(); };
+  }
+  function schedReconnect(){ setTimeout(connect,5000); }
+
+  function setConn(ok){
+    const badge=$('conn-badge');
+    if(ok){
+      badge.className='badge-live badge-conn';
+      badge.innerHTML='<span class="live-dot live-dot-g"></span>即時 · 真實數據';
+      $('status-text').textContent='✓ 已接收真實 Polymarket 報價';
+      $('status-text').style.color='#00ff9d';
+    } else {
+      badge.className='badge-live badge-disc';
+      badge.innerHTML='<span class="live-dot dot-gray"></span>已斷線';
+      $('status-text').textContent='× 未連接 — 請先執行：py polymarket_server.py';
+      $('status-text').style.color='#ff3a5c';
+    }
+  }
+
+  function addLog(tag,text,color){
+    logEntries.unshift({tag,text,color,time:new Date().toTimeString().slice(0,8)});
+    if(logEntries.length>14)logEntries.pop();
+    renderLog();
+  }
+  function renderLog(){
+    $('exec-log').innerHTML=logEntries.map(e=>`
+      <div class="log-entry" style="display:grid;grid-template-columns:68px 52px 1fr;gap:8px;padding:2px 0;border-bottom:1px solid #ffffff0c;">
+        <span style="color:#444">${e.time}</span>
+        <span style="color:${e.color};font-weight:700;">${e.tag}</span>
+        <span style="color:#ccc">${e.text}</span></div>`).join('');
+  }
+
+  function onFull(d){
+    if(d.market){
+      $('mkt-question').textContent=d.market.question||'—';
+    }
+    if(typeof d.remainingSeconds==='number'){
+      remainingSeconds=d.remainingSeconds;  // 伺服器已校正過真實時間，直接採用，不跟本機時鐘比對
+    }
+    if(typeof d.serverTimeMs==='number'){
+      clockOffsetMs=d.serverTimeMs-Date.now();
+    }
+    if(typeof d.btcPrice==='number'){
+      $('btc-price').textContent='$'+d.btcPrice.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2});
+      const chg=$('btc-change');
+      if(typeof d.btcChangePct==='number'){
+        chg.textContent=(d.btcChangePct>=0?'▲':'▼')+Math.abs(d.btcChangePct).toFixed(2)+'%（24h）';
+        chg.className=d.btcChangePct>=0?'green':'red';
+      }
+    }
+
+    if(typeof d.upPrice==='number'){
+      $('up-price').textContent=fmtUSD(d.upPrice);
+      $('up-prob').textContent=(d.upPrice*100).toFixed(1)+'%';
+    }
+    if(typeof d.downPrice==='number'){
+      $('down-price').textContent=fmtUSD(d.downPrice);
+      $('down-prob').textContent=(d.downPrice*100).toFixed(1)+'%';
+    }
+
+    if(d.upBook) renderBook('up',d.upBook);
+    if(d.downBook) renderBook('down',d.downBook);
+
+    if(d.klines&&d.klines.length>0){
+      lastKlines=d.klines;
+      drawChart(lastKlines);
+    }
+
+    if(d.sim){
+      lastSim=d.sim;
+      renderPosition(d.sim);
+      renderTrades(d.sim);
+      renderSummary(d.sim);
+      $('sum-entry-th').textContent='$'+d.sim.entryMaxPrice.toFixed(2);
+      $('sum-lock-th').textContent='$'+d.sim.lockMaxSum.toFixed(2);
+      $('sum-stake').textContent=d.sim.stakePct.toFixed(1)+'%';
+      $('tb-trades').textContent=d.sim.totalTrades;
+      $('tb-winrate').textContent=d.sim.totalTrades>0?Math.round(d.sim.wins/d.sim.totalTrades*100)+'%':'—';
+    }
+
+    addLog('數據',`UP=${(d.upPrice*100).toFixed(1)}% DOWN=${(d.downPrice*100).toFixed(1)}%`,'#e8e8e8');
+  }
+
+  function renderBook(side,book){
+    const asks=(book.asks||[]).slice().reverse();
+    const bids=book.bids||[];
+    $(side+'-asks').innerHTML=asks.map(a=>`<div style="display:flex;justify-content:space-between;padding:1px 0;color:#ff3a5c;">
+      <span>${a.price.toFixed(2)}</span><span style="color:#555">${a.size.toFixed(0)}</span></div>`).join('');
+    $(side+'-bids').innerHTML=bids.map(b=>`<div style="display:flex;justify-content:space-between;padding:1px 0;color:#00ff9d;">
+      <span>${b.price.toFixed(2)}</span><span style="color:#555">${b.size.toFixed(0)}</span></div>`).join('');
+  }
+
+  function renderPosition(sim){
+    const empty=$('pos-empty'), active=$('pos-active');
+    const p=sim.position;
+    if(!p){ empty.style.display='block'; active.style.display='none'; return; }
+    empty.style.display='none'; active.style.display='block';
+
+    $('pos-side').textContent=p.side;
+    $('pos-side').className=p.side==='Up'?'green':'red';
+    $('pos-entry').textContent='$'+p.entryPrice.toFixed(3);
+    $('pos-shares').textContent=p.shares.toFixed(2)+' 股'+(typeof p.stakeUsd==='number'?'（下注 $'+p.stakeUsd.toFixed(2)+'）':'');
+
+    const hedgeBadge=$('pos-hedge-badge'), hedgeRow=$('pos-hedge-row');
+    if(p.hedged){
+      hedgeBadge.style.display='inline-block';
+      hedgeRow.style.display='block';
+      $('pos-hedge-price').textContent=p.hedgeSide+' @ $'+p.hedgePrice.toFixed(3);
+      const locked=p.shares*(1-p.entryPrice-p.hedgePrice);
+      const pnlEl=$('pos-pnl');
+      pnlEl.textContent=fmtMoney(locked)+'（已鎖定）';
+      pnlEl.style.color=locked>=0?'#00ff9d':'#ff3a5c';
+    } else {
+      hedgeBadge.style.display='none';
+      hedgeRow.style.display='none';
+      $('pos-pnl').textContent='方向性曝險中，等結算';
+      $('pos-pnl').style.color='#ffd700';
+    }
+  }
+
+  function renderTrades(sim){
+    $('rt-count').textContent=sim.totalTrades;
+    const trades=sim.trades||[];
+    $('rt-list').innerHTML=trades.length?trades.map(t=>{
+      const win=t.pnl>=0;
+      const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
+      const dir=t.hedged?`${t.side}/${t.hedgeSide} 已鎖利`:`${t.side} 方向性`;
+      return `<div style="display:grid;grid-template-columns:60px 130px 60px 1fr 64px;gap:6px;padding:2px 0;border-bottom:1px solid #ffffff08;align-items:center;">
+        <span style="color:#444;font-size:9px;">${dt}</span>
+        <span class="${t.hedged?'up-b':(win?'up-b':'dn-b')}">${dir}</span>
+        <span style="color:#888">結果 ${t.outcome}</span>
+        <span style="color:#555">$${t.entryPrice.toFixed(2)}${t.hedged?' / $'+t.hedgePrice.toFixed(2):''}</span>
+        <span style="color:${win?'#00ff9d':'#ff3a5c'};font-weight:600;text-align:right;">${fmtMoney(t.pnl)}</span>
+      </div>`;
+    }).join(''):'<div style="color:#444;padding:4px 0;">尚無交易</div>';
+  }
+
+  function renderSummary(sim){
+    const el=$('sum-pnl');
+    el.textContent=fmtMoney(sim.totalPnl);
+    el.style.color=sim.totalPnl>=0?'#00ff9d':'#ff3a5c';
+    $('sum-trades').textContent=sim.totalTrades;
+    $('sum-winrate').textContent=sim.totalTrades>0?Math.round(sim.wins/sim.totalTrades*100)+'%':'—';
+    $('sum-pending').textContent=sim.pendingSettlements||0;
+
+    if(typeof sim.portfolio==='number'){
+      const pf=$('asset-portfolio');
+      pf.textContent='$'+sim.portfolio.toFixed(2);
+      pf.style.color=sim.portfolio>=sim.startBalance?'#00ff9d':'#ff3a5c';
+    }
+    if(typeof sim.cash==='number'){
+      $('asset-cash').textContent='$'+sim.cash.toFixed(2);
+    }
+    if(typeof sim.startBalance==='number'){
+      $('asset-start').textContent=sim.startBalance.toFixed(0);
+      const balInput=$('cfg-start-balance');
+      if(document.activeElement!==balInput) balInput.value=Math.round(sim.startBalance);
+    }
+    if(typeof sim.stakeUsd==='number') $('asset-stake-hint').textContent=sim.stakeUsd.toFixed(2);
+
+    const stakeSelect=$('cfg-stake-pct');
+    if(typeof sim.stakePct==='number' && document.activeElement!==stakeSelect){
+      const pct=String(Math.round(sim.stakePct));
+      if([...stakeSelect.options].some(o=>o.value===pct)) stakeSelect.value=pct;
+    }
+  }
+
+  $('cfg-stake-apply').addEventListener('click',()=>{
+    const pct=parseFloat($('cfg-stake-pct').value);
+    if(!ws||ws.readyState!==WebSocket.OPEN){ addLog('系統','尚未連線，無法調整','#ff3a5c'); return; }
+    ws.send(JSON.stringify({type:'configure',stakePct:pct}));
+    addLog('系統',`下注比例已調整為 ${pct}%`,'#ffd700');
+  });
+
+  $('cfg-balance-apply').addEventListener('click',()=>{
+    const bal=parseFloat($('cfg-start-balance').value);
+    if(!bal||bal<=0){ addLog('系統','起始資產需大於 0','#ff3a5c'); return; }
+    if(!ws||ws.readyState!==WebSocket.OPEN){ addLog('系統','尚未連線，無法重置','#ff3a5c'); return; }
+    ws.send(JSON.stringify({type:'configure',startBalance:bal}));
+    addLog('系統',`已重置：起始資產 $${bal}`,'#ffd700');
+  });
+
+  setInterval(()=>{
+    $('tb-time').textContent=new Date(Date.now()+clockOffsetMs).toTimeString().slice(0,8);
+    if(remainingSeconds!==null){
+      remainingSeconds=Math.max(0,remainingSeconds-1);  // 本地每秒往下數，不重新比對時鐘
+      $('mkt-countdown').textContent=fmtDuration(remainingSeconds);
+    }
+  },1000);
+
+  // ── CANVAS 共用工具 ──
+  function canvasSetup(canvas,H){
+    const W=canvas.parentElement.getBoundingClientRect().width||600;
+    const dpr=window.devicePixelRatio||1;
+    canvas.width=W*dpr; canvas.height=H*dpr;
+    canvas.style.width=W+'px'; canvas.style.height=H+'px';
+    const ctx=canvas.getContext('2d');
+    ctx.scale(dpr,dpr);
+    return {ctx,W,H};
+  }
+  // ── BTC K 線圖（真實數據）──
+  function drawChart(klines){
+    const {ctx,W,H}=canvasSetup($('chart-canvas'),120);
+    ctx.clearRect(0,0,W,H);
+    const all=klines.flatMap(k=>[k.h,k.l]);
+    const lo=Math.min(...all)-5, hi=Math.max(...all)+5;
+    const sy=p=>H-((p-lo)/(hi-lo))*H*.87-H*.04;
+    const cw=Math.floor(W/klines.length);
+    ctx.strokeStyle='#ffffff08'; ctx.lineWidth=.5;
+    for(let i=0;i<4;i++){const y=H/4*i+8;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+    klines.forEach((k,i)=>{
+      const x=i*cw+1,g=k.c>=k.o,col=g?'#00ff9d':'#ff3a5c';
+      ctx.strokeStyle=col+'99'; ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(x+cw/2-1,sy(k.h));ctx.lineTo(x+cw/2-1,sy(k.l));ctx.stroke();
+      ctx.fillStyle=col;
+      const by=Math.min(sy(k.o),sy(k.c)),bh=Math.max(1.2,Math.abs(sy(k.c)-sy(k.o)));
+      ctx.fillRect(x,by,Math.max(1,cw-2),bh);
+    });
+    const lk=klines[klines.length-1];
+    if(lk){
+      const cy=sy(lk.c);
+      ctx.setLineDash([3,3]);ctx.strokeStyle='#ff2d78';ctx.lineWidth=1;
+      ctx.beginPath();ctx.moveTo(0,cy);ctx.lineTo(W,cy);ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle='#ff2d78';ctx.font='bold 11px JetBrains Mono';
+      ctx.fillText('$'+lk.c.toFixed(2),W-80,cy-3);
+      $('chart-price').textContent='$'+lk.c.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2});
+      const fk=klines[0];
+      const chg=((lk.c-fk.o)/fk.o*100);
+      $('chart-price').style.color=chg>=0?'#00ff9d':'#ff3a5c';
+    }
+    const sx=((Date.now()/15)%W);
+    const g=ctx.createLinearGradient(sx-50,0,sx+5,0);
+    g.addColorStop(0,'transparent');g.addColorStop(1,'#ff2d7822');
+    ctx.fillStyle=g;ctx.fillRect(sx-50,0,55,H);
+  }
+
+  // ── 全螢幕科技背景：網格 + 漂浮節點 + 掃描光帶 ──
+  (function bgFx(){
+    // 輕量版背景：節點數少、不用漸層、不用全螢幕光帶，用 setInterval 降頻更新（不需要 60fps）
+    const canvas=$('bg-canvas');
+    const ctx=canvas.getContext('2d');
+    const rnd=(lo,hi)=>lo+Math.random()*(hi-lo);
+    let W=0,H=0,dpr=window.devicePixelRatio||1;
+
+    function resize(){
+      W=window.innerWidth; H=window.innerHeight;
+      canvas.width=W*dpr; canvas.height=H*dpr;
+      canvas.style.width=W+'px'; canvas.style.height=H+'px';
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+    }
+    window.addEventListener('resize',resize);
+    resize();
+
+    let nodes=Array.from({length:7},()=>({
+      x:rnd(0,1),y:rnd(0,1),
+      vx:rnd(-.0004,.0004),vy:rnd(-.0004,.0004),
+      r:rnd(1.5,3),
+      color:Math.random()>.5?'#ff2d78':'#00ff9d',
+    }));
+
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+
+      const grid=34;
+      ctx.strokeStyle='#ffffff05';ctx.lineWidth=1;
+      for(let x=0;x<W;x+=grid){ ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke(); }
+      for(let y=0;y<H;y+=grid){ ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke(); }
+
+      ctx.lineWidth=.5;
+      for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++){
+        const a=nodes[i],b=nodes[j];
+        const dx=(a.x-b.x)*W,dy=(a.y-b.y)*H,d=Math.sqrt(dx*dx+dy*dy);
+        if(d<180){
+          ctx.strokeStyle=`rgba(255,45,120,${Math.max(0,(1-d/180)*.1)})`;
+          ctx.beginPath();ctx.moveTo(a.x*W,a.y*H);ctx.lineTo(b.x*W,b.y*H);ctx.stroke();
+        }
+      }
+      nodes.forEach(n=>{
+        ctx.fillStyle=n.color+'88';
+        ctx.beginPath();ctx.arc(n.x*W,n.y*H,n.r,0,Math.PI*2);ctx.fill();
+      });
+      nodes=nodes.map(n=>{
+        let{x,y,vx,vy}=n;
+        x+=vx;y+=vy;
+        if(x<0||x>1)vx*=-1; if(y<0||y>1)vy*=-1;
+        return{...n,x:Math.max(0,Math.min(1,x)),y:Math.max(0,Math.min(1,y)),vx,vy};
+      });
+    }
+    setInterval(draw,90);  // ~11fps，裝飾用途不需要更高
+  })();
+
+  renderLog();
+  connect();
+})();
+</script>
+</body>
+</html>
