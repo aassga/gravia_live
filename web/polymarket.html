@@ -238,6 +238,12 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     </div>
   </div>
 
+  <!-- A/B 門檻測試 -->
+  <div class="panel">
+    <div class="lbl" style="margin-bottom:6px;">◦ A/B 門檻測試 · 同一份報價，不同門檻各自記帳</div>
+    <div id="ab-table" style="font-size:11px;"></div>
+  </div>
+
   <!-- EXECUTION LOG -->
   <div class="panel" style="padding:6px 10px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
@@ -367,6 +373,8 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       $('tb-winrate').textContent=d.sim.totalTrades>0?Math.round(d.sim.wins/d.sim.totalTrades*100)+'%':'—';
     }
 
+    if(d.abVariants) renderAbLeaderboard(d.abVariants);
+
     addLog('數據',`UP=${(d.upPrice*100).toFixed(1)}% DOWN=${(d.downPrice*100).toFixed(1)}%`,'#e8e8e8');
   }
 
@@ -452,6 +460,29 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       const pct=String(Math.round(sim.stakePct));
       if([...stakeSelect.options].some(o=>o.value===pct)) stakeSelect.value=pct;
     }
+  }
+
+  function renderAbLeaderboard(variants){
+    const rows=variants.slice().sort((a,b)=>b.totalPnl-a.totalPnl);
+    const best=rows.length?rows[0].id:null;
+    $('ab-table').innerHTML=`
+      <div style="display:grid;grid-template-columns:130px 90px 70px 60px 60px 1fr;gap:8px;padding:2px 0;color:#444;font-size:9.5px;">
+        <span>組別</span><span>損益</span><span>交易數</span><span>勝率</span><span>部位</span><span>資產組合</span>
+      </div>
+      ${rows.map(v=>{
+        const win=v.totalPnl>0, lose=v.totalPnl<0;
+        const color=win?'#00ff9d':(lose?'#ff3a5c':'#888');
+        const isBest=v.id===best && v.totalTrades>0;
+        return `<div style="display:grid;grid-template-columns:130px 90px 70px 60px 60px 1fr;gap:8px;padding:4px 0;align-items:center;border-top:1px solid #ffffff0c;${isBest?'background:#00ff9d0d;':''}">
+          <span style="color:${isBest?'#00ff9d':'#ccc'};">${isBest?'★ ':''}${v.label}</span>
+          <span style="color:${color};font-weight:700;">${fmtMoney(v.totalPnl)}</span>
+          <span style="color:#888;">${v.totalTrades}</span>
+          <span style="color:#888;">${v.winRate!=null?Math.round(v.winRate)+'%':'—'}</span>
+          <span style="color:${v.hasPosition?'#ffd700':'#444'};">${v.hasPosition?'進場中':'空手'}</span>
+          <span style="color:#888;">$${v.portfolio.toFixed(2)}</span>
+        </div>`;
+      }).join('')}
+    `;
   }
 
   $('cfg-stake-apply').addEventListener('click',()=>{

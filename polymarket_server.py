@@ -36,13 +36,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("polymarket")
 
 # ── 模擬策略設定（紙上交易）────────────────────────────────────────────────
-SIM_ENTRY_MAX_PRICE   = 0.40   # 只有價格 <= 這個門檻才考慮先進場一邊
-SIM_LOCK_MAX_SUM      = 0.90   # 兩邊合計成本 <= 這個門檻，就配對鎖利（保證賺 (1-合計) 每股）
+SIM_ENTRY_MAX_PRICE   = 0.40   # 主要策略：只有價格 <= 這個門檻才考慮先進場一邊
+SIM_LOCK_MAX_SUM      = 0.90   # 主要策略：兩邊合計成本 <= 這個門檻，就配對鎖利（保證賺 (1-合計) 每股）
 SIM_DEFAULT_BALANCE   = 100.0  # 起始虛擬總資產預設值（美元），可從前端輸入自訂（會重置模擬）
 SIM_MIN_BALANCE       = 1.0
 SIM_DEFAULT_STAKE_PCT = 3.0    # 每注預設佔目前資產組合的百分比（複利：資產越大，單注跟著變大）
 SIM_MIN_STAKE_PCT     = 0.5
 SIM_MAX_STAKE_PCT     = 25.0
+
+# ── A/B 門檻測試：同時跑好幾組不同的進場/鎖利門檻，吃同一份真實報價，
+#    彼此獨立記帳，方便直接比較哪組門檻的實際表現比較好（而不是憑感覺猜）。
+#    "main" 這組固定對應 SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM，
+#    也是既有前端面板（部位卡片、成交紀錄列表）顯示的那一組，維持向後相容。
+AB_VARIANTS = [
+    {"id": "conservative", "label": "保守 0.30 / 0.85", "entryMaxPrice": 0.30, "lockMaxSum": 0.85},
+    {"id": "main",         "label": "目前 0.40 / 0.90", "entryMaxPrice": SIM_ENTRY_MAX_PRICE, "lockMaxSum": SIM_LOCK_MAX_SUM},
+    {"id": "loose",        "label": "寬鬆 0.45 / 0.95", "entryMaxPrice": 0.45, "lockMaxSum": 0.95},
+]
+AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
 
 # ── 全域狀態 ───────────────────────────────────────────────────────────────
 state = {
@@ -58,31 +69,39 @@ state = {
     "connected":     False,
 }
 
-sim_state = {
-    "position":           None,  # {windowSlug, side, entryPrice, shares, entryTime, hedged, hedgeSide, hedgePrice, hedgeShares}
-    "pendingSettlements": [],    # 已換窗口、結果還沒查到的舊倉位，每輪重試直到查到結果
-    "trades":             [],    # 已結算紀錄，最新在前，最多保留 50 筆
-    "totalPnl":           0.0,
-    "totalTrades":        0,
-    "wins":                0,
-    "stakePct":           SIM_DEFAULT_STAKE_PCT,  # 每注佔目前資產組合的百分比，可從前端下拉選單調整（即時生效，不重置）
-    "startBalance":       SIM_DEFAULT_BALANCE,    # 起始虛擬資產，可從前端輸入自訂（會重置模擬）
+def _new_variant_state() -> dict:
+    return {
+        "position":           None,  # {windowSlug, side, entryPrice, shares, entryTime, hedged, hedgeSide, hedgePrice, hedgeShares}
+        "pendingSettlements": [],    # 已換窗口、結果還沒查到的舊倉位，每輪重試直到查到結果
+        "trades":             [],    # 已結算紀錄，最新在前，最多保留 50 筆
+        "totalPnl":           0.0,
+        "totalTrades":        0,
+        "wins":                0,
+    }
+
+ab_states = {v["id"]: _new_variant_state() for v in AB_VARIANTS}
+
+# 下注比例／起始資產是所有 A/B 組共用的設定，刻意保持一致，
+# 這樣比較結果的差異只來自「進場/鎖利門檻」本身，不會被其他變因干擾。
+shared_config = {
+    "stakePct":     SIM_DEFAULT_STAKE_PCT,
+    "startBalance": SIM_DEFAULT_BALANCE,
 }
 
+sim_state = ab_states["main"]  # 向後相容：既有程式碼引用 sim_state 的地方，等同於 "main" 這組
+
 def set_stake_pct(pct: float) -> None:
-    sim_state["stakePct"] = max(SIM_MIN_STAKE_PCT, min(SIM_MAX_STAKE_PCT, float(pct)))
-    log.info(f"[SIM] 下注比例調整為 {sim_state['stakePct']:.1f}%（複利，隨資產組合變動）")
+    shared_config["stakePct"] = max(SIM_MIN_STAKE_PCT, min(SIM_MAX_STAKE_PCT, float(pct)))
+    log.info(f"[SIM] 下注比例調整為 {shared_config['stakePct']:.1f}%（複利，隨資產組合變動，套用到全部 A/B 組）")
 
 def reset_with_balance(start_balance: float) -> None:
-    """自訂起始資產 = 重新開始：清空所有持倉與歷史紀錄，下注比例維持原本設定不變。"""
-    sim_state["startBalance"] = max(SIM_MIN_BALANCE, float(start_balance))
-    sim_state["position"] = None
-    sim_state["pendingSettlements"] = []
-    sim_state["trades"] = []
-    sim_state["totalPnl"] = 0.0
-    sim_state["totalTrades"] = 0
-    sim_state["wins"] = 0
-    log.info(f"[SIM] 重置：起始資產=${sim_state['startBalance']:,.2f}")
+    """自訂起始資產 = 重新開始：清空所有 A/B 組的持倉與歷史紀錄，下注比例維持原本設定不變。"""
+    shared_config["startBalance"] = max(SIM_MIN_BALANCE, float(start_balance))
+    for vid in ab_states:
+        ab_states[vid] = _new_variant_state()
+    global sim_state
+    sim_state = ab_states["main"]
+    log.info(f"[SIM] 重置：起始資產=${shared_config['startBalance']:,.2f}（全部 A/B 組一起重置）")
 
 CLIENTS: set = set()
 
@@ -197,12 +216,13 @@ async def fetch_outcome(session: aiohttp.ClientSession, slug: str) -> str | None
 
 # ── 模擬自動交易（紙上交易，不動用真實資金）───────────────────────────────────
 
-def enter_position(slug: str, side: str, price: float) -> None:
-    # 複利：下注金額 = 當下資產組合 × 下注比例，資產越大下一注也跟著變大
-    _, portfolio = compute_cash_and_portfolio()
-    stake_usd = portfolio * (sim_state["stakePct"] / 100)
+def enter_position(variant_id: str, slug: str, side: str, price: float) -> None:
+    st = ab_states[variant_id]
+    # 複利：下注金額 = 當下資產組合 × 下注比例，資產越大下一注也跟著變大（全部 A/B 組共用同一個比例）
+    _, portfolio = compute_cash_and_portfolio(variant_id)
+    stake_usd = portfolio * (shared_config["stakePct"] / 100)
     shares = stake_usd / price
-    sim_state["position"] = {
+    st["position"] = {
         "windowSlug": slug,
         "side":         side,
         "entryPrice":   price,
@@ -214,28 +234,29 @@ def enter_position(slug: str, side: str, price: float) -> None:
         "hedgePrice":   None,
         "hedgeShares":  0.0,
     }
-    log.info(f"[SIM] 進場 {side} @ ${price:.3f}　下注=${stake_usd:.2f}（{sim_state['stakePct']:.1f}%）股數={shares:.2f}")
+    log.info(f"[SIM:{variant_id}] 進場 {side} @ ${price:.3f}　下注=${stake_usd:.2f}（{shared_config['stakePct']:.1f}%）股數={shares:.2f}")
 
-def hedge_position(side: str, price: float) -> None:
-    pos = sim_state["position"]
+def hedge_position(variant_id: str, side: str, price: float) -> None:
+    pos = ab_states[variant_id]["position"]
     shares = pos["shares"]  # 配對相同股數，鎖住保證利潤（不管結果是哪邊贏都拿一樣多）
     pos["hedged"] = True
     pos["hedgeSide"] = side
     pos["hedgePrice"] = price
     pos["hedgeShares"] = shares
     locked = shares * (1 - pos["entryPrice"] - price)
-    log.info(f"[SIM] 配對鎖利 {side} @ ${price:.3f}　鎖定利潤=${locked:+.2f}")
+    log.info(f"[SIM:{variant_id}] 配對鎖利 {side} @ ${price:.3f}　鎖定利潤=${locked:+.2f}")
 
-def simulate_trading(slug: str, up_price: float, down_price: float) -> None:
+def simulate_trading(variant_id: str, slug: str, up_price: float, down_price: float) -> None:
     if up_price is None or down_price is None or up_price <= 0 or down_price <= 0:
         return
-    pos = sim_state["position"]
+    variant = AB_VARIANT_BY_ID[variant_id]
+    pos = ab_states[variant_id]["position"]
 
     if pos is None:
-        if up_price <= SIM_ENTRY_MAX_PRICE:
-            enter_position(slug, "Up", up_price)
-        elif down_price <= SIM_ENTRY_MAX_PRICE:
-            enter_position(slug, "Down", down_price)
+        if up_price <= variant["entryMaxPrice"]:
+            enter_position(variant_id, slug, "Up", up_price)
+        elif down_price <= variant["entryMaxPrice"]:
+            enter_position(variant_id, slug, "Down", down_price)
         return
 
     if pos["hedged"] or pos["windowSlug"] != slug:
@@ -243,17 +264,18 @@ def simulate_trading(slug: str, up_price: float, down_price: float) -> None:
 
     other_side  = "Down" if pos["side"] == "Up" else "Up"
     other_price = down_price if other_side == "Down" else up_price
-    if pos["entryPrice"] + other_price <= SIM_LOCK_MAX_SUM:
-        hedge_position(other_side, other_price)
+    if pos["entryPrice"] + other_price <= variant["lockMaxSum"]:
+        hedge_position(variant_id, other_side, other_price)
 
-def compute_cash_and_portfolio() -> tuple[float, float]:
+def compute_cash_and_portfolio(variant_id: str) -> tuple[float, float]:
     """比照 Polymarket 官方的『現金／資產組合』算法：
     現金 = 起始資產 + 已實現損益 - 目前壓在倉位裡的成本（買股票的錢從現金裡扣掉）
     資產組合 = 現金 + 目前持有部位的即時市值（用當下真實報價算，還沒結算前會隨報價波動）
     """
+    st = ab_states[variant_id]
     staked = 0.0
     market_value = 0.0
-    pos = sim_state["position"]
+    pos = st["position"]
     if pos:
         staked = pos["shares"] * pos["entryPrice"]
         up_price = state["upPrice"] or 0.0
@@ -263,11 +285,12 @@ def compute_cash_and_portfolio() -> tuple[float, float]:
             staked += pos["hedgeShares"] * pos["hedgePrice"]
             market_value += pos["hedgeShares"] * (up_price if pos["hedgeSide"] == "Up" else down_price)
 
-    cash = sim_state["startBalance"] + sim_state["totalPnl"] - staked
+    cash = shared_config["startBalance"] + st["totalPnl"] - staked
     portfolio = cash + market_value
     return cash, portfolio
 
-def record_trade(pos: dict, pnl: float, outcome: str) -> None:
+def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
+    st = ab_states[variant_id]
     trade = {
         "windowSlug":  pos["windowSlug"],
         "side":        pos["side"],
@@ -282,12 +305,12 @@ def record_trade(pos: dict, pnl: float, outcome: str) -> None:
         "entryTime":   pos["entryTime"],
         "exitTime":    time.time(),
     }
-    sim_state["trades"].insert(0, trade)
-    sim_state["trades"] = sim_state["trades"][:50]
-    sim_state["totalPnl"] += pnl
-    sim_state["totalTrades"] += 1
+    st["trades"].insert(0, trade)
+    st["trades"] = st["trades"][:50]
+    st["totalPnl"] += pnl
+    st["totalTrades"] += 1
     if pnl > 0:
-        sim_state["wins"] += 1
+        st["wins"] += 1
 
 def _settle_pnl(pos: dict, outcome: str) -> float:
     if pos["hedged"]:
@@ -300,27 +323,31 @@ async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:
     """窗口結束當下，Polymarket 的結算（Chainlink 資料源）通常還沒跑完，查不到結果。
     查不到不代表沒發生，是還沒好——把它放進待結算佇列，之後每一輪都重試，
     直到真的查到結果為止，不會因為第一次查不到就把這筆損益憑空丟掉。
+    對每一組 A/B 都各自重試，互不影響。
     """
-    if not sim_state["pendingSettlements"]:
-        return
-    still_pending = []
-    for pos in sim_state["pendingSettlements"]:
-        outcome = await fetch_outcome(session, pos["windowSlug"])
-        if outcome is None:
-            still_pending.append(pos)
+    for variant_id, st in ab_states.items():
+        if not st["pendingSettlements"]:
             continue
-        pnl = _settle_pnl(pos, outcome)
-        record_trade(pos, pnl, outcome)
-        log.info(f"[SIM] 結算 {pos['windowSlug']} 結果={outcome} "
-                  f"{'(已鎖利)' if pos['hedged'] else '(方向性)'} PnL=${pnl:+.2f}")
-    sim_state["pendingSettlements"] = still_pending
+        still_pending = []
+        for pos in st["pendingSettlements"]:
+            outcome = await fetch_outcome(session, pos["windowSlug"])
+            if outcome is None:
+                still_pending.append(pos)
+                continue
+            pnl = _settle_pnl(pos, outcome)
+            record_trade(variant_id, pos, pnl, outcome)
+            log.info(f"[SIM:{variant_id}] 結算 {pos['windowSlug']} 結果={outcome} "
+                      f"{'(已鎖利)' if pos['hedged'] else '(方向性)'} PnL=${pnl:+.2f}")
+        st["pendingSettlements"] = still_pending
 
 def queue_settlement(slug: str) -> None:
-    """窗口換了：如果上一個窗口還有沒結算的倉位，丟進待結算佇列，換一個乾淨的位置開始追蹤新窗口。"""
-    pos = sim_state["position"]
-    if pos is not None and pos["windowSlug"] == slug:
-        sim_state["pendingSettlements"].append(pos)
-    sim_state["position"] = None
+    """窗口換了：每一組 A/B 如果上一個窗口還有沒結算的倉位，各自丟進自己的待結算佇列，
+    換一個乾淨的位置開始追蹤新窗口。"""
+    for st in ab_states.values():
+        pos = st["position"]
+        if pos is not None and pos["windowSlug"] == slug:
+            st["pendingSettlements"].append(pos)
+        st["position"] = None
 
 # ── 背景抓取任務 ───────────────────────────────────────────────────────────
 
@@ -363,7 +390,9 @@ async def data_fetcher():
                         if not isinstance(klines, Exception) and klines:
                             state["klines"] = klines
 
-                        simulate_trading(state["market"]["slug"], state["upPrice"], state["downPrice"])
+                        slug = state["market"]["slug"]
+                        for variant_id in ab_states:
+                            simulate_trading(variant_id, slug, state["upPrice"], state["downPrice"])
 
                 await retry_pending_settlements(session)  # 每輪都重試還沒結算成功的舊窗口
 
@@ -377,12 +406,34 @@ async def data_fetcher():
 
 # ── WebSocket 廣播 ─────────────────────────────────────────────────────────
 
+def build_ab_leaderboard() -> list:
+    """每組 A/B 門檻的即時戰績，前端拿來畫比較表，一眼看出目前哪組門檻表現最好。"""
+    rows = []
+    for v in AB_VARIANTS:
+        st = ab_states[v["id"]]
+        cash, portfolio = compute_cash_and_portfolio(v["id"])
+        win_rate = (st["wins"] / st["totalTrades"] * 100) if st["totalTrades"] else None
+        rows.append({
+            "id":            v["id"],
+            "label":         v["label"],
+            "entryMaxPrice": v["entryMaxPrice"],
+            "lockMaxSum":    v["lockMaxSum"],
+            "totalPnl":      st["totalPnl"],
+            "totalTrades":   st["totalTrades"],
+            "wins":          st["wins"],
+            "winRate":       win_rate,
+            "cash":          cash,
+            "portfolio":     portfolio,
+            "hasPosition":   st["position"] is not None,
+        })
+    return rows
+
 def build_full_payload() -> str:
     m = state["market"] or {}
     remaining_seconds = None
     if state["windowEndsAt"] is not None:
         remaining_seconds = max(0.0, state["windowEndsAt"] / 1000 - real_now())
-    cash, portfolio = compute_cash_and_portfolio()
+    cash, portfolio = compute_cash_and_portfolio("main")
     return json.dumps({
         "type": "full",
         "market": {
@@ -408,17 +459,18 @@ def build_full_payload() -> str:
             "totalPnl":    sim_state["totalPnl"],
             "totalTrades": sim_state["totalTrades"],
             "wins":        sim_state["wins"],
-            "startBalance": sim_state["startBalance"],
+            "startBalance": shared_config["startBalance"],
             "minBalance":   SIM_MIN_BALANCE,
             "cash":         cash,
             "portfolio":    portfolio,
             "entryMaxPrice": SIM_ENTRY_MAX_PRICE,
             "lockMaxSum":    SIM_LOCK_MAX_SUM,
-            "stakePct":      sim_state["stakePct"],
-            "stakeUsd":      portfolio * (sim_state["stakePct"] / 100),  # 下一注預估金額（複利，隨資產組合變動）
+            "stakePct":      shared_config["stakePct"],
+            "stakeUsd":      portfolio * (shared_config["stakePct"] / 100),  # 下一注預估金額（複利，隨資產組合變動）
             "minStakePct":   SIM_MIN_STAKE_PCT,
             "maxStakePct":   SIM_MAX_STAKE_PCT,
         },
+        "abVariants": build_ab_leaderboard(),
     })
 
 async def broadcast(payload: str) -> None:
