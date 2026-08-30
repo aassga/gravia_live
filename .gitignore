@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# 私鑰/機密設定，絕對不要提交
+.env
+
+# 真實損益頁面的本機執行狀態（起始基準金額），不是機密，但屬於執行期產生的資料
+polymarket_live_baseline.json

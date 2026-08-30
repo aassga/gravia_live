@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polymarket · 真實損益（唯讀）</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💰</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:#0a0705;color:#f0ece5;font-family:'JetBrains Mono',monospace;font-size:12.5px;min-height:100vh;padding:16px;}
+  .mono-lbl{font-family:'Share Tech Mono';font-size:11px;letter-spacing:2px;color:#7a6a55;text-transform:uppercase;}
+
+  .warn-banner{
+    background:linear-gradient(90deg,#3a1a0022,#5a1a0033);
+    border:1px solid #ff8a00;
+    border-radius:4px;
+    padding:10px 14px;
+    margin-bottom:14px;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    color:#ffb020;
+    font-family:'Share Tech Mono';
+    letter-spacing:1px;
+  }
+  .warn-banner b{color:#ff8a00;}
+
+  .topbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;}
+  .brand{display:flex;align-items:center;gap:10px;font-family:'Share Tech Mono';font-size:15px;letter-spacing:2px;color:#ffb020;}
+  .badge{display:inline-flex;align-items:center;gap:4px;border-radius:2px;padding:2px 8px;font-size:11px;font-family:'Share Tech Mono';letter-spacing:2px;}
+  .badge-live{background:#ff8a0022;border:1px solid #ff8a00;color:#ff8a00;}
+  .badge-off{background:#55555522;border:1px solid #555;color:#888;}
+  .badge-dot{width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;animation:pulse 1.6s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  @media(max-width:820px){.grid{grid-template-columns:1fr;}}
+
+  .panel{
+    position:relative;
+    background:#120d09cc;
+    border:1px solid #3a2a18;
+    border-radius:4px;
+    padding:14px;
+    margin-bottom:12px;
+  }
+  .panel::before{
+    content:"";position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;
+    background-image:
+      linear-gradient(#ff8a00 1px,transparent 1px),linear-gradient(90deg,#ff8a00 1px,transparent 1px),
+      linear-gradient(#ff8a00 1px,transparent 1px),linear-gradient(90deg,#ff8a00 1px,transparent 1px);
+    background-size:10px 10px,10px 10px,10px 10px,10px 10px;
+    background-position:0 0,0 0,100% 100%,100% 100%;
+    background-repeat:no-repeat;
+    -webkit-background-clip:content-box;
+    opacity:.35;
+    width:10px;height:10px;
+  }
+  .panel-title{font-family:'Share Tech Mono';font-size:11px;letter-spacing:2px;color:#ffb020;text-transform:uppercase;margin-bottom:10px;}
+
+  .big-num{font-size:30px;font-weight:700;color:#ffb020;}
+  .sub-num{font-size:11px;color:#7a6a55;margin-top:4px;}
+
+  table{width:100%;border-collapse:collapse;font-size:11px;}
+  th{text-align:left;color:#7a6a55;font-family:'Share Tech Mono';font-weight:400;letter-spacing:1px;padding:4px 6px;border-bottom:1px solid #3a2a18;}
+  td{padding:5px 6px;border-bottom:1px solid #1f1710;}
+  tr:last-child td{border-bottom:none;}
+  .empty-row{color:#555;text-align:center;padding:14px;}
+
+  .side-buy{color:#3ddc84;}
+  .side-sell{color:#ff3a5c;}
+
+  .addr{color:#7a6a55;font-size:10.5px;word-break:break-all;}
+  .footer-note{margin-top:14px;color:#4a3f30;font-size:10.5px;font-family:'Share Tech Mono';letter-spacing:1px;text-align:center;}
+</style>
+</head>
+<body>
+
+  <div class="warn-banner">
+    ⚠ <b>真實資金頁面</b> —— 這裡顯示的是你 Polymarket 帳戶的真實餘額與真實成交紀錄,不是模擬數據。純唯讀,本頁不會下單。
+  </div>
+
+  <div class="topbar">
+    <div class="brand">◆ POLYMARKET · 真實損益</div>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <span id="conn-badge" class="badge badge-off"><span class="badge-dot"></span> 連線中...</span>
+      <span id="live-badge" class="badge badge-off">下單開關：—</span>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="panel-title">真實餘額（USDC）</div>
+      <div class="big-num" id="balance">$—</div>
+      <div class="sub-num" id="fetched-at">尚未取得資料</div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">總收益（現金基礎，不含未平倉部位）</div>
+      <div class="big-num" id="total-pnl">$—</div>
+      <div class="sub-num" id="baseline-note">起始基準：—</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">帳戶地址（唯讀顯示）</div>
+    <div class="addr" id="funder-addr">—</div>
+    <div class="sub-num" id="orders-summary">掛單 — 筆 · 成交 — 筆</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">真實掛單（open orders）</div>
+    <table>
+      <thead><tr><th>時間</th><th>方向</th><th>價格</th><th>數量</th><th>Token</th></tr></thead>
+      <tbody id="orders-body"><tr><td colspan="5" class="empty-row">目前沒有掛單</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">真實成交紀錄</div>
+    <table>
+      <thead><tr><th>時間</th><th>方向</th><th>價格</th><th>數量</th><th>Token</th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="5" class="empty-row">目前沒有成交紀錄</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="footer-note">ws://localhost:8767 · polymarket_live_status_server.py · 純唯讀，不執行任何下單動作</div>
+
+<script>
+let ws = null;
+
+function fmtTime(sec){
+  if(!sec) return '—';
+  const d = new Date(sec * 1000);
+  return d.toLocaleTimeString('zh-TW', {hour12:false});
+}
+
+function shortToken(id){
+  if(!id) return '—';
+  const s = String(id);
+  return s.length > 12 ? s.slice(0,6) + '…' + s.slice(-4) : s;
+}
+
+function sideSpan(side){
+  const s = (side || '').toUpperCase();
+  const cls = s === 'BUY' ? 'side-buy' : 'side-sell';
+  return `<span class="${cls}">${s || '—'}</span>`;
+}
+
+function renderOrders(orders){
+  const body = document.getElementById('orders-body');
+  if(!orders || orders.length === 0){
+    body.innerHTML = '<tr><td colspan="5" class="empty-row">目前沒有掛單</td></tr>';
+    return;
+  }
+  body.innerHTML = orders.map(o => `
+    <tr>
+      <td>${fmtTime(o.created_at || o.timestamp)}</td>
+      <td>${sideSpan(o.side)}</td>
+      <td>$${Number(o.price ?? 0).toFixed(3)}</td>
+      <td>${Number(o.original_size ?? o.size ?? 0).toFixed(2)}</td>
+      <td class="addr">${shortToken(o.asset_id || o.token_id)}</td>
+    </tr>
+  `).join('');
+}
+
+function renderTrades(trades){
+  const body = document.getElementById('trades-body');
+  if(!trades || trades.length === 0){
+    body.innerHTML = '<tr><td colspan="5" class="empty-row">目前沒有成交紀錄</td></tr>';
+    return;
+  }
+  body.innerHTML = trades.map(t => `
+    <tr>
+      <td>${fmtTime(t.match_time || t.timestamp)}</td>
+      <td>${sideSpan(t.side)}</td>
+      <td>$${Number(t.price ?? 0).toFixed(3)}</td>
+      <td>${Number(t.size ?? 0).toFixed(2)}</td>
+      <td class="addr">${shortToken(t.asset_id || t.token_id)}</td>
+    </tr>
+  `).join('');
+}
+
+function onData(d){
+  const connBadge = document.getElementById('conn-badge');
+  const liveBadge = document.getElementById('live-badge');
+
+  if(d.connected){
+    connBadge.className = 'badge badge-live';
+    connBadge.innerHTML = '<span class="badge-dot"></span> 已連線 · 真實資料';
+  } else {
+    connBadge.className = 'badge badge-off';
+    connBadge.innerHTML = '<span class="badge-dot"></span> 查詢失敗' + (d.error ? '：' + d.error : '');
+  }
+
+  if(d.liveTradingEnabled){
+    liveBadge.className = 'badge badge-live';
+    liveBadge.textContent = '下單開關：已開啟（LIVE_TRADING=true）';
+  } else {
+    liveBadge.className = 'badge badge-off';
+    liveBadge.textContent = '下單開關：關閉（dry-run）';
+  }
+
+  if(typeof d.balanceUsdc === 'number'){
+    document.getElementById('balance').textContent = '$' + d.balanceUsdc.toFixed(2);
+  }
+  document.getElementById('fetched-at').textContent = d.fetchedAt ? ('最後更新：' + fmtTime(d.fetchedAt)) : '尚未取得資料';
+
+  if(typeof d.totalPnl === 'number'){
+    const pnlEl = document.getElementById('total-pnl');
+    const sign = d.totalPnl > 0 ? '+' : '';
+    pnlEl.textContent = sign + '$' + d.totalPnl.toFixed(2);
+    pnlEl.style.color = d.totalPnl > 0 ? '#3ddc84' : (d.totalPnl < 0 ? '#ff3a5c' : '#ffb020');
+  }
+  if(typeof d.baselineBalance === 'number'){
+    document.getElementById('baseline-note').textContent = `起始基準：$${d.baselineBalance.toFixed(2)}（${fmtTime(d.baselineSetAt)} 設定）`;
+  }
+
+  document.getElementById('funder-addr').textContent = d.funderAddress || '—';
+
+  const orders = d.openOrders || [];
+  const trades = d.trades || [];
+  document.getElementById('orders-summary').textContent = `掛單 ${orders.length} 筆 · 成交 ${trades.length} 筆`;
+
+  renderOrders(orders);
+  renderTrades(trades);
+}
+
+function connect(){
+  ws = new WebSocket('ws://localhost:8767');
+  ws.onmessage = (ev) => {
+    try{ onData(JSON.parse(ev.data)); }catch(e){}
+  };
+  ws.onclose = () => {
+    document.getElementById('conn-badge').className = 'badge badge-off';
+    document.getElementById('conn-badge').innerHTML = '<span class="badge-dot"></span> 連線中斷，3秒後重試';
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => { try{ ws.close(); }catch(e){} };
+}
+
+connect();
+</script>
+</body>
+</html>
