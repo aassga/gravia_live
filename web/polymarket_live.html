@@ -106,14 +106,14 @@
   <div class="panel">
     <div class="panel-title">帳戶地址（唯讀顯示）</div>
     <div class="addr" id="funder-addr">—</div>
-    <div class="sub-num" id="orders-summary">掛單 — 筆 · 成交 — 筆</div>
+    <div class="sub-num" id="orders-summary">持有部位 — 個 · 成交 — 筆</div>
   </div>
 
   <div class="panel">
-    <div class="panel-title">真實掛單（open orders）</div>
+    <div class="panel-title">目前持有部位（尚未兌換，即時市值）</div>
     <table>
-      <thead><tr><th>時間</th><th>方向</th><th>價格</th><th>數量</th><th>Token</th></tr></thead>
-      <tbody id="orders-body"><tr><td colspan="5" class="empty-row">目前沒有掛單</td></tr></tbody>
+      <thead><tr><th>Token</th><th>股數</th><th>進場價</th><th>現價</th><th>市值</th><th>損益</th></tr></thead>
+      <tbody id="positions-body"><tr><td colspan="6" class="empty-row">目前沒有持有部位</td></tr></tbody>
     </table>
   </div>
 
@@ -148,21 +148,27 @@ function sideSpan(side){
   return `<span class="${cls}">${s || '—'}</span>`;
 }
 
-function renderOrders(orders){
-  const body = document.getElementById('orders-body');
-  if(!orders || orders.length === 0){
-    body.innerHTML = '<tr><td colspan="5" class="empty-row">目前沒有掛單</td></tr>';
+function renderPositions(positions){
+  const body = document.getElementById('positions-body');
+  if(!positions || positions.length === 0){
+    body.innerHTML = '<tr><td colspan="6" class="empty-row">目前沒有持有部位</td></tr>';
     return;
   }
-  body.innerHTML = orders.map(o => `
+  body.innerHTML = positions.map(p => {
+    const hasPnl = typeof p.pnl === 'number';
+    const pnlColor = hasPnl ? (p.pnl >= 0 ? '#3ddc84' : '#ff3a5c') : '#7a6a55';
+    const pnlText = hasPnl ? `${p.pnl >= 0 ? '+' : ''}$${p.pnl.toFixed(2)} (${p.pnlPct >= 0 ? '+' : ''}${p.pnlPct.toFixed(1)}%)` : '—';
+    return `
     <tr>
-      <td>${fmtTime(o.created_at || o.timestamp)}</td>
-      <td>${sideSpan(o.side)}</td>
-      <td>$${Number(o.price ?? 0).toFixed(3)}</td>
-      <td>${Number(o.original_size ?? o.size ?? 0).toFixed(2)}</td>
-      <td class="addr">${shortToken(o.asset_id || o.token_id)}</td>
+      <td class="addr">${shortToken(p.tokenId)}</td>
+      <td>${p.shares.toFixed(2)}</td>
+      <td>$${p.entryPrice.toFixed(3)}</td>
+      <td>${typeof p.currentPrice === 'number' ? '$'+p.currentPrice.toFixed(3) : '—'}</td>
+      <td>${typeof p.value === 'number' ? '$'+p.value.toFixed(2) : '—'}</td>
+      <td style="color:${pnlColor};font-weight:600;">${pnlText}</td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function renderTrades(trades){
@@ -219,11 +225,11 @@ function onData(d){
 
   document.getElementById('funder-addr').textContent = d.funderAddress || '—';
 
-  const orders = d.openOrders || [];
+  const positions = d.openPositions || [];
   const trades = d.trades || [];
-  document.getElementById('orders-summary').textContent = `掛單 ${orders.length} 筆 · 成交 ${trades.length} 筆`;
+  document.getElementById('orders-summary').textContent = `持有部位 ${positions.length} 個 · 成交 ${trades.length} 筆`;
 
-  renderOrders(orders);
+  renderPositions(positions);
   renderTrades(trades);
 }
 

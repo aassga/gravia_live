@@ -52,11 +52,69 @@ def _load_or_init_baseline(current_balance: float) -> dict:
     return baseline
 
 
+def _compute_open_positions(trades: list, max_tokens: int = 10) -> list:
+    """從最近成交紀錄反推「目前實際還持有」的部位，用真實鏈上餘額驗證——
+    已經被兌換（redeem）掉的部位查出來會是 0，不會出現在這裡，
+    所以這份清單天生就會排除掉已結算完成的舊部位，只留下真的還在抱著的。
+    只查最近幾個不同的 token，避免每輪都要打一大堆 API。"""
+    from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+
+    client = live.get_client()
+
+    seen_tokens = []
+    for t in trades:
+        tid = t.get("asset_id")
+        if tid and tid not in seen_tokens:
+            seen_tokens.append(tid)
+        if len(seen_tokens) >= max_tokens:
+            break
+
+    positions = []
+    for tid in seen_tokens:
+        try:
+            bal = client.get_balance_allowance(
+                params=BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=tid)
+            )
+            shares = int(bal.get("balance", 0)) / 1_000_000
+        except Exception:
+            continue
+        if shares < 0.01:
+            continue  # 已兌換或本來就沒買到，不算持有中
+
+        entry_trade = next((t for t in trades if t.get("asset_id") == tid), None)
+        entry_price = float(entry_trade.get("price", 0)) if entry_trade else 0.0
+        cost = shares * entry_price
+
+        current_price = None
+        try:
+            mid = client.get_midpoint(tid)
+            current_price = float(mid.get("mid", 0) or 0)
+        except Exception:
+            pass
+
+        value = shares * current_price if current_price is not None else None
+        pnl = (value - cost) if value is not None else None
+        pnl_pct = (pnl / cost * 100) if (pnl is not None and cost > 0) else None
+
+        positions.append({
+            "tokenId":      tid,
+            "shares":       shares,
+            "entryPrice":   entry_price,
+            "currentPrice": current_price,
+            "cost":         cost,
+            "value":        value,
+            "pnl":          pnl,
+            "pnlPct":       pnl_pct,
+        })
+    return positions
+
+
 def _fetch_state() -> dict:
     """同步呼叫 py_clob_client_v2（會阻塞），外面用 asyncio.to_thread 包起來跑，不卡住其他連線。"""
     balance_raw = live.get_usdc_balance()
     orders = live.get_open_orders()
     trades = live.get_trade_history(limit=30)
+    positions = _compute_open_positions(trades)
 
     balance_usdc = int(balance_raw.get("balance", 0)) / 1_000_000
     baseline = _load_or_init_baseline(balance_usdc)
@@ -73,6 +131,7 @@ def _fetch_state() -> dict:
         "baselineSetAt": baseline["baselineSetAt"],
         "totalPnl": total_pnl,
         "openOrders": orders,
+        "openPositions": positions,
         "trades": trades,
     }
 
@@ -95,7 +154,7 @@ async def poll_loop():
             last_payload = state
             log.info(
                 f"真實帳戶狀態：餘額 ${state['balanceUsdc']:.2f}，"
-                f"掛單 {len(state['openOrders'])} 筆，成交 {len(state['trades'])} 筆"
+                f"持有部位 {len(state['openPositions'])} 個，成交 {len(state['trades'])} 筆"
             )
         except Exception as e:
             log.error(f"查詢真實帳戶狀態失敗：{e}")
