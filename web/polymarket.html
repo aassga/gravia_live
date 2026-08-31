@@ -171,14 +171,14 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   <!-- ROW 2: RECENT TRADES / PNL SUMMARY -->
   <div class="row2">
 
-    <!-- RECENT TRADES -->
+    <!-- RECENT TRADES (A/B 三組各自獨立記帳) -->
     <div class="panel">
       <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-        <span class="lbl">◦ 已結算窗口</span>
+        <span class="lbl">◦ 已結算窗口 · A/B 各自記帳</span>
         <span id="rt-count" class="gray">0</span>
       </div>
-      <div id="rt-list" style="font-size:10.5px;display:flex;flex-direction:column;gap:1px;max-height:180px;overflow-y:auto;">
-        <div style="color:#444;padding:4px 0;">尚無交易</div>
+      <div id="rt-list" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">
+        <div style="color:#444;padding:4px 0;font-size:10.5px;">尚無交易</div>
       </div>
     </div>
 
@@ -238,11 +238,10 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     </div>
   </div>
 
-  <!-- A/B 門檻測試 -->
+  <!-- A/B 門檻測試（彙總表，各自成交紀錄改顯示在上面「已結算窗口」框內） -->
   <div class="panel">
     <div class="lbl" style="margin-bottom:6px;">◦ A/B 門檻測試 · 同一份報價，不同門檻各自記帳</div>
     <div id="ab-table" style="font-size:11px;"></div>
-    <div id="ab-trades-columns" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:10px;"></div>
   </div>
 
   <!-- EXECUTION LOG -->
@@ -365,7 +364,6 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     if(d.sim){
       lastSim=d.sim;
       renderPosition(d.sim);
-      renderTrades(d.sim);
       renderSummary(d.sim);
       $('sum-entry-th').textContent='$'+d.sim.entryMaxPrice.toFixed(2);
       $('sum-lock-th').textContent='$'+d.sim.lockMaxSum.toFixed(2);
@@ -416,22 +414,6 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     }
   }
 
-  function renderTrades(sim){
-    $('rt-count').textContent=sim.totalTrades;
-    const trades=sim.trades||[];
-    $('rt-list').innerHTML=trades.length?trades.map(t=>{
-      const win=t.pnl>=0;
-      const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
-      const dir=t.hedged?`${t.side}/${t.hedgeSide} 已鎖利`:`${t.side} 方向性`;
-      return `<div style="display:grid;grid-template-columns:60px 130px 60px 1fr 64px;gap:6px;padding:2px 0;border-bottom:1px solid #ffffff08;align-items:center;">
-        <span style="color:#444;font-size:9px;">${dt}</span>
-        <span class="${t.hedged?'up-b':(win?'up-b':'dn-b')}">${dir}</span>
-        <span style="color:#888">結果 ${t.outcome}</span>
-        <span style="color:#555">$${t.entryPrice.toFixed(2)}${t.hedged?' / $'+t.hedgePrice.toFixed(2):''}</span>
-        <span style="color:${win?'#00ff9d':'#ff3a5c'};font-weight:600;text-align:right;">${fmtMoney(t.pnl)}</span>
-      </div>`;
-    }).join(''):'<div style="color:#444;padding:4px 0;">尚無交易</div>';
-  }
 
   function renderSummary(sim){
     const el=$('sum-pnl');
@@ -485,14 +467,16 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       }).join('')}
     `;
 
-    // 每組各自獨立的成交紀錄，維持原本 conservative/main/loose 順序（不跟著排名跳動），方便固定位置比對
-    $('ab-trades-columns').innerHTML=variants.map(v=>{
+    // 每組各自獨立的成交紀錄，顯示在「已結算窗口」框內，維持原本 conservative/main/loose
+    // 順序（不跟著排名跳動），方便固定位置比對
+    $('rt-count').textContent=variants.reduce((sum,v)=>sum+v.totalTrades,0);
+    $('rt-list').innerHTML=variants.map(v=>{
       const trades=(v.trades||[]).slice(0,8);
       const list=trades.length?trades.map(t=>{
         const win=t.pnl>=0;
         const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
         const dir=t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:`${t.side} 方向性`;
-        return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #ffffff08;font-size:9.5px;">
+        return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #ffffff08;font-size:9.5px;gap:4px;">
           <span style="color:#444;">${dt}</span>
           <span class="${t.hedged?'up-b':(win?'up-b':'dn-b')}" style="font-size:9px;">${dir}</span>
           <span style="color:#888;">下注 $${(t.stakeUsd||0).toFixed(2)}</span>
@@ -501,7 +485,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       }).join(''):'<div style="color:#444;padding:4px 0;font-size:9.5px;">尚無交易</div>';
       return `<div style="background:#0a0a0a;border:1px solid #ffffff0c;border-radius:3px;padding:6px 8px;">
         <div style="color:#888;font-size:9.5px;letter-spacing:1px;margin-bottom:4px;">${v.label}</div>
-        <div style="max-height:150px;overflow-y:auto;">${list}</div>
+        <div style="max-height:180px;overflow-y:auto;">${list}</div>
       </div>`;
     }).join('');
   }
