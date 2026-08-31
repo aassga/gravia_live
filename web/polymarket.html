@@ -244,6 +244,40 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     <div id="ab-table" style="font-size:11px;"></div>
   </div>
 
+  <!-- ETH（獨立第二個市場，跟 BTC 完全分開記帳） -->
+  <div class="panel panel-g">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
+      <div class="lbl green">◦ ETH 5分鐘 Up/Down（獨立策略，跟 BTC 分開記帳）</div>
+      <div style="display:flex;gap:14px;font-size:10.5px;color:#888;">
+        <span>ETH現貨 <span id="eth-spot" style="color:#f0f0f0">—</span></span>
+        <span id="eth-question" style="color:#666;">—</span>
+        <span>剩餘 <span id="eth-countdown" class="yellow">—</span></span>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 200px 220px;gap:8px;">
+      <div style="background:#0d1a14;border:1px solid #00ff9d30;border-radius:3px;padding:6px 8px;">
+        <div class="lbl green" style="font-size:10px;">UP</div>
+        <div id="eth-up-price" style="font-size:18px;font-weight:700;">$0.000</div>
+        <div id="eth-up-prob" class="gray" style="font-size:10px;">—</div>
+      </div>
+      <div style="background:#1a0d10;border:1px solid #ff3a5c30;border-radius:3px;padding:6px 8px;">
+        <div class="lbl red" style="font-size:10px;">DOWN</div>
+        <div id="eth-down-price" style="font-size:18px;font-weight:700;">$0.000</div>
+        <div id="eth-down-prob" class="gray" style="font-size:10px;">—</div>
+      </div>
+      <div style="background:#0a0a0a;border:1px solid #ffffff0c;border-radius:3px;padding:6px 8px;">
+        <div class="lbl" style="font-size:10px;">部位</div>
+        <div id="eth-pos-text" style="font-size:11px;color:#666;margin-top:4px;">空手</div>
+      </div>
+      <div style="background:#0a0a0a;border:1px solid #ffffff0c;border-radius:3px;padding:6px 8px;">
+        <div class="lbl" style="font-size:10px;">損益總計</div>
+        <div id="eth-pnl" style="font-size:16px;font-weight:700;">$0.00</div>
+        <div id="eth-stats" class="gray" style="font-size:9.5px;">0 筆 · 勝率 —</div>
+      </div>
+    </div>
+    <div id="eth-trades" style="margin-top:8px;font-size:10.5px;max-height:120px;overflow-y:auto;"></div>
+  </div>
+
   <!-- EXECUTION LOG -->
   <div class="panel" style="padding:6px 10px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
@@ -275,6 +309,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   let lastSim=null;
   let lastKlines=[];
   let remainingSeconds=null;
+  let ethRemainingSeconds=null;
   let clockOffsetMs=0;  // 伺服器校正過的真實時間 - 本機時間；本機時鐘可能不準，別直接用 Date.now()
 
   // ── WebSocket ──
@@ -373,8 +408,60 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     }
 
     if(d.abVariants) renderAbLeaderboard(d.abVariants);
+    if(d.eth) renderEth(d.eth);
 
     addLog('數據',`UP=${(d.upPrice*100).toFixed(1)}% DOWN=${(d.downPrice*100).toFixed(1)}%`,'#e8e8e8');
+  }
+
+  function renderEth(eth){
+    if(eth.market && eth.market.question){
+      $('eth-question').textContent = eth.market.question.replace('Ethereum Up or Down - ','');
+    }
+    if(typeof eth.remainingSeconds==='number'){
+      ethRemainingSeconds=eth.remainingSeconds;
+    }
+    if(typeof eth.spotPrice==='number'){
+      $('eth-spot').textContent='$'+eth.spotPrice.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2});
+    }
+    if(typeof eth.upPrice==='number'){
+      $('eth-up-price').textContent=fmtUSD(eth.upPrice);
+      $('eth-up-prob').textContent=(eth.upPrice*100).toFixed(1)+'%';
+    }
+    if(typeof eth.downPrice==='number'){
+      $('eth-down-price').textContent=fmtUSD(eth.downPrice);
+      $('eth-down-prob').textContent=(eth.downPrice*100).toFixed(1)+'%';
+    }
+
+    const sim=eth.sim||{};
+    const pos=sim.position;
+    const posEl=$('eth-pos-text');
+    if(pos){
+      posEl.textContent = pos.hedged ? `${pos.side}/${pos.hedgeSide} 已鎖利` : `${pos.side} 方向性曝險中`;
+      posEl.style.color = pos.hedged ? '#00ff9d' : '#ffd700';
+    } else {
+      posEl.textContent='空手';
+      posEl.style.color='#666';
+    }
+
+    const pnlEl=$('eth-pnl');
+    const totalPnl=sim.totalPnl||0;
+    pnlEl.textContent=fmtMoney(totalPnl);
+    pnlEl.style.color=totalPnl>=0?'#00ff9d':'#ff3a5c';
+    const winRate=sim.totalTrades>0?Math.round(sim.wins/sim.totalTrades*100)+'%':'—';
+    $('eth-stats').textContent=`${sim.totalTrades||0} 筆 · 勝率 ${winRate}`;
+
+    const trades=(sim.trades||[]).slice(0,6);
+    $('eth-trades').innerHTML = trades.length ? trades.map(t=>{
+      const win=t.pnl>=0;
+      const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
+      const dir=t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:`${t.side} 方向性`;
+      return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #ffffff08;gap:4px;">
+        <span style="color:#444;">${dt}</span>
+        <span class="${t.hedged?'up-b':(win?'up-b':'dn-b')}" style="font-size:9px;">${dir}</span>
+        <span style="color:#888;">下注 $${(t.stakeUsd||0).toFixed(2)}</span>
+        <span style="color:${win?'#00ff9d':'#ff3a5c'};font-weight:600;">${fmtMoney(t.pnl)}</span>
+      </div>`;
+    }).join('') : '<div style="color:#444;padding:4px 0;">尚無交易</div>';
   }
 
   function renderBook(side,book){
@@ -510,6 +597,10 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     if(remainingSeconds!==null){
       remainingSeconds=Math.max(0,remainingSeconds-1);  // 本地每秒往下數，不重新比對時鐘
       $('mkt-countdown').textContent=fmtDuration(remainingSeconds);
+    }
+    if(ethRemainingSeconds!==null){
+      ethRemainingSeconds=Math.max(0,ethRemainingSeconds-1);
+      $('eth-countdown').textContent=fmtDuration(ethRemainingSeconds);
     }
   },1000);
 

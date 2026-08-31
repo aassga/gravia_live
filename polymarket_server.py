@@ -44,30 +44,43 @@ SIM_DEFAULT_STAKE_PCT = 3.0    # 每注預設佔目前資產組合的百分比�
 SIM_MIN_STAKE_PCT     = 0.5
 SIM_MAX_STAKE_PCT     = 25.0
 
+# ── 追蹤的資產：BTC 是原本的主力，ETH 是新加的第二個市場，同一套抓取/策略邏輯共用，
+#    只是換一個 slug 前綴跟 Binance 報價代碼。
+ASSETS = [
+    {"id": "btc", "label": "BTC", "slugPrefix": "btc-updown-5m-", "binanceSymbol": "BTCUSDT"},
+    {"id": "eth", "label": "ETH", "slugPrefix": "eth-updown-5m-", "binanceSymbol": "ETHUSDT"},
+]
+
 # ── A/B 門檻測試：同時跑好幾組不同的進場/鎖利門檻，吃同一份真實報價，
 #    彼此獨立記帳，方便直接比較哪組門檻的實際表現比較好（而不是憑感覺猜）。
-#    "main" 這組固定對應 SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM，
+#    這幾組全部都是 BTC 的。"main" 這組固定對應 SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM，
 #    也是既有前端面板（部位卡片、成交紀錄列表）顯示的那一組，維持向後相容。
+#    ETH 目前只用單一策略（不做 A/B 比較），單獨用 "eth-main" 這個 id。
 AB_VARIANTS = [
-    {"id": "conservative", "label": "保守 0.30 / 0.85", "entryMaxPrice": 0.30, "lockMaxSum": 0.85},
-    {"id": "main",         "label": "目前 0.40 / 0.90", "entryMaxPrice": SIM_ENTRY_MAX_PRICE, "lockMaxSum": SIM_LOCK_MAX_SUM},
-    {"id": "loose",        "label": "寬鬆 0.45 / 0.95", "entryMaxPrice": 0.45, "lockMaxSum": 0.95},
+    {"id": "conservative", "assetId": "btc", "label": "BTC 保守 0.30/0.85", "entryMaxPrice": 0.30, "lockMaxSum": 0.85},
+    {"id": "main",         "assetId": "btc", "label": "BTC 目前 0.40/0.90", "entryMaxPrice": SIM_ENTRY_MAX_PRICE, "lockMaxSum": SIM_LOCK_MAX_SUM},
+    {"id": "loose",        "assetId": "btc", "label": "BTC 寬鬆 0.45/0.95", "entryMaxPrice": 0.45, "lockMaxSum": 0.95},
+    {"id": "eth-main",     "assetId": "eth", "label": "ETH 0.40/0.90",      "entryMaxPrice": SIM_ENTRY_MAX_PRICE, "lockMaxSum": SIM_LOCK_MAX_SUM},
 ]
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
 
-# ── 全域狀態 ───────────────────────────────────────────────────────────────
-state = {
-    "market":        None,   # 目前追蹤的市場（Gamma market 物件）
-    "windowEndsAt":  None,   # 這個窗口結束時間（unix ms）
-    "upPrice":       None,
-    "downPrice":     None,
-    "upBook":        {"bids": [], "asks": []},
-    "downBook":      {"bids": [], "asks": []},
-    "btcPrice":      None,   # 真實 BTC 現貨價格（Binance），讓你看得出 Up/Down 報價背後在動什麼
-    "btcChangePct":  None,   # 24h 漲跌幅
-    "klines":        [],     # 真實 BTC 1 分鐘 K 線（Binance），畫蠟燭圖用
-    "connected":     False,
-}
+def _new_market_state() -> dict:
+    return {
+        "market":        None,   # 目前追蹤的市場（Gamma market 物件）
+        "windowEndsAt":  None,   # 這個窗口結束時間（unix ms）
+        "upPrice":       None,
+        "downPrice":     None,
+        "upBook":        {"bids": [], "asks": []},
+        "downBook":      {"bids": [], "asks": []},
+        "spotPrice":     None,   # 真實現貨價格（Binance），讓你看得出 Up/Down 報價背後在動什麼
+        "spotChangePct": None,   # 24h 漲跌幅
+        "klines":        [],     # 真實 1 分鐘 K 線（Binance），畫蠟燭圖用
+        "connected":     False,
+    }
+
+# ── 全域狀態：每個資產各自一份，互不干擾 ─────────────────────────────────────
+markets_state = {a["id"]: _new_market_state() for a in ASSETS}
+state = markets_state["btc"]  # 向後相容：既有程式碼引用 state 的地方，等同於 BTC 這份
 
 def _new_variant_state() -> dict:
     return {
@@ -143,18 +156,19 @@ def _market_tokens(market: dict):
 
 WINDOW_SECONDS = 300  # 5 分鐘一個窗口
 
-async def fetch_active_btc_5m_market(session: aiohttp.ClientSession) -> dict | None:
+async def fetch_active_market(session: aiohttp.ClientSession, slug_prefix: str) -> dict | None:
     """直接用真實時間算出目前這個 5 分鐘窗口的 slug 去查，不掃描 Gamma 的市場列表。
 
     原本用 active=true&closed=false 篩選、依 startDate 排序去找，結果發現不可靠：
     Polymarket 會把未來一整天的窗口都預先建好（全部也是 active=true），
     也有很多從很久以前就從沒被正確標記 closed 的舊窗口卡在列表裡，
     不管排序方向，抓到的都不是「現在正在進行」的那一個。
-    直接用時間算 slug（格式：btc-updown-5m-<窗口開始時間的 unix 秒>）最準。
+    直接用時間算 slug（格式：<slug_prefix><窗口開始時間的 unix 秒>）最準，
+    這套邏輯跟資產無關，BTC/ETH 共用同一份，只是 slug_prefix 不同。
     """
     window_start = int(real_now() // WINDOW_SECONDS) * WINDOW_SECONDS
     for start in (window_start, window_start - WINDOW_SECONDS):  # 抓不到當前窗口就退回上一個（剛好在交界處時的備援）
-        slug = f"btc-updown-5m-{start}"
+        slug = f"{slug_prefix}{start}"
         m = await fetch_market_by_slug(session, slug)
         if m and not m.get("closed", True):
             return m
@@ -185,16 +199,16 @@ async def fetch_book(session: aiohttp.ClientSession, token_id: str, limit: int =
             "asks": [{"price": float(a["price"]), "size": float(a["size"])} for a in asks],
         }
 
-async def fetch_btc_price(session: aiohttp.ClientSession) -> dict:
-    """真實 BTC/USDT 現貨價格（Binance），讓你看得出 Up/Down 報價背後實際在動的東西"""
-    url = "https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT"
+async def fetch_spot_price(session: aiohttp.ClientSession, symbol: str) -> dict:
+    """真實現貨價格（Binance），讓你看得出 Up/Down 報價背後實際在動的東西"""
+    url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={symbol}"
     async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
         d = await r.json()
         return {"price": float(d["lastPrice"]), "changePct": float(d["priceChangePercent"])}
 
-async def fetch_btc_klines(session: aiohttp.ClientSession, limit: int = 60) -> list:
-    """真實 BTC 1 分鐘 K 線（Binance），畫成蠟燭圖讓畫面更有感、看得出價格走勢"""
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit={limit}"
+async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int = 60) -> list:
+    """真實 1 分鐘 K 線（Binance），畫成蠟燭圖讓畫面更有感、看得出價格走勢"""
+    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1m&limit={limit}"
     async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
         raw = await r.json()
         return [
@@ -273,13 +287,14 @@ def compute_cash_and_portfolio(variant_id: str) -> tuple[float, float]:
     資產組合 = 現金 + 目前持有部位的即時市值（用當下真實報價算，還沒結算前會隨報價波動）
     """
     st = ab_states[variant_id]
+    ms = markets_state[AB_VARIANT_BY_ID[variant_id]["assetId"]]
     staked = 0.0
     market_value = 0.0
     pos = st["position"]
     if pos:
         staked = pos["shares"] * pos["entryPrice"]
-        up_price = state["upPrice"] or 0.0
-        down_price = state["downPrice"] or 0.0
+        up_price = ms["upPrice"] or 0.0
+        down_price = ms["downPrice"] or 0.0
         market_value = pos["shares"] * (up_price if pos["side"] == "Up" else down_price)
         if pos["hedged"]:
             staked += pos["hedgeShares"] * pos["hedgePrice"]
@@ -351,65 +366,81 @@ def queue_settlement(slug: str) -> None:
 
 # ── 背景抓取任務 ───────────────────────────────────────────────────────────
 
+async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
+    aid = asset["id"]
+    ms = markets_state[aid]
+
+    # 每輪都重新問 Polymarket「現在正在進行的是哪個窗口」，
+    # 不要用本機時鐘去推算「是不是該換下一輪」——本機時鐘不見得準，
+    # 但 Polymarket 自己回傳的 active/closed 狀態一定是對的，直接拿來當真相來源。
+    cur = ms["market"]
+    new_market = await fetch_active_market(session, asset["slugPrefix"])
+
+    if new_market and (cur is None or new_market["slug"] != cur["slug"]):
+        if cur is not None:
+            queue_settlement(cur["slug"])
+        ms["market"] = new_market
+        ms["windowEndsAt"] = _iso_to_ms(new_market["endDate"])
+        log.info(f"[MARKET:{aid}] 切換到新窗口 {new_market['slug']}　結束於 {new_market['endDate']}")
+
+    if not ms["market"]:
+        return
+    up_id, down_id = _market_tokens(ms["market"])
+    if not (up_id and down_id):
+        return
+
+    up_price, down_price, up_book, down_book, spot, klines = await asyncio.gather(
+        fetch_midpoint(session, up_id),
+        fetch_midpoint(session, down_id),
+        fetch_book(session, up_id),
+        fetch_book(session, down_id),
+        fetch_spot_price(session, asset["binanceSymbol"]),
+        fetch_klines(session, asset["binanceSymbol"], 60),
+        return_exceptions=True,
+    )
+    if not isinstance(up_price, Exception):   ms["upPrice"] = up_price
+    if not isinstance(down_price, Exception): ms["downPrice"] = down_price
+    if not isinstance(up_book, Exception):    ms["upBook"] = up_book
+    if not isinstance(down_book, Exception):  ms["downBook"] = down_book
+    if not isinstance(spot, Exception):
+        ms["spotPrice"] = spot["price"]
+        ms["spotChangePct"] = spot["changePct"]
+    if not isinstance(klines, Exception) and klines:
+        ms["klines"] = klines
+
+    slug = ms["market"]["slug"]
+    for variant_id, variant in AB_VARIANT_BY_ID.items():
+        if variant["assetId"] == aid:
+            simulate_trading(variant_id, slug, ms["upPrice"], ms["downPrice"])
+
+    ms["connected"] = True
+
 async def data_fetcher():
     async with aiohttp.ClientSession() as session:
         while True:
+            for asset in ASSETS:
+                try:
+                    await _fetch_one_asset(session, asset)
+                except Exception as e:
+                    log.error(f"Fetch error [{asset['id']}]: {e}")
+                    markets_state[asset["id"]]["connected"] = False
+
             try:
-                # 每輪都重新問 Polymarket「現在正在進行的是哪個窗口」，
-                # 不要用本機時鐘去推算「是不是該換下一輪」——本機時鐘不見得準，
-                # 但 Polymarket 自己回傳的 active/closed 狀態一定是對的，直接拿來當真相來源。
-                cur = state["market"]
-                new_market = await fetch_active_btc_5m_market(session)
-
-                if new_market and (cur is None or new_market["slug"] != cur["slug"]):
-                    if cur is not None:
-                        queue_settlement(cur["slug"])
-                    state["market"] = new_market
-                    state["windowEndsAt"] = _iso_to_ms(new_market["endDate"])
-                    log.info(f"[MARKET] 切換到新窗口 {new_market['slug']}　結束於 {new_market['endDate']}")
-
-                if state["market"]:
-                    up_id, down_id = _market_tokens(state["market"])
-                    if up_id and down_id:
-                        up_price, down_price, up_book, down_book, btc, klines = await asyncio.gather(
-                            fetch_midpoint(session, up_id),
-                            fetch_midpoint(session, down_id),
-                            fetch_book(session, up_id),
-                            fetch_book(session, down_id),
-                            fetch_btc_price(session),
-                            fetch_btc_klines(session, 60),
-                            return_exceptions=True,
-                        )
-                        if not isinstance(up_price, Exception):   state["upPrice"] = up_price
-                        if not isinstance(down_price, Exception): state["downPrice"] = down_price
-                        if not isinstance(up_book, Exception):    state["upBook"] = up_book
-                        if not isinstance(down_book, Exception):  state["downBook"] = down_book
-                        if not isinstance(btc, Exception):
-                            state["btcPrice"] = btc["price"]
-                            state["btcChangePct"] = btc["changePct"]
-                        if not isinstance(klines, Exception) and klines:
-                            state["klines"] = klines
-
-                        slug = state["market"]["slug"]
-                        for variant_id in ab_states:
-                            simulate_trading(variant_id, slug, state["upPrice"], state["downPrice"])
-
-                await retry_pending_settlements(session)  # 每輪都重試還沒結算成功的舊窗口
-
-                state["connected"] = True
-
+                await retry_pending_settlements(session)  # 每輪都重試還沒結算成功的舊窗口（跨資產一起處理）
             except Exception as e:
-                log.error(f"Fetch error: {e}")
-                state["connected"] = False
+                log.error(f"Settlement retry error: {e}")
 
             await asyncio.sleep(POLL_INTERVAL)
 
 # ── WebSocket 廣播 ─────────────────────────────────────────────────────────
 
 def build_ab_leaderboard() -> list:
-    """每組 A/B 門檻的即時戰績，前端拿來畫比較表，一眼看出目前哪組門檻表現最好。"""
+    """每組 A/B 門檻的即時戰績，前端拿來畫比較表，一眼看出目前哪組門檻表現最好。
+    只列 BTC 的門檻比較（ETH 目前只有單一策略，不參與比較，避免混在一起看起來像跨資產比較）。"""
     rows = []
     for v in AB_VARIANTS:
+        if v["assetId"] != "btc":
+            continue
         st = ab_states[v["id"]]
         cash, portfolio = compute_cash_and_portfolio(v["id"])
         win_rate = (st["wins"] / st["totalTrades"] * 100) if st["totalTrades"] else None
@@ -429,49 +460,74 @@ def build_ab_leaderboard() -> list:
         })
     return rows
 
-def build_full_payload() -> str:
-    m = state["market"] or {}
+def build_asset_summary(asset_id: str, variant_id: str) -> dict:
+    """單一資產的市場行情 + 對應策略戰績，BTC 跟 ETH 共用同一份組裝邏輯。"""
+    ms = markets_state[asset_id]
+    st = ab_states[variant_id]
+    m = ms["market"] or {}
     remaining_seconds = None
-    if state["windowEndsAt"] is not None:
-        remaining_seconds = max(0.0, state["windowEndsAt"] / 1000 - real_now())
-    cash, portfolio = compute_cash_and_portfolio("main")
-    return json.dumps({
-        "type": "full",
+    if ms["windowEndsAt"] is not None:
+        remaining_seconds = max(0.0, ms["windowEndsAt"] / 1000 - real_now())
+    cash, portfolio = compute_cash_and_portfolio(variant_id)
+    variant = AB_VARIANT_BY_ID[variant_id]
+    return {
         "market": {
             "slug":     m.get("slug"),
             "question": m.get("question"),
             "endDate":  m.get("endDate"),
         },
-        "windowEndsAt":     state["windowEndsAt"],
-        "remainingSeconds": remaining_seconds,  # 已用真實世界時間校正過，前端直接倒數就好，不用自己比對本機時鐘
-        "serverTimeMs":     real_now() * 1000,  # 校正過的真實時間，前端拿來顯示時鐘、不用本機系統時間
-        "upPrice":      state["upPrice"],
-        "downPrice":    state["downPrice"],
-        "upBook":       state["upBook"],
-        "downBook":     state["downBook"],
-        "btcPrice":     state["btcPrice"],
-        "btcChangePct": state["btcChangePct"],
-        "klines":       state.get("klines", []),
-        "connected":    state["connected"],
+        "windowEndsAt":     ms["windowEndsAt"],
+        "remainingSeconds": remaining_seconds,
+        "upPrice":      ms["upPrice"],
+        "downPrice":    ms["downPrice"],
+        "upBook":       ms["upBook"],
+        "downBook":     ms["downBook"],
+        "spotPrice":     ms["spotPrice"],
+        "spotChangePct": ms["spotChangePct"],
+        "klines":       ms.get("klines", []),
+        "connected":    ms["connected"],
         "sim": {
-            "position":    sim_state["position"],
-            "pendingSettlements": len(sim_state["pendingSettlements"]),
-            "trades":      sim_state["trades"],
-            "totalPnl":    sim_state["totalPnl"],
-            "totalTrades": sim_state["totalTrades"],
-            "wins":        sim_state["wins"],
+            "position":    st["position"],
+            "pendingSettlements": len(st["pendingSettlements"]),
+            "trades":      st["trades"],
+            "totalPnl":    st["totalPnl"],
+            "totalTrades": st["totalTrades"],
+            "wins":        st["wins"],
             "startBalance": shared_config["startBalance"],
             "minBalance":   SIM_MIN_BALANCE,
             "cash":         cash,
             "portfolio":    portfolio,
-            "entryMaxPrice": SIM_ENTRY_MAX_PRICE,
-            "lockMaxSum":    SIM_LOCK_MAX_SUM,
+            "entryMaxPrice": variant["entryMaxPrice"],
+            "lockMaxSum":    variant["lockMaxSum"],
             "stakePct":      shared_config["stakePct"],
-            "stakeUsd":      portfolio * (shared_config["stakePct"] / 100),  # 下一注預估金額（複利，隨資產組合變動）
+            "stakeUsd":      portfolio * (shared_config["stakePct"] / 100),
             "minStakePct":   SIM_MIN_STAKE_PCT,
             "maxStakePct":   SIM_MAX_STAKE_PCT,
         },
-        "abVariants": build_ab_leaderboard(),
+    }
+
+def build_full_payload() -> str:
+    btc = build_asset_summary("btc", "main")
+    eth = build_asset_summary("eth", "eth-main")
+    return json.dumps({
+        "type": "full",
+        "serverTimeMs": real_now() * 1000,  # 校正過的真實時間，前端拿來顯示時鐘、不用本機系統時間
+        # 以下這幾個頂層欄位維持跟原本一樣（等於 BTC），是既有前端面板在讀的，向後相容不動它們
+        "market":           btc["market"],
+        "windowEndsAt":     btc["windowEndsAt"],
+        "remainingSeconds": btc["remainingSeconds"],
+        "upPrice":      btc["upPrice"],
+        "downPrice":    btc["downPrice"],
+        "upBook":       btc["upBook"],
+        "downBook":     btc["downBook"],
+        "btcPrice":     btc["spotPrice"],
+        "btcChangePct": btc["spotChangePct"],
+        "klines":       btc["klines"],
+        "connected":    btc["connected"],
+        "sim":          btc["sim"],
+        "abVariants":   build_ab_leaderboard(),
+        # 新增：ETH 獨立一份，前端有新的 ETH 區塊會讀這裡
+        "eth": eth,
     })
 
 async def broadcast(payload: str) -> None:
