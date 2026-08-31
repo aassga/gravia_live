@@ -74,12 +74,16 @@ def best_ask(book: dict) -> float | None:
 
 def safe_order_size(stake_usd: float, price: float) -> float:
     """Polymarket 要求：市價買單的金額(maker amount)最多 2 位小數、股數(taker amount)最多 4 位小數。
-    直接用浮點數 stake_usd / price 會產生像 156.84848000000002 這種雜訊小數位，一定會被 API 拒絕。
-    改用 Decimal，先把下注金額鎖在乾淨的 2 位小數，股數無條件捨去到 4 位小數，兩邊都保證合規。"""
+
+    一開始只把股數捨到 4 位小數還是不夠：就算股數本身乾淨（例如 5.2333），
+    股數 × 價格 算出來的金額還是常常會超過 2 位小數（5.2333 × 0.30 = 1.56999），一樣會被拒絕。
+    數學上唯一保證「股數 × 任意 2 位小數價格」一定落在乾淨分（cent）上的做法，是把股數捨去到整數股——
+    整數 × 2 位小數 必然還是 2 位小數，不會再超標。代價是犧牲一點資金效率（下注金額會比目標略低，
+    捨去而不是四捨五入，確保永遠不會超過預算），但在這種小額下注的規模下，差異可忽略。"""
     price_dec = Decimal(str(price))
     cost_dec = Decimal(str(round(stake_usd, 2)))
-    size_dec = (cost_dec / price_dec).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
-    return float(size_dec)
+    shares_dec = (cost_dec / price_dec).to_integral_value(rounding=ROUND_DOWN)
+    return float(shares_dec)
 
 
 def get_real_portfolio() -> float:
@@ -102,6 +106,11 @@ async def enter_position_live(slug: str, side: str, book: dict) -> None:
         return
 
     shares = safe_order_size(stake_usd, price)
+    if shares * price < 1.0:
+        # 股數捨去到整數後，實際金額可能又跌回 $1 門檻以下（例如目標 $1.05、價格 $0.6 → 只能買 1 股 = $0.6）
+        log.info(f"[LIVE] {side} @ ${price:.3f} 捨去到整數股後只剩 ${shares*price:.2f}，低於 $1 最低下單金額，跳過")
+        return
+
     up_id, down_id = sim._market_tokens(sim.state["market"])
     token_id = up_id if side == "Up" else down_id
 
@@ -138,6 +147,15 @@ async def hedge_position_live(other_side: str, book: dict) -> None:
         return
 
     shares = pos["shares"]  # 配對相同股數才能鎖住保證利潤
+
+    if shares * price < 1.0:
+        # Polymarket 對 marketable BUY 訂單有 $1 最低金額限制。另一邊價格如果已經跌到
+        # 用原本股數乘下去不到 $1（通常代表這邊快輸了、我方那邊快贏了），送單一定會被拒絕，
+        # 送了也白送——直接放棄這次鎖利，抱著等結算就好，不用一直重試到窗口結束。
+        log.info(f"[LIVE] {other_side} @ ${price:.3f} × {shares:.2f} 股 = ${shares*price:.2f}，"
+                 f"低於 $1 最低下單金額，放棄鎖利，抱到結算")
+        return
+
     up_id, down_id = sim._market_tokens(sim.state["market"])
     token_id = up_id if other_side == "Up" else down_id
 
