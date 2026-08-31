@@ -425,6 +425,7 @@ def build_ab_leaderboard() -> list:
             "cash":          cash,
             "portfolio":     portfolio,
             "hasPosition":   st["position"] is not None,
+            "trades":        st["trades"],  # 這組自己的成交紀錄，前端獨立顯示，方便看個別下注金額
         })
     return rows
 
