@@ -44,6 +44,12 @@ SIM_DEFAULT_STAKE_PCT = 3.0    # 每注預設佔目前資產組合的百分比�
 SIM_MIN_STAKE_PCT     = 0.5
 SIM_MAX_STAKE_PCT     = 25.0
 
+# 提高鎖利成功率：不是直接放寬固定門檻，而是讓門檻隨「窗口剩餘時間」動態放寬——
+# 前半段維持原本嚴格門檻（優先拿最大利潤空間），過了一半還沒鎖到，
+# 門檻逐漸往上放寬，增加真正鎖到利潤的機率，減少抱著方向性風險硬撐到結算的比例。
+SIM_LOCK_RELAX_START_FRACTION = 0.5   # 窗口過這個比例後開始放寬
+SIM_LOCK_RELAX_CAP            = 0.97  # 最多放寬到這裡，保留至少一點利潤空間，不做賠本生意
+
 # ── 追蹤的資產：BTC 是原本的主力，ETH 是新加的第二個市場，同一套抓取/策略邏輯共用，
 #    只是換一個 slug 前綴跟 Binance 報價代碼。
 ASSETS = [
@@ -260,6 +266,27 @@ def hedge_position(variant_id: str, side: str, price: float) -> None:
     locked = shares * (1 - pos["entryPrice"] - price)
     log.info(f"[SIM:{variant_id}] 配對鎖利 {side} @ ${price:.3f}　鎖定利潤=${locked:+.2f}")
 
+def _window_elapsed_fraction(asset_id: str, slug: str) -> float:
+    """這個窗口目前跑到百分之幾了（0~1）。抓不到窗口資訊，或倉位是舊窗口留下的殘影，就當作 0。"""
+    ms = markets_state[asset_id]
+    if ms["windowEndsAt"] is None or ms["market"] is None or ms["market"].get("slug") != slug:
+        return 0.0
+    window_start_ms = ms["windowEndsAt"] - WINDOW_SECONDS * 1000
+    elapsed_ms = real_now() * 1000 - window_start_ms
+    return max(0.0, min(1.0, elapsed_ms / (WINDOW_SECONDS * 1000)))
+
+def _effective_lock_threshold(variant: dict, slug: str) -> float:
+    """鎖利門檻隨窗口剩餘時間動態放寬：前半段維持原本門檻，過半後往 SIM_LOCK_RELAX_CAP 線性放寬，
+    優先在還有時間時追求較大利潤空間，時間快不夠時改成優先「鎖到」而不是繼續硬等。"""
+    base = variant["lockMaxSum"]
+    cap = max(base, SIM_LOCK_RELAX_CAP)
+    elapsed = _window_elapsed_fraction(variant["assetId"], slug)
+    if elapsed <= SIM_LOCK_RELAX_START_FRACTION:
+        return base
+    progress = (elapsed - SIM_LOCK_RELAX_START_FRACTION) / (1 - SIM_LOCK_RELAX_START_FRACTION)
+    progress = min(1.0, progress)
+    return base + (cap - base) * progress
+
 def simulate_trading(variant_id: str, slug: str, up_price: float, down_price: float) -> None:
     if up_price is None or down_price is None or up_price <= 0 or down_price <= 0:
         return
@@ -278,7 +305,11 @@ def simulate_trading(variant_id: str, slug: str, up_price: float, down_price: fl
 
     other_side  = "Down" if pos["side"] == "Up" else "Up"
     other_price = down_price if other_side == "Down" else up_price
-    if pos["entryPrice"] + other_price <= variant["lockMaxSum"]:
+    threshold = _effective_lock_threshold(variant, slug)
+    if pos["entryPrice"] + other_price <= threshold:
+        relaxed_note = f"（門檻已放寬至 {threshold:.3f}）" if threshold > variant["lockMaxSum"] + 1e-9 else ""
+        if relaxed_note:
+            log.info(f"[SIM:{variant_id}] 動態放寬鎖利{relaxed_note}")
         hedge_position(variant_id, other_side, other_price)
 
 def compute_cash_and_portfolio(variant_id: str) -> tuple[float, float]:
