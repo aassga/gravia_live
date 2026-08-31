@@ -251,7 +251,7 @@ async def strategy_loop():
         while True:
             try:
                 cur = sim.state["market"]
-                new_market = await sim.fetch_active_btc_5m_market(session)
+                new_market = await sim.fetch_active_market(session, "btc-updown-5m-")
 
                 if new_market and (cur is None or new_market["slug"] != cur["slug"]):
                     if cur is not None:
