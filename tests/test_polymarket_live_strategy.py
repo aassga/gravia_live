@@ -15,9 +15,18 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         strategy.STATE_FILE = os.path.join(self._tmpdir.name, "live-state.json")
         strategy.reset_live_state_for_tests()
 
+        # 測試永遠強制跑 dry-run，不管本機真實的 .env 有沒有武裝真實下單——
+        # 避免哪天忘記，測試意外打到真實 API。
+        self._old_strategy_armed = strategy.STRATEGY_ARMED
+        self._old_real_execution = strategy.REAL_EXECUTION_ENABLED
+        strategy.STRATEGY_ARMED = False
+        strategy.REAL_EXECUTION_ENABLED = False
+
     def tearDown(self):
         strategy.STATE_FILE = self._old_state_file
         self._tmpdir.cleanup()
+        strategy.STRATEGY_ARMED = self._old_strategy_armed
+        strategy.REAL_EXECUTION_ENABLED = self._old_real_execution
 
     def test_only_matched_order_is_treated_as_filled(self):
         self.assertTrue(trader.order_response_filled({"success": True, "status": "matched"}))

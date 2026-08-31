@@ -26,7 +26,6 @@ import logging
 import os
 import sys
 import time
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
 import aiohttp
 
@@ -251,17 +250,10 @@ def _entry_candidate(side: str, book: dict, shares: float, fair_probability: flo
     return plan
 
 
-def _target_pair_budget(cash: float) -> float:
-    available = max(0.0, cash - MIN_CASH_RESERVE_USD)
-    return min(MAX_PAIR_BUDGET_USD, available * (STAKE_PCT / 100))
-
-
-def _target_pair_shares(budget: float) -> float:
-    max_two_leg_fee_per_share = 2 * sim.SIM_TAKER_FEE_RATE * 0.25
-    per_share_budget = sim.SIM_LOCK_MAX_SUM + max_two_leg_fee_per_share
-    if budget <= 0 or per_share_budget <= 0:
-        return 0.0
-    return float((Decimal(str(budget)) / Decimal(str(per_share_budget))).to_integral_value(rounding=ROUND_DOWN))
+def _target_pair_order(cash: float) -> tuple[float, float]:
+    """跟模擬版共用同一個計算函式（sim.target_pair_order），只是帶入真實版自己的
+    下注比例／資金上限／保留額——公式本身跟模擬版保證一致，不會各寫一份長歪。"""
+    return sim.target_pair_order(cash, STAKE_PCT, sim.SIM_LOCK_MAX_SUM, MAX_PAIR_BUDGET_USD, MIN_CASH_RESERVE_USD)
 
 
 def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: float) -> tuple[dict, dict] | None:
@@ -571,8 +563,7 @@ async def evaluate_and_act(
             live_state["preflightSlug"] = slug
             save_live_state()
         cash = await _strategy_cash(dry_run)
-        budget = _target_pair_budget(cash)
-        shares = _target_pair_shares(budget)
+        shares, budget = _target_pair_order(cash)
         if budget < 1.0 or shares < 1.0:
             return
 

@@ -555,21 +555,39 @@ async def fetch_outcome(session: aiohttp.ClientSession, slug: str) -> str | None
 
 # ── 模擬自動交易（紙上交易，不動用真實資金）───────────────────────────────────
 
-def _target_order_size(variant_id: str) -> tuple[float, float]:
-    """回傳（目標股數, 本輪總資金預算）。stakePct 代表完整配對的最大資金，而非只有第一腿。"""
-    variant = AB_VARIANT_BY_ID[variant_id]
-    cash, portfolio = compute_cash_and_portfolio(variant_id)
-    budget = max(0.0, min(cash, portfolio * (shared_config["stakePct"] / 100)))
+# 單組兩腿的資金上限與現金保留額。模擬版與真實下單版共用同一套計算公式
+# （target_pair_order），只有這兩個數字、stake_pct 各自可能設定不同的值——
+# 真實版可以用更保守的上限，但「怎麼從現金換算成股數」這件事本身完全一致。
+SIM_MAX_PAIR_BUDGET_USD  = 25.0
+SIM_MIN_CASH_RESERVE_USD = 5.0
+
+
+def target_pair_order(
+    cash: float,
+    stake_pct: float,
+    lock_max_sum: float,
+    max_pair_budget_usd: float = SIM_MAX_PAIR_BUDGET_USD,
+    min_cash_reserve_usd: float = SIM_MIN_CASH_RESERVE_USD,
+) -> tuple[float, float]:
+    """回傳（目標股數, 本輪兩腿總資金預算）。模擬版與真實下單版共用這個函式，
+    保證「下注比例怎麼換算成實際股數」的邏輯完全一致，不是各寫一份、之後容易長歪。
+    股數無條件捨去到整數，對應真實下單實際能送出的精度。"""
+    available = max(0.0, cash - min_cash_reserve_usd)
+    budget = min(max_pair_budget_usd, available * (stake_pct / 100))
     # 每腿 taker fee 的理論上限為 rate × 0.25；兩腿一起預留，避免補腿時才發現現金不足。
     max_two_leg_fee_per_share = 2 * SIM_TAKER_FEE_RATE * 0.25
-    budget_per_share = variant["lockMaxSum"] + max_two_leg_fee_per_share
-    shares = budget / budget_per_share if budget_per_share > 0 else 0.0
+    budget_per_share = lock_max_sum + max_two_leg_fee_per_share
+    if budget <= 0 or budget_per_share <= 0:
+        return 0.0, budget
+    shares = float((Decimal(str(budget)) / Decimal(str(budget_per_share))).to_integral_value(rounding=ROUND_DOWN))
     return shares, budget
 
 
-def _available_depth(book: dict, side: str) -> float:
-    levels = book.get("asks" if side.upper() == "BUY" else "bids") or []
-    return sum(max(0.0, float(x.get("size", 0))) for x in levels)
+def _target_order_size(variant_id: str) -> tuple[float, float]:
+    """模擬版包一層：帶入這組 A/B 變體自己的現金與鎖利門檻。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    cash, _ = compute_cash_and_portfolio(variant_id)
+    return target_pair_order(cash, shared_config["stakePct"], variant["lockMaxSum"])
 
 
 def enter_position(
@@ -638,8 +656,8 @@ def hedge_position(variant_id: str, side: str, fill: dict) -> None:
 
 
 def _entry_candidate(side: str, book: dict, shares: float, fair_probability: float, max_price: float) -> dict | None:
-    fill_shares = min(shares, _available_depth(book, "BUY"))
-    fill = simulate_buy_fill(book, fill_shares)
+    # 跟真實版一樣不先按深度縮小股數：深度不夠 simulate_buy_fill 會直接回傳 None（等同 FOK 未成交）。
+    fill = simulate_buy_fill(book, shares)
     if not fill or fill["decisionNotional"] < 1.0 or fill["decisionPrice"] > max_price:
         return None
     all_in_per_share = (fill["decisionNotional"] + fill["decisionFee"]) / fill["shares"]
@@ -650,10 +668,13 @@ def _entry_candidate(side: str, book: dict, shares: float, fair_probability: flo
 
 
 def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
-    """先檢查兩腿此刻是否可直接成交並鎖住淨利，這才是進場即無方向曝險的套利。"""
+    """先檢查兩腿此刻是否可直接成交並鎖住淨利，這才是進場即無方向曝險的套利。
+
+    刻意不先按可見深度縮小股數——跟真實版的 FOK 語意一致：要嘛完整目標股數
+    兩腿都吃得到，要嘛整筆視為不可行（simulate_buy_fill 深度不足會回傳 None），
+    不會「深度不夠就自動改買比較少」，這樣模擬結果才不會比真實下單能做到的樂觀。"""
     variant = AB_VARIANT_BY_ID[variant_id]
-    target_shares, budget = _target_order_size(variant_id)
-    shares = min(target_shares, _available_depth(up_book, "BUY"), _available_depth(down_book, "BUY"))
+    shares, budget = _target_order_size(variant_id)
     if shares <= 0:
         return False
     up_fill = simulate_buy_fill(up_book, shares)
