@@ -1,36 +1,47 @@
 """
-Polymarket BTC 5 分鐘 Up/Down · 真實自動下單策略
+Polymarket BTC Up/Down · 真實自動下單策略
+─────────────────────────────────────
+判斷邏輯跟 polymarket_server.py（紙上模擬）完全一致，而且是直接 import 過來共用，
+不是另外複製一份常數——這樣模擬版調整門檻時，真實版自動跟著同步，不會有兩邊邏輯
+慢慢長歪、之後改一邊忘記改另一邊的問題：
+    - 有一邊價格 <= SIM_ENTRY_MAX_PRICE 時，先買那一邊
+    - 等兩邊合計成本 <= SIM_LOCK_MAX_SUM 時，買另一邊配對鎖利
+    - 鎖不到就抱到期，等結算
+差別只在於：這支程式會真的送出真實訂單、真的動用真實資金。
 
-真實版與紙上模擬共用同一套核心判斷：
-    - 使用 Ask/Bid 深度計算 VWAP，再以含滑點、向不利 tick 取整的最差限價作決策。
-    - 進場必須通過公平價優勢、價格門檻與剩餘時間條件。
-    - 第二腿必須在 taker fee 後仍達到最低淨鎖利才下單。
-    - 單邊曝險可在市場 Bid 顯著高於模型持有價值時提早退出。
+跟模擬版的重要差異（誠實列出，不是同一套東西）：
+    1. 模擬版用「中價」(midpoint) 算損益，這裡真實下單用「真實訂單簿的最佳賣價」，
+       因為要保證真的買得到——實際成本一定比模擬版看到的中價貴一點點，這是真實市場的摩擦成本。
+    2. 下單一律用 FOK（全成交或取消），不會有部分成交卡著的殘留掛單。
+    3. 【尚未驗證】贏的那一邊，Polymarket 是否會自動把 conditional token 兌換回 USDC，
+       還是需要額外呼叫一次 redeem 才會真的入帳，這裡沒有十足把握，程式只會「估算」損益，
+       實際錢有沒有真的到帳，請以 web/polymarket_live.html 顯示的真實餘額為準，不要只信這裡的估算。
 
-真實執行額外保護：
-    - 只有 LIVE_TRADING=true 與 POLY_STRATEGY_ARMED=true 同時成立才送真實訂單。
-      其餘情況是 dry-run，不會簽名或送出訂單。
-    - 下單使用 FOK；只有 API 明確回覆 matched 才記錄為已成交，並盡量回填真實成交均價。
-    - delayed 訂單會短暫追蹤；若仍無法確認，策略自動停止後續下單。
-    - 每組完整兩腿共用一份資金預算，另有單組絕對金額上限與現金保留額。
-    - 狀態會寫入 polymarket_live_strategy_state.json，重啟不會忘記未結算曝險。
+安全機制：
+    - 完全遵守 polymarket_live_trader.py 的 LIVE_TRADING 開關：.env 裡是 false 時，
+      整個策略迴圈都是 dry-run（只記錄「本來會下什麼單」，不會真的呼叫下單 API），
+      可以安全跑過一整輪邏輯，不花一毛錢。
+    - 每次進場/鎖利前都重新查一次真實餘額，下注金額 = 真實資產組合 × 設定的百分比（跟模擬版同一套複利邏輯）。
+    - 同一時間只會有一個真實部位，不會疊加下注。
 
-本程式會動用真實資金。啟用 LIVE_TRADING=true 前，請先以 dry-run 跑完整窗口。
+啟動方式：
+    py polymarket_live_strategy.py
+
+真實損益請開 web/polymarket_live.html 查看（由 polymarket_live_status_server.py 提供，
+會自動反映這支程式產生的真實掛單／成交紀錄）。
 """
 
-from __future__ import annotations
-
 import asyncio
-import json
 import logging
 import os
 import sys
 import time
+from decimal import Decimal, ROUND_DOWN
 
 import aiohttp
 
+import polymarket_server as sim   # 共用市場資料抓取邏輯 + 策略門檻常數，保證跟模擬版一致
 import polymarket_live_trader as live
-import polymarket_server as sim
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -40,474 +51,138 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("polymarket_live_strategy")
 
 POLL_INTERVAL = 3
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_live_strategy_state.json")
 
-STAKE_PCT = max(0.5, min(25.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
-STRATEGY_ARMED = os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
-REAL_EXECUTION_ENABLED = live.LIVE_TRADING and STRATEGY_ARMED
-MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
-MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
-DRY_RUN_BALANCE_USD = max(1.0, float(os.environ.get("POLY_DRY_RUN_BALANCE_USD", "100.0")))
-ACTION_COOLDOWN_SECONDS = max(1.0, float(os.environ.get("POLY_ACTION_COOLDOWN_SECONDS", "10.0")))
-ORDER_CONFIRM_ATTEMPTS = max(1, int(os.environ.get("POLY_ORDER_CONFIRM_ATTEMPTS", "6")))
-ORDER_CONFIRM_INTERVAL = max(0.5, float(os.environ.get("POLY_ORDER_CONFIRM_INTERVAL", "1.0")))
+STAKE_PCT     = float(os.environ.get("POLY_STAKE_PCT", "3.0"))
+MIN_STAKE_PCT = 0.5
+MAX_STAKE_PCT = 25.0
+STAKE_PCT     = max(MIN_STAKE_PCT, min(MAX_STAKE_PCT, STAKE_PCT))
+
+live_state = {
+    "position":           None,  # {windowSlug, side, entryPrice, shares, hedged, hedgeSide, hedgePrice, hedgeShares, dryRun}
+    "pendingSettlements": [],
+    "totalPnlEstimate":   0.0,   # 估算值，實際到帳金額請看真實損益頁面的餘額
+    "totalTrades":        0,
+}
 
 
-def _new_live_state() -> dict:
-    return {
-        "position": None,
-        "pendingSettlements": [],
-        "trades": [],
-        "totalPnlEstimate": 0.0,
-        "totalFeesEstimate": 0.0,
-        "totalTrades": 0,
-        "lockedTrades": 0,
-        "directionalTrades": 0,
-        "earlyExits": 0,
-        "lastActionAt": 0.0,
-        "halted": False,
-        "haltReason": None,
-        "unconfirmedOrder": None,
-        "preflightSlug": None,
-        "updatedAt": time.time(),
+def best_ask(book: dict) -> float | None:
+    asks = book.get("asks") or []
+    if not asks:
+        return None
+    return min(a["price"] for a in asks)
+
+
+def safe_order_size(stake_usd: float, price: float) -> float:
+    """Polymarket 要求：市價買單的金額(maker amount)最多 2 位小數、股數(taker amount)最多 4 位小數。
+
+    一開始只把股數捨到 4 位小數還是不夠：就算股數本身乾淨（例如 5.2333），
+    股數 × 價格 算出來的金額還是常常會超過 2 位小數（5.2333 × 0.30 = 1.56999），一樣會被拒絕。
+    數學上唯一保證「股數 × 任意 2 位小數價格」一定落在乾淨分（cent）上的做法，是把股數捨去到整數股——
+    整數 × 2 位小數 必然還是 2 位小數，不會再超標。代價是犧牲一點資金效率（下注金額會比目標略低，
+    捨去而不是四捨五入，確保永遠不會超過預算），但在這種小額下注的規模下，差異可忽略。"""
+    price_dec = Decimal(str(price))
+    cost_dec = Decimal(str(round(stake_usd, 2)))
+    shares_dec = (cost_dec / price_dec).to_integral_value(rounding=ROUND_DOWN)
+    return float(shares_dec)
+
+
+def get_real_portfolio() -> float:
+    """下注金額的基準：真實現金餘額。刻意不把「目前未平倉部位的估值」算進來，
+    避免虛報還沒真的到手的錢，寧可算保守一點。"""
+    balance = live.get_usdc_balance()
+    return int(balance.get("balance", 0)) / 1_000_000
+
+
+async def enter_position_live(slug: str, side: str, book: dict) -> None:
+    price = best_ask(book)
+    if price is None or price <= 0:
+        log.warning(f"[LIVE] {side} 目前沒有賣單可以吃，跳過這次進場")
+        return
+
+    portfolio = get_real_portfolio()
+    stake_usd = portfolio * (STAKE_PCT / 100)
+    if stake_usd < 1.0:
+        log.warning(f"[LIVE] 資產組合 ${portfolio:.2f} 太小，預估下注 ${stake_usd:.2f} 低於 $1，跳過這次進場")
+        return
+
+    shares = safe_order_size(stake_usd, price)
+    if shares * price < 1.0:
+        # 股數捨去到整數後，實際金額可能又跌回 $1 門檻以下（例如目標 $1.05、價格 $0.6 → 只能買 1 股 = $0.6）
+        log.info(f"[LIVE] {side} @ ${price:.3f} 捨去到整數股後只剩 ${shares*price:.2f}，低於 $1 最低下單金額，跳過")
+        return
+
+    up_id, down_id = sim._market_tokens(sim.state["market"])
+    token_id = up_id if side == "Up" else down_id
+
+    resp = live.place_limit_order(token_id, "BUY", price, shares, order_type="FOK")
+    filled = bool(resp.get("dry_run")) or resp.get("success", True)
+
+    if resp.get("dry_run"):
+        log.info(f"[LIVE][DRY-RUN] 模擬進場 {side} @ ${price:.3f} 股數={shares:.2f}（${stake_usd:.2f}）")
+    elif not filled:
+        log.error(f"[LIVE] 進場下單失敗，不建立部位：{resp}")
+        return
+    else:
+        log.warning(f"[LIVE] ★ 真實進場 {side} @ ${price:.3f} 股數={shares:.2f}（${stake_usd:.2f}）")
+
+    live_state["position"] = {
+        "windowSlug":  slug,
+        "side":        side,
+        "entryPrice":  price,
+        "shares":      shares,
+        "stakeUsd":    stake_usd,
+        "entryTime":   time.time(),
+        "hedged":      False,
+        "hedgeSide":   None,
+        "hedgePrice":  None,
+        "hedgeShares": 0.0,
+        "dryRun":      bool(resp.get("dry_run")),
     }
 
 
-def _load_live_state() -> dict:
-    defaults = _new_live_state()
-    if not os.path.exists(STATE_FILE):
-        return defaults
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
-        defaults.update(loaded)
-    except Exception as exc:
-        log.error(f"[LIVE] 無法讀取策略狀態，為避免遺忘真實曝險將停止下單：{exc}")
-        defaults["halted"] = True
-        defaults["haltReason"] = f"state_load_failed: {exc}"
-    return defaults
+async def hedge_position_live(other_side: str, book: dict) -> None:
+    pos = live_state["position"]
+    price = best_ask(book)
+    if price is None or price <= 0:
+        return
 
+    shares = pos["shares"]  # 配對相同股數才能鎖住保證利潤
 
-live_state = _load_live_state()
+    if shares * price < 1.0:
+        # Polymarket 對 marketable BUY 訂單有 $1 最低金額限制。另一邊價格如果已經跌到
+        # 用原本股數乘下去不到 $1（通常代表這邊快輸了、我方那邊快贏了），送單一定會被拒絕，
+        # 送了也白送——直接放棄這次鎖利，抱著等結算就好，不用一直重試到窗口結束。
+        log.info(f"[LIVE] {other_side} @ ${price:.3f} × {shares:.2f} 股 = ${shares*price:.2f}，"
+                 f"低於 $1 最低下單金額，放棄鎖利，抱到結算")
+        return
 
+    up_id, down_id = sim._market_tokens(sim.state["market"])
+    token_id = up_id if other_side == "Up" else down_id
 
-def save_live_state() -> None:
-    live_state["updatedAt"] = time.time()
-    tmp_path = STATE_FILE + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(live_state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, STATE_FILE)
+    resp = live.place_limit_order(token_id, "BUY", price, shares, order_type="FOK")
+    filled = bool(resp.get("dry_run")) or resp.get("success", True)
 
+    if resp.get("dry_run"):
+        log.info(f"[LIVE][DRY-RUN] 模擬鎖利 {other_side} @ ${price:.3f}")
+    elif not filled:
+        log.error(f"[LIVE] 鎖利下單失敗，這個部位會維持方向性曝險，沒有鎖到：{resp}")
+        return
+    else:
+        locked = shares * (1 - pos["entryPrice"] - price)
+        log.warning(f"[LIVE] ★ 真實鎖利 {other_side} @ ${price:.3f}　估算鎖定利潤=${locked:+.2f}")
 
-def reset_live_state_for_tests() -> None:
-    """只供單元測試在記憶體中清狀態；不會刪除實際狀態檔。"""
-    live_state.clear()
-    live_state.update(_new_live_state())
-
-
-def _set_halt(reason: str, order: dict | None = None) -> None:
-    live_state["halted"] = True
-    live_state["haltReason"] = reason
-    live_state["unconfirmedOrder"] = order
-    save_live_state()
-    log.critical(f"[LIVE] 策略已自動停止下單：{reason}")
-
-
-def _position_paid_cost(pos: dict) -> float:
-    cost = float(pos.get("entryNotional", pos.get("entryRiskNotional", 0))) + float(pos.get("entryFee", 0))
-    if pos.get("hedged"):
-        cost += float(pos.get("hedgeNotional", pos.get("hedgeRiskNotional", 0)))
-        cost += float(pos.get("hedgeFee", 0))
-    return cost
-
-
-def _position_risk_cost(pos: dict) -> float:
-    """最差限價成本只用於下單判斷；實際損益另由 _position_paid_cost 計算。"""
-    cost = float(pos.get("entryRiskNotional", pos.get("entryNotional", 0)))
-    cost += float(pos.get("entryRiskFee", pos.get("entryFee", 0)))
-    if pos.get("hedged"):
-        cost += float(pos.get("hedgeRiskNotional", pos.get("hedgeNotional", 0)))
-        cost += float(pos.get("hedgeRiskFee", pos.get("hedgeFee", 0)))
-    return cost
+    pos["hedged"]      = True
+    pos["hedgeSide"]   = other_side
+    pos["hedgePrice"]  = price
+    pos["hedgeShares"] = shares
 
 
 def _settle_pnl_estimate(pos: dict, outcome: str) -> float:
-    payout = float(pos["shares"]) if pos.get("hedged") or outcome == pos["side"] else 0.0
-    return payout - _position_paid_cost(pos)
-
-
-def _record_trade(pos: dict, pnl: float, outcome: str, trade_type: str) -> None:
-    fees = float(pos.get("entryFee", 0)) + float(pos.get("hedgeFee", 0)) + float(pos.get("exitFee", 0))
-    trade = {
-        "windowSlug": pos["windowSlug"],
-        "side": pos["side"],
-        "shares": pos["shares"],
-        "entryPrice": pos["entryPrice"],
-        "entryObservedVwap": pos.get("entryObservedVwap"),
-        "entryLimitPrice": pos.get("entryLimitPrice"),
-        "entryPriceSource": pos.get("entryPriceSource"),
-        "hedged": pos.get("hedged", False),
-        "hedgeSide": pos.get("hedgeSide"),
-        "hedgePrice": pos.get("hedgePrice"),
-        "hedgeObservedVwap": pos.get("hedgeObservedVwap"),
-        "hedgeLimitPrice": pos.get("hedgeLimitPrice"),
-        "hedgePriceSource": pos.get("hedgePriceSource"),
-        "exitPrice": pos.get("exitPrice"),
-        "exitObservedVwap": pos.get("exitObservedVwap"),
-        "exitLimitPrice": pos.get("exitLimitPrice"),
-        "exitPriceSource": pos.get("exitPriceSource"),
-        "entryEdge": pos.get("entryEdge"),
-        "feesEstimate": fees,
-        "pnlEstimate": pnl,
-        "outcome": outcome,
-        "tradeType": trade_type,
-        "dryRun": pos.get("dryRun", True),
-        "entryTime": pos.get("entryTime"),
-        "exitTime": time.time(),
-    }
-    live_state["trades"].insert(0, trade)
-    live_state["trades"] = live_state["trades"][:100]
-    live_state["totalPnlEstimate"] += pnl
-    live_state["totalFeesEstimate"] += fees
-    live_state["totalTrades"] += 1
-    if trade_type == "locked":
-        live_state["lockedTrades"] += 1
-    elif trade_type == "early_exit":
-        live_state["earlyExits"] += 1
-    else:
-        live_state["directionalTrades"] += 1
-    save_live_state()
-
-
-def marketable_limit_price(book: dict, fill: dict, side: str) -> float:
-    """向後相容入口；模擬與實盤實際共用 polymarket_server 的同一函式。"""
-    return sim.marketable_limit_price(book, fill, side)
-
-
-def _risk_fill(book: dict, fill: dict, side: str) -> dict:
-    decision = sim.decision_fill(book, fill, side)
-    shares = float(fill["shares"])
-    return {
-        "shares": shares,
-        "observedVwap": decision["observedVwap"],
-        "limitPrice": decision["decisionPrice"],
-        "riskNotional": decision["decisionNotional"],
-        "fee": decision["decisionFee"],
-    }
-
-
-async def _resolved_execution(plan: dict, response: dict, dry_run: bool) -> dict:
-    """取得成交後的記帳價格：dry-run 用模擬 VWAP，實盤優先用成交紀錄，否則用保守限價。"""
-    source = "simulated_vwap" if dry_run else "conservative_limit"
-    price = float(plan["observedVwap"] if dry_run else plan["limitPrice"])
-    notional = float(plan["shares"]) * price
-    fee = sim.taker_fee(float(plan["shares"]), price)
-
-    if not dry_run:
-        try:
-            summary = await asyncio.to_thread(live.get_order_fill_summary, response)
-        except Exception as exc:
-            log.warning(f"[LIVE] 無法取得實際成交均價，暫以保守限價記帳：{exc}")
-            summary = None
-        if summary and abs(float(summary["shares"]) - float(plan["shares"])) <= 1e-6:
-            price = float(summary["price"])
-            notional = float(summary["notional"])
-            fee = summary.get("fee")
-            fee = sim.taker_fee(float(plan["shares"]), price) if fee is None else float(fee)
-            source = "matched_trades"
-
-    return {"price": price, "notional": notional, "fee": fee, "source": source}
-
-
-def _buy_plan(side: str, book: dict, shares: float, fair_probability: float | None = None) -> dict | None:
-    fill = sim.simulate_buy_fill(book, shares)
-    if not fill:
-        return None
-    risk = _risk_fill(book, fill, "BUY")
-    if shares < float(book.get("minOrderSize", 1) or 1) or risk["riskNotional"] < 1.0:
-        return None
-    all_in_per_share = (risk["riskNotional"] + risk["fee"]) / shares
-    edge = None if fair_probability is None else fair_probability - all_in_per_share
-    return {"side": side, "book": book, "fair": fair_probability, "edge": edge, **risk}
-
-
-def _sell_plan(side: str, book: dict, shares: float) -> dict | None:
-    fill = sim.simulate_sell_fill(book, shares)
-    if not fill:
-        return None
-    risk = _risk_fill(book, fill, "SELL")
-    if shares < float(book.get("minOrderSize", 1) or 1) or risk["riskNotional"] < 1.0:
-        return None
-    return {"side": side, "book": book, **risk}
-
-
-def _entry_candidate(side: str, book: dict, shares: float, fair_probability: float) -> dict | None:
-    plan = _buy_plan(side, book, shares, fair_probability)
-    if not plan or plan["limitPrice"] > sim.SIM_ENTRY_MAX_PRICE:
-        return None
-    if plan["edge"] is None or plan["edge"] < sim.SIM_MIN_ENTRY_EDGE:
-        return None
-    return plan
-
-
-def _target_pair_order(cash: float) -> tuple[float, float]:
-    """跟模擬版共用同一個計算函式（sim.target_pair_order），只是帶入真實版自己的
-    下注比例／資金上限／保留額——公式本身跟模擬版保證一致，不會各寫一份長歪。"""
-    return sim.target_pair_order(cash, STAKE_PCT, sim.SIM_LOCK_MAX_SUM, MAX_PAIR_BUDGET_USD, MIN_CASH_RESERVE_USD)
-
-
-def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: float) -> tuple[dict, dict] | None:
-    up = _buy_plan("Up", up_book, shares)
-    down = _buy_plan("Down", down_book, shares)
-    if not up or not down:
-        return None
-    total_cost = up["riskNotional"] + up["fee"] + down["riskNotional"] + down["fee"]
-    net_per_share = (shares - total_cost) / shares
-    if up["limitPrice"] + down["limitPrice"] > sim.SIM_LOCK_MAX_SUM:
-        return None
-    if net_per_share < sim.SIM_MIN_NET_LOCK_PER_SHARE or total_cost > cash - MIN_CASH_RESERVE_USD:
-        return None
-    return up, down
-
-
-def _get_real_cash() -> float:
-    raw = live.get_usdc_balance()
-    return int(raw.get("balance", 0)) / 1_000_000
-
-
-async def _strategy_cash(dry_run: bool) -> float:
-    return DRY_RUN_BALANCE_USD if dry_run else await asyncio.to_thread(_get_real_cash)
-
-
-async def _ensure_no_unmanaged_current_position() -> bool:
-    """真實模式的首筆下單前，確認當前兩個 token 都沒有策略狀態之外的持倉。"""
-    up_id, down_id = sim._market_tokens(sim.state["market"])
-    balances = await asyncio.gather(
-        asyncio.to_thread(live.get_conditional_balance, up_id),
-        asyncio.to_thread(live.get_conditional_balance, down_id),
-        return_exceptions=True,
-    )
-    if any(isinstance(balance, Exception) for balance in balances):
-        details = ", ".join(str(balance) for balance in balances if isinstance(balance, Exception))
-        _set_halt(f"preflight_position_check_failed: {details}")
-        return False
-    if float(balances[0]) >= 0.01 or float(balances[1]) >= 0.01:
-        _set_halt(
-            f"unmanaged_current_market_position up={float(balances[0]):.6f} down={float(balances[1]):.6f}"
-        )
-        return False
-    return True
-
-
-async def _submit_fok(token_id: str, side: str, plan: dict, dry_run: bool) -> tuple[str, dict]:
-    live_state["lastActionAt"] = time.time()
-    save_live_state()
-    response = await asyncio.to_thread(
-        live.place_limit_order,
-        token_id,
-        side,
-        plan["limitPrice"],
-        plan["shares"],
-        dry_run,
-        "FOK",
-        not dry_run,
-    )
-    if live.order_response_filled(response):
-        return "filled", response
-
-    status = str(response.get("status", "")).lower() if isinstance(response, dict) else ""
-    if status in {"unmatched", "cancelled", "canceled", "rejected", ""}:
-        return "not_filled", response
-    if status != "delayed":
-        return "unconfirmed", response
-
-    order_id = response.get("orderID") or response.get("orderId")
-    if not order_id:
-        return "unconfirmed", response
-    latest = response
-    for _ in range(ORDER_CONFIRM_ATTEMPTS):
-        await asyncio.sleep(ORDER_CONFIRM_INTERVAL)
-        try:
-            latest = await asyncio.to_thread(live.get_order, order_id)
-        except Exception as exc:
-            log.warning(f"[LIVE] 追蹤 delayed 訂單 {order_id} 失敗：{exc}")
-            continue
-        if live.order_response_filled(latest):
-            return "filled", latest
-        latest_status = str(latest.get("status", "")).lower() if isinstance(latest, dict) else ""
-        if latest_status in {"unmatched", "cancelled", "canceled", "rejected"}:
-            return "not_filled", latest
-    return "unconfirmed", latest
-
-
-def _token_id(side: str) -> str:
-    up_id, down_id = sim._market_tokens(sim.state["market"])
-    return up_id if side == "Up" else down_id
-
-
-async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
-    token_id = _token_id(plan["side"])
-    result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
-    if result == "unconfirmed":
-        _set_halt(
-            f"entry_order_unconfirmed side={plan['side']}",
-            {"orderID": response.get("orderID") or response.get("orderId"), "side": plan["side"], "tokenId": token_id},
-        )
-        return result
-    if result != "filled":
-        log.info(f"[LIVE] {plan['side']} FOK 未成交，不建立持倉")
-        return result
-
-    execution = await _resolved_execution(plan, response, dry_run)
-
-    live_state["position"] = {
-        "windowSlug": slug,
-        "side": plan["side"],
-        "tokenId": token_id,
-        "shares": plan["shares"],
-        "stakeUsd": execution["notional"] + execution["fee"],
-        "entryPrice": execution["price"],
-        "entryObservedVwap": plan["observedVwap"],
-        "entryLimitPrice": plan["limitPrice"],
-        "entryPriceSource": execution["source"],
-        "entryNotional": execution["notional"],
-        "entryRiskNotional": plan["riskNotional"],
-        "entryFee": execution["fee"],
-        "entryRiskFee": plan["fee"],
-        "fairProbability": plan.get("fair"),
-        "entryEdge": plan.get("edge"),
-        "entryTime": time.time(),
-        "entryOrderId": response.get("orderID") or response.get("orderId"),
-        "hedged": False,
-        "hedgeSide": None,
-        "hedgePrice": None,
-        "hedgeObservedVwap": None,
-        "hedgeLimitPrice": None,
-        "hedgePriceSource": None,
-        "hedgeNotional": 0.0,
-        "hedgeRiskNotional": 0.0,
-        "hedgeFee": 0.0,
-        "hedgeRiskFee": 0.0,
-        "dryRun": dry_run,
-    }
-    save_live_state()
-    tag = "DRY-RUN" if dry_run else "REAL"
-    log.warning(
-        f"[LIVE][{tag}] 進場 {plan['side']} limit=${plan['limitPrice']:.3f} "
-        f"shares={plan['shares']:.2f} edge={plan.get('edge') if plan.get('edge') is not None else float('nan'):+.4f}"
-    )
-    return result
-
-
-async def _hedge_position(plan: dict, dry_run: bool) -> str:
-    pos = live_state["position"]
-    token_id = _token_id(plan["side"])
-    result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
-    if result == "unconfirmed":
-        _set_halt(
-            f"hedge_order_unconfirmed side={plan['side']}",
-            {"orderID": response.get("orderID") or response.get("orderId"), "side": plan["side"], "tokenId": token_id},
-        )
-        return result
-    if result != "filled":
-        log.error(f"[LIVE] 第二腿 {plan['side']} FOK 未成交，依然是單邊曝險")
-        return result
-
-    execution = await _resolved_execution(plan, response, dry_run)
-
-    pos["hedged"] = True
-    pos["hedgeSide"] = plan["side"]
-    pos["hedgeTokenId"] = token_id
-    pos["hedgePrice"] = execution["price"]
-    pos["hedgeObservedVwap"] = plan["observedVwap"]
-    pos["hedgeLimitPrice"] = plan["limitPrice"]
-    pos["hedgePriceSource"] = execution["source"]
-    pos["hedgeNotional"] = execution["notional"]
-    pos["hedgeRiskNotional"] = plan["riskNotional"]
-    pos["hedgeFee"] = execution["fee"]
-    pos["hedgeRiskFee"] = plan["fee"]
-    pos["hedgeOrderId"] = response.get("orderID") or response.get("orderId")
-    pos["stakeUsd"] = _position_paid_cost(pos)
-    pos["lockedPnlEstimate"] = pos["shares"] - _position_paid_cost(pos)
-    pos["lockedPnlWorstCase"] = pos["shares"] - _position_risk_cost(pos)
-    save_live_state()
-    tag = "DRY-RUN" if dry_run else "REAL"
-    log.warning(
-        f"[LIVE][{tag}] 第二腿 {plan['side']} limit=${plan['limitPrice']:.3f} "
-        f"保守淨鎖利估計=${pos['lockedPnlEstimate']:+.2f}"
-    )
-    return result
-
-
-async def _close_position(plan: dict, dry_run: bool, reason: str) -> str:
-    pos = live_state["position"]
-    result, response = await _submit_fok(pos["tokenId"], "SELL", plan, dry_run)
-    if result == "unconfirmed":
-        _set_halt(
-            f"exit_order_unconfirmed reason={reason}",
-            {"orderID": response.get("orderID") or response.get("orderId"), "side": "SELL", "tokenId": pos["tokenId"]},
-        )
-        return result
-    if result != "filled":
-        log.error(f"[LIVE] 退出 FOK 未成交，持倉保留：reason={reason}")
-        return result
-
-    execution = await _resolved_execution(plan, response, dry_run)
-
-    pos["exitPrice"] = execution["price"]
-    pos["exitObservedVwap"] = plan["observedVwap"]
-    pos["exitLimitPrice"] = plan["limitPrice"]
-    pos["exitPriceSource"] = execution["source"]
-    pos["exitFee"] = execution["fee"]
-    pos["exitReason"] = reason
-    net_proceeds = execution["notional"] - execution["fee"]
-    pnl = net_proceeds - _position_paid_cost(pos)
-    live_state["position"] = None
-    _record_trade(pos, pnl, "EarlyExit", "early_exit")
-    tag = "DRY-RUN" if dry_run else "REAL"
-    log.warning(f"[LIVE][{tag}] 提早退出 {pos['side']} 保守淨損益=${pnl:+.2f} reason={reason}")
-    return result
-
-
-async def _emergency_unwind(session: aiohttp.ClientSession, reason: str) -> None:
-    pos = live_state.get("position")
-    if not pos or pos.get("hedged"):
-        return
-    try:
-        latest_book = await sim.fetch_book(session, pos["tokenId"])
-    except Exception as exc:
-        log.error(f"[LIVE] 緊急退出前無法取得訂單簿：{exc}")
-        return
-    plan = _sell_plan(pos["side"], latest_book, pos["shares"])
-    if not plan:
-        log.error("[LIVE] 第二腿失敗，且第一腿目前沒有足夠 Bid 可緊急退出")
-        return
-    await _close_position(plan, bool(pos.get("dryRun", True)), reason)
-
-
-async def _execute_direct_pair(
-    session: aiohttp.ClientSession,
-    slug: str,
-    up: dict,
-    down: dict,
-    fair: dict | None,
-    dry_run: bool,
-) -> None:
-    # 先買即使第二腿失敗仍較有模型優勢的一邊；真實 CLOB 並沒有兩腿原子成交保證。
-    plans = [up, down]
-    if fair:
-        for plan in plans:
-            fair_side = fair["fairUp"] if plan["side"] == "Up" else fair["fairDown"]
-            plan["fair"] = fair_side
-            plan["edge"] = fair_side - (plan["riskNotional"] + plan["fee"]) / plan["shares"]
-        plans.sort(key=lambda p: p.get("edge", float("-inf")), reverse=True)
-
-    first, second = plans
-    if await _enter_position(slug, first, dry_run) != "filled":
-        return
-    result = await _hedge_position(second, dry_run)
-    if result == "not_filled":
-        await _emergency_unwind(session, "direct_pair_second_leg_failed")
+    """跟模擬版 _settle_pnl() 同一套算法，僅供參考——實際到帳請以真實餘額為準。"""
+    if pos["hedged"]:
+        return pos["shares"] * (1 - pos["entryPrice"] - pos["hedgePrice"])
+    won = (outcome == pos["side"])
+    return pos["shares"] * (1 - pos["entryPrice"]) if won else -(pos["shares"] * pos["entryPrice"])
 
 
 async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:
@@ -520,169 +195,92 @@ async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:
             still_pending.append(pos)
             continue
         pnl = _settle_pnl_estimate(pos, outcome)
-        trade_type = "locked" if pos.get("hedged") else "directional"
-        _record_trade(pos, pnl, outcome, trade_type)
-        tag = "DRY-RUN" if pos.get("dryRun", True) else "REAL"
+        live_state["totalPnlEstimate"] += pnl
+        live_state["totalTrades"] += 1
+        tag = "(dry-run，非真實)" if pos.get("dryRun") else "(真實)"
         log.warning(
-            f"[LIVE][{tag}] 結算 {pos['windowSlug']} outcome={outcome} "
-            f"type={trade_type} 保守淨損益估計=${pnl:+.2f}"
+            f"[LIVE] {tag} 結算 {pos['windowSlug']} 結果={outcome} "
+            f"{'(已鎖利)' if pos['hedged'] else '(方向性)'} 估算PnL=${pnl:+.2f}　"
+            f"→ 實際到帳金額請看 web/polymarket_live.html 的真實餘額"
         )
     live_state["pendingSettlements"] = still_pending
-    save_live_state()
 
 
 def queue_settlement(slug: str) -> None:
-    pos = live_state.get("position")
-    if pos is not None and pos.get("windowSlug") == slug:
+    pos = live_state["position"]
+    if pos is not None and pos["windowSlug"] == slug:
         live_state["pendingSettlements"].append(pos)
-        live_state["position"] = None
-        save_live_state()
+    live_state["position"] = None
 
 
-async def evaluate_and_act(
-    slug: str,
-    session: aiohttp.ClientSession,
-    remaining_seconds: float | None,
-    fair: dict | None,
-) -> None:
-    if live_state.get("halted"):
-        return
-    if time.time() - float(live_state.get("lastActionAt", 0)) < ACTION_COOLDOWN_SECONDS:
-        return
-
+async def evaluate_and_act(slug: str, session: aiohttp.ClientSession) -> None:
+    up_price, down_price = sim.state["upPrice"], sim.state["downPrice"]
     up_book, down_book = sim.state["upBook"], sim.state["downBook"]
-    pos = live_state.get("position")
+    if up_price is None or down_price is None or up_price <= 0 or down_price <= 0:
+        return
+
+    pos = live_state["position"]
 
     if pos is None:
-        if remaining_seconds is None or remaining_seconds < sim.SIM_MIN_ENTRY_REMAINING:
-            return
-        dry_run = not REAL_EXECUTION_ENABLED
-        if not dry_run and live_state.get("preflightSlug") != slug:
-            if not await _ensure_no_unmanaged_current_position():
-                return
-            live_state["preflightSlug"] = slug
-            save_live_state()
-        cash = await _strategy_cash(dry_run)
-        shares, budget = _target_pair_order(cash)
-        if budget < 1.0 or shares < 1.0:
-            return
-
-        direct = _direct_pair_plans(up_book, down_book, shares, cash)
-        if direct:
-            await _execute_direct_pair(session, slug, direct[0], direct[1], fair, dry_run)
-            return
-        if not fair:
-            return
-        candidates = [
-            _entry_candidate("Up", up_book, shares, fair["fairUp"]),
-            _entry_candidate("Down", down_book, shares, fair["fairDown"]),
-        ]
-        candidates = [candidate for candidate in candidates if candidate]
-        if candidates:
-            await _enter_position(slug, max(candidates, key=lambda x: x["edge"]), dry_run)
+        if up_price <= sim.SIM_ENTRY_MAX_PRICE:
+            await enter_position_live(slug, "Up", up_book)
+        elif down_price <= sim.SIM_ENTRY_MAX_PRICE:
+            await enter_position_live(slug, "Down", down_book)
         return
 
-    if pos.get("hedged") or pos.get("windowSlug") != slug:
-        return
-    if not pos.get("dryRun", True) and not REAL_EXECUTION_ENABLED:
-        log.error("[LIVE] 存在真實持倉，但真實策略未完整武裝；本程式不會假裝已對沖")
+    if pos["hedged"] or pos["windowSlug"] != slug:
         return
 
-    dry_run = bool(pos.get("dryRun", True))
-    other_side = "Down" if pos["side"] == "Up" else "Up"
-    other_book = down_book if other_side == "Down" else up_book
-    hedge = _buy_plan(other_side, other_book, pos["shares"])
-    if hedge:
-        projected_cost = _position_risk_cost(pos) + hedge["riskNotional"] + hedge["fee"]
-        net_per_share = (pos["shares"] - projected_cost) / pos["shares"]
-        cash = await _strategy_cash(dry_run)
-        if (
-            float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= sim.SIM_LOCK_MAX_SUM
-            and net_per_share >= sim.SIM_MIN_NET_LOCK_PER_SHARE
-            and hedge["riskNotional"] + hedge["fee"] <= max(0.0, cash - MIN_CASH_RESERVE_USD)
-        ):
-            await _hedge_position(hedge, dry_run)
-            return
-
-    if fair:
-        held_book = up_book if pos["side"] == "Up" else down_book
-        exit_plan = _sell_plan(pos["side"], held_book, pos["shares"])
-        if exit_plan:
-            fair_side = fair["fairUp"] if pos["side"] == "Up" else fair["fairDown"]
-            minimum_liquidation = exit_plan["riskNotional"] - exit_plan["fee"]
-            expected_hold = pos["shares"] * fair_side
-            if minimum_liquidation >= expected_hold + pos["shares"] * sim.SIM_EXIT_EDGE:
-                await _close_position(exit_plan, dry_run, "market_bid_above_model_value")
+    other_side  = "Down" if pos["side"] == "Up" else "Up"
+    other_price = down_price if other_side == "Down" else up_price
+    other_book  = down_book if other_side == "Down" else up_book
+    if pos["entryPrice"] + other_price <= sim.SIM_LOCK_MAX_SUM:
+        await hedge_position_live(other_side, other_book)
 
 
-async def strategy_loop() -> None:
-    log.info("=" * 64)
+async def strategy_loop():
+    log.info("=" * 60)
     log.info("  Polymarket BTC Up/Down · 真實自動下單策略")
-    log.info(
-        f"  LIVE_TRADING={live.LIVE_TRADING} · POLY_STRATEGY_ARMED={STRATEGY_ARMED} "
-        f"· REAL_EXECUTION={REAL_EXECUTION_ENABLED}"
-    )
-    log.info(f"  pair budget={STAKE_PCT:.1f}% · hard cap=${MAX_PAIR_BUDGET_USD:.2f}")
-    log.info(f"  cash reserve=${MIN_CASH_RESERVE_USD:.2f} · action cooldown={ACTION_COOLDOWN_SECONDS:.0f}s")
-    log.info(
-        f"  entry edge>={sim.SIM_MIN_ENTRY_EDGE:.3f} · net lock/share>={sim.SIM_MIN_NET_LOCK_PER_SHARE:.3f} "
-        f"· no new entry under {sim.SIM_MIN_ENTRY_REMAINING:.0f}s"
-    )
-    if live_state.get("halted"):
-        log.critical(f"  STRATEGY HALTED: {live_state.get('haltReason')}")
-    log.info("=" * 64)
+    log.info(f"  LIVE_TRADING = {live.LIVE_TRADING}（false = 全程 dry-run，不會花錢）")
+    log.info(f"  下注比例 = {STAKE_PCT:.1f}%（複利，跟真實資產組合連動）")
+    log.info(f"  進場門檻 <= ${sim.SIM_ENTRY_MAX_PRICE}　鎖利門檻合計 <= ${sim.SIM_LOCK_MAX_SUM}")
+    log.info("  真實損益請開 web/polymarket_live.html 查看")
+    log.info("=" * 60)
 
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 cur = sim.state["market"]
-                new_market = await sim.fetch_active_market(session, "btc-updown-5m-")
+                new_market = await sim.fetch_active_btc_5m_market(session)
+
                 if new_market and (cur is None or new_market["slug"] != cur["slug"]):
                     if cur is not None:
                         queue_settlement(cur["slug"])
-                    elif (
-                        live_state.get("position")
-                        and live_state["position"].get("windowSlug") != new_market["slug"]
-                    ):
-                        # 進程重啟後 sim.state 是空的，但真實策略狀態可能仍有上一窗口的持倉。
-                        queue_settlement(live_state["position"]["windowSlug"])
                     sim.state["market"] = new_market
-                    sim.state["windowEndsAt"] = sim._iso_to_ms(new_market["endDate"])
                     log.info(f"[MARKET] 切換到新窗口 {new_market['slug']}")
 
                 if sim.state["market"]:
                     up_id, down_id = sim._market_tokens(sim.state["market"])
                     if up_id and down_id:
-                        up_price, down_price, up_book, down_book, spot, klines = await asyncio.gather(
+                        up_price, down_price, up_book, down_book = await asyncio.gather(
                             sim.fetch_midpoint(session, up_id),
                             sim.fetch_midpoint(session, down_id),
                             sim.fetch_book(session, up_id),
                             sim.fetch_book(session, down_id),
-                            sim.fetch_spot_price(session, "BTCUSDT"),
-                            sim.fetch_klines(session, "BTCUSDT", 60),
                             return_exceptions=True,
                         )
-                        if not isinstance(up_price, Exception):
-                            sim.state["upPrice"] = up_price
-                        if not isinstance(down_price, Exception):
-                            sim.state["downPrice"] = down_price
-                        if not isinstance(up_book, Exception):
-                            sim.state["upBook"] = up_book
-                        if not isinstance(down_book, Exception):
-                            sim.state["downBook"] = down_book
-                        if not isinstance(spot, Exception):
-                            sim.state["spotPrice"] = spot["price"]
-                            sim.state["spotChangePct"] = spot["changePct"]
-                        if not isinstance(klines, Exception) and klines:
-                            sim.state["klines"] = klines
+                        if not isinstance(up_price, Exception):   sim.state["upPrice"] = up_price
+                        if not isinstance(down_price, Exception): sim.state["downPrice"] = down_price
+                        if not isinstance(up_book, Exception):    sim.state["upBook"] = up_book
+                        if not isinstance(down_book, Exception):  sim.state["downBook"] = down_book
 
-                        remaining = max(0.0, sim.state["windowEndsAt"] / 1000 - sim.real_now())
-                        fair = sim.estimate_fair_up("btc")
-                        await evaluate_and_act(sim.state["market"]["slug"], session, remaining, fair)
+                        await evaluate_and_act(sim.state["market"]["slug"], session)
 
                 await retry_pending_settlements(session)
-            except Exception as exc:
-                log.exception(f"策略迴圈錯誤：{exc}")
+
+            except Exception as e:
+                log.error(f"策略迴圈錯誤：{e}")
+
             await asyncio.sleep(POLL_INTERVAL)
 
 
