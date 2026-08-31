@@ -98,18 +98,16 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(10 - total, 0)
 
     def test_direct_pair_rejects_same_tick_boundary_as_simulation(self):
-        # 價格刻意選在「目前真實版套用的門檻（LIVE_VARIANT）」之上一點，
-        # 不寫死 0.90，這樣不管真實版現在套用哪一組 A/B 門檻，測試都還有意義。
         up_book = {
             "tickSize": 0.01,
             "minOrderSize": 1,
-            "asks": [{"price": 0.47, "size": 100}],
+            "asks": [{"price": 0.44, "size": 100}],
             "bids": [],
         }
         down_book = {
             "tickSize": 0.01,
             "minOrderSize": 1,
-            "asks": [{"price": 0.48, "size": 100}],
+            "asks": [{"price": 0.45, "size": 100}],
             "bids": [],
         }
         self.assertIsNone(strategy._direct_pair_plans(up_book, down_book, 10, 100))

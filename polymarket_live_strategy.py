@@ -52,12 +52,6 @@ ACTION_COOLDOWN_SECONDS = max(1.0, float(os.environ.get("POLY_ACTION_COOLDOWN_SE
 ORDER_CONFIRM_ATTEMPTS = max(1, int(os.environ.get("POLY_ORDER_CONFIRM_ATTEMPTS", "6")))
 ORDER_CONFIRM_INTERVAL = max(0.5, float(os.environ.get("POLY_ORDER_CONFIRM_INTERVAL", "1.0")))
 
-# 真實版套用模擬版 A/B 測試裡表現最好的那組（寬鬆 0.45/0.95：勝率 87.9%、損益 +$28.65，
-# 對照保守 0.30/0.85 只有 57.6% 勝率、目前 0.40/0.90 是 75.8%）。直接引用模擬版的變體定義，
-# 不是複製一份數字——之後如果在模擬版調整這組門檻，真實版會自動跟著同步，不用兩邊各改一次。
-LIVE_VARIANT_ID = os.environ.get("POLY_LIVE_VARIANT_ID", "loose")
-LIVE_VARIANT = sim.AB_VARIANT_BY_ID[LIVE_VARIANT_ID]
-
 
 def _new_live_state() -> dict:
     return {
@@ -249,7 +243,7 @@ def _sell_plan(side: str, book: dict, shares: float) -> dict | None:
 
 def _entry_candidate(side: str, book: dict, shares: float, fair_probability: float) -> dict | None:
     plan = _buy_plan(side, book, shares, fair_probability)
-    if not plan or plan["limitPrice"] > LIVE_VARIANT["entryMaxPrice"]:
+    if not plan or plan["limitPrice"] > sim.SIM_ENTRY_MAX_PRICE:
         return None
     if plan["edge"] is None or plan["edge"] < sim.SIM_MIN_ENTRY_EDGE:
         return None
@@ -259,7 +253,7 @@ def _entry_candidate(side: str, book: dict, shares: float, fair_probability: flo
 def _target_pair_order(cash: float) -> tuple[float, float]:
     """跟模擬版共用同一個計算函式（sim.target_pair_order），只是帶入真實版自己的
     下注比例／資金上限／保留額——公式本身跟模擬版保證一致，不會各寫一份長歪。"""
-    return sim.target_pair_order(cash, STAKE_PCT, LIVE_VARIANT["lockMaxSum"], MAX_PAIR_BUDGET_USD, MIN_CASH_RESERVE_USD)
+    return sim.target_pair_order(cash, STAKE_PCT, sim.SIM_LOCK_MAX_SUM, MAX_PAIR_BUDGET_USD, MIN_CASH_RESERVE_USD)
 
 
 def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: float) -> tuple[dict, dict] | None:
@@ -269,7 +263,7 @@ def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: floa
         return None
     total_cost = up["riskNotional"] + up["fee"] + down["riskNotional"] + down["fee"]
     net_per_share = (shares - total_cost) / shares
-    if up["limitPrice"] + down["limitPrice"] > LIVE_VARIANT["lockMaxSum"]:
+    if up["limitPrice"] + down["limitPrice"] > sim.SIM_LOCK_MAX_SUM:
         return None
     if net_per_share < sim.SIM_MIN_NET_LOCK_PER_SHARE or total_cost > cash - MIN_CASH_RESERVE_USD:
         return None
@@ -603,7 +597,7 @@ async def evaluate_and_act(
         net_per_share = (pos["shares"] - projected_cost) / pos["shares"]
         cash = await _strategy_cash(dry_run)
         if (
-            float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= LIVE_VARIANT["lockMaxSum"]
+            float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= sim.SIM_LOCK_MAX_SUM
             and net_per_share >= sim.SIM_MIN_NET_LOCK_PER_SHARE
             and hedge["riskNotional"] + hedge["fee"] <= max(0.0, cash - MIN_CASH_RESERVE_USD)
         ):
@@ -627,10 +621,6 @@ async def strategy_loop() -> None:
     log.info(
         f"  LIVE_TRADING={live.LIVE_TRADING} · POLY_STRATEGY_ARMED={STRATEGY_ARMED} "
         f"· REAL_EXECUTION={REAL_EXECUTION_ENABLED}"
-    )
-    log.info(
-        f"  策略門檻={LIVE_VARIANT_ID}（進場<=${LIVE_VARIANT['entryMaxPrice']:.2f} "
-        f"鎖利合計<=${LIVE_VARIANT['lockMaxSum']:.2f}）· 與模擬版 A/B 測試結果同步"
     )
     log.info(f"  pair budget={STAKE_PCT:.1f}% · hard cap=${MAX_PAIR_BUDGET_USD:.2f}")
     log.info(f"  cash reserve=${MIN_CASH_RESERVE_USD:.2f} · action cooldown={ACTION_COOLDOWN_SECONDS:.0f}s")
