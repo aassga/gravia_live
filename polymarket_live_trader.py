@@ -114,10 +114,25 @@ def get_usdc_balance() -> dict:
     )
 
 
+def get_conditional_balance(token_id: str) -> float:
+    """查詢單一 outcome token 的真實持有股數（唯讀）。"""
+    from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+
+    raw = get_client().get_balance_allowance(
+        params=BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+    )
+    return int(raw.get("balance", 0)) / 1_000_000
+
+
 def get_open_orders() -> list:
     """查詢目前掛在真實帳號上的未成交訂單（唯讀）。"""
     client = get_client()
     return client.get_open_orders()
+
+
+def get_order(order_id: str) -> dict:
+    """查詢單筆訂單狀態（唯讀），用來追蹤 delayed 回覆是否真正成交。"""
+    return get_client().get_order(order_id)
 
 
 def get_trade_history(limit: int = 50) -> list:
@@ -126,6 +141,70 @@ def get_trade_history(limit: int = 50) -> list:
     trades = client.get_trades(only_first_page=True)
     trades.sort(key=lambda t: t.get("match_time", t.get("timestamp", 0)), reverse=True)
     return trades[:limit]
+
+
+def summarize_order_fills(order_response: dict, trades: list) -> dict | None:
+    """從近期成交紀錄還原某筆訂單的實際成交均價；找不到時回傳 None。"""
+    if not isinstance(order_response, dict):
+        return None
+    order_id = str(order_response.get("orderID") or order_response.get("orderId") or order_response.get("id") or "")
+    trade_ids = {
+        str(value)
+        for value in (order_response.get("tradeIDs") or order_response.get("associate_trades") or [])
+        if value
+    }
+    matched = []
+    for trade in trades or []:
+        if not isinstance(trade, dict):
+            continue
+        trade_id = str(trade.get("id") or trade.get("trade_id") or "")
+        taker_order_id = str(trade.get("taker_order_id") or trade.get("takerOrderId") or "")
+        maker_order_ids = {
+            str(item.get("order_id") or item.get("orderId") or "")
+            for item in (trade.get("maker_orders") or trade.get("makerOrders") or [])
+            if isinstance(item, dict)
+        }
+        if (trade_ids and trade_id in trade_ids) or (order_id and (taker_order_id == order_id or order_id in maker_order_ids)):
+            matched.append(trade)
+    if not matched:
+        return None
+
+    shares = 0.0
+    notional = 0.0
+    reported_fee = 0.0
+    has_reported_fee = False
+    for trade in matched:
+        try:
+            size = float(trade.get("size", trade.get("matched_amount", 0)) or 0)
+            price = float(trade.get("price", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if size <= 0 or not 0 < price < 1:
+            continue
+        shares += size
+        notional += size * price
+        for key in ("feeUsdc", "fee_usdc", "fee"):
+            if trade.get(key) not in (None, ""):
+                try:
+                    reported_fee += float(trade[key])
+                    has_reported_fee = True
+                except (TypeError, ValueError):
+                    pass
+                break
+    if shares <= 0:
+        return None
+    return {
+        "shares": shares,
+        "price": notional / shares,
+        "notional": notional,
+        "fee": reported_fee if has_reported_fee else None,
+        "tradeIds": [str(t.get("id") or t.get("trade_id") or "") for t in matched],
+    }
+
+
+def get_order_fill_summary(order_response: dict, limit: int = 100) -> dict | None:
+    """查詢近期真實成交並回傳指定 FOK 訂單的加權平均成交資料。"""
+    return summarize_order_fills(order_response, get_trade_history(limit))
 
 
 def build_order(token_id: str, side: str, price: float, size: float):
@@ -151,6 +230,7 @@ def place_limit_order(
     size: float,
     dry_run: bool | None = None,
     order_type: str = "GTC",
+    validate_signature: bool = True,
 ) -> dict:
     """
     下一筆限價單。
@@ -166,14 +246,21 @@ def place_limit_order(
     """
     effective_dry_run = (not LIVE_TRADING) if dry_run is None else dry_run
 
-    signed_order = build_order(token_id, side, price, size)
-
     if effective_dry_run:
+        # CLI preview 預設仍會建立並簽署訂單；自動策略的 dry-run 可關閉此驗證，
+        # 方便在沒有私鑰的環境完整測試策略，且絕不會呼叫下單 API。
+        if validate_signature:
+            build_order(token_id, side, price, size)
         log.info(
             f"[DRY-RUN] 不會送出 —— {side.upper()} token={token_id} "
             f"price={price} size={size} order_type={order_type}（LIVE_TRADING={LIVE_TRADING}）"
         )
-        return {"dry_run": True, "would_submit": {"token_id": token_id, "side": side, "price": price, "size": size, "order_type": order_type}}
+        return {
+            "dry_run": True,
+            "success": True,
+            "status": "matched",
+            "would_submit": {"token_id": token_id, "side": side, "price": price, "size": size, "order_type": order_type},
+        }
 
     if not LIVE_TRADING:
         raise RuntimeError(
@@ -184,10 +271,31 @@ def place_limit_order(
     from py_clob_client_v2.clob_types import OrderType
 
     client = get_client()
+    signed_order = build_order(token_id, side, price, size)
     log.warning(f"[LIVE] 送出真實訂單 —— {side.upper()} token={token_id} price={price} size={size} order_type={order_type}")
     resp = client.post_order(signed_order, getattr(OrderType, order_type))
     log.warning(f"[LIVE] 訂單回應：{resp}")
     return resp
+
+
+def order_response_filled(response: dict) -> bool:
+    """只有明確 matched 才視為成交。
+
+    success=true 只代表 CLOB 接受請求；delayed/live/unmatched 都不能當成已成交。
+    FOK 在 matched 狀態下才能安全地建立完整持倉記錄。
+    """
+    if not isinstance(response, dict):
+        return False
+    if response.get("dry_run"):
+        return True
+    status = str(response.get("status", "")).lower()
+    # GET /data/order/{id} 使用 ORDER_STATUS_MATCHED，且不包含 success 欄位。
+    if status == "order_status_matched":
+        return bool(response.get("id") or response.get("orderID") or response.get("orderId"))
+    accepted = response.get("success")
+    if accepted is None:
+        accepted = response.get("ok", False)
+    return bool(accepted) and status == "matched"
 
 
 def cancel_order(order_id: str) -> dict:

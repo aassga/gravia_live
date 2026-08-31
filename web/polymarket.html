@@ -97,7 +97,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   <!-- STATUS BAR -->
   <div style="display:flex;gap:14px;padding:0 4px;color:#444;font-family:'Share Tech Mono';font-size:10.5px;letter-spacing:1px;align-items:center;">
     <span id="status-text" style="color:#555;">等待數據中...</span>
-    <span>BTC 現貨 <span id="btc-price" style="color:#f0f0f0">—</span> <span id="btc-change">—</span></span>
+    <span>BTC 參考價 <span id="btc-price" style="color:#f0f0f0">—</span> <span id="btc-change">—</span></span>
     <span style="flex:1"></span>
     <span id="mkt-question" style="color:#888;">—</span>
     <span>剩餘 <span id="mkt-countdown" class="yellow">—</span></span>
@@ -197,11 +197,11 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
           style="flex:1;background:#0d0d0d;border:1px solid #444;color:#f0f0f0;font-family:'JetBrains Mono';font-size:10px;padding:2px 4px;border-radius:2px;">
           <option value="1">1% 資產／注</option>
           <option value="2">2% 資產／注</option>
-          <option value="3" selected>3% 資產／注</option>
+          <option value="3">3% 資產／注</option>
           <option value="5">5% 資產／注</option>
           <option value="8">8% 資產／注</option>
           <option value="10">10% 資產／注</option>
-          <option value="15">15% 資產／注</option>
+          <option value="15" selected>15% 資產／注</option>
           <option value="20">20% 資產／注</option>
         </select>
         <button id="cfg-stake-apply" type="button"
@@ -226,14 +226,17 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     <div class="panel panel-g">
       <div class="lbl green" style="margin-bottom:6px;">◦ 損益總計</div>
       <div id="sum-pnl" style="font-size:26px;font-weight:700;letter-spacing:-1px;">$0.00</div>
-      <div style="display:flex;gap:14px;margin-top:8px;">
+      <div style="display:flex;gap:14px;margin-top:8px;flex-wrap:wrap;">
         <div><div class="lbl">交易數</div><div id="sum-trades" style="font-size:14px;">0</div></div>
         <div><div class="lbl">勝率</div><div id="sum-winrate" class="green" style="font-size:14px;">—</div></div>
         <div><div class="lbl">結算中</div><div id="sum-pending" class="yellow" style="font-size:14px;">0</div></div>
+        <div><div class="lbl">累計費用</div><div id="sum-fees" style="font-size:14px;">$0.00</div></div>
+        <div><div class="lbl">鎖利 / 方向 / 提早</div><div id="sum-trade-types" style="font-size:14px;">0 / 0 / 0</div></div>
+        <div><div class="lbl">最大回撤</div><div id="sum-drawdown" class="red" style="font-size:14px;">0.00%</div></div>
       </div>
       <div style="margin-top:8px;border-top:1px solid #1a1a1a;padding-top:6px;font-size:9px;color:#444;">
-        策略：單邊 ≤ <span id="sum-entry-th">$0.40</span> 先進場，兩邊合計 ≤ <span id="sum-lock-th">$0.90</span> 配對鎖利
-        <br>下注 <span id="sum-stake">3%</span> 資產（複利，模擬不動用真實資金）
+        策略：單邊 Ask VWAP ≤ <span id="sum-entry-th">$0.40</span> 且公平價優勢足夠才進場；兩邊總價 ≤ <span id="sum-lock-th">$0.90</span> 且扣費用後為正才鎖利
+        <br>每組完整配對最多使用 <span id="sum-stake">15%</span> 資產（含預留第二腿與費用）
       </div>
     </div>
   </div>
@@ -249,7 +252,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
       <div class="lbl green">◦ ETH 5分鐘 Up/Down（獨立策略，跟 BTC 分開記帳）</div>
       <div style="display:flex;gap:14px;font-size:10.5px;color:#888;">
-        <span>ETH現貨 <span id="eth-spot" style="color:#f0f0f0">—</span></span>
+        <span>ETH參考價 <span id="eth-spot" style="color:#f0f0f0">—</span></span>
         <span id="eth-question" style="color:#666;">—</span>
         <span>剩餘 <span id="eth-countdown" class="yellow">—</span></span>
       </div>
@@ -381,7 +384,8 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
 
     if(typeof d.upPrice==='number'){
       $('up-price').textContent=fmtUSD(d.upPrice);
-      $('up-prob').textContent=(d.upPrice*100).toFixed(1)+'%';
+      const fair=d.fair&&typeof d.fair.fairUp==='number' ? ` · 模型 ${(d.fair.fairUp*100).toFixed(1)}%` : '';
+      $('up-prob').textContent='市場 '+(d.upPrice*100).toFixed(1)+'%'+fair;
     }
     if(typeof d.downPrice==='number'){
       $('down-price').textContent=fmtUSD(d.downPrice);
@@ -425,7 +429,8 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     }
     if(typeof eth.upPrice==='number'){
       $('eth-up-price').textContent=fmtUSD(eth.upPrice);
-      $('eth-up-prob').textContent=(eth.upPrice*100).toFixed(1)+'%';
+      const fair=eth.fair&&typeof eth.fair.fairUp==='number' ? ` · 模型 ${(eth.fair.fairUp*100).toFixed(1)}%` : '';
+      $('eth-up-prob').textContent='市場 '+(eth.upPrice*100).toFixed(1)+'%'+fair;
     }
     if(typeof eth.downPrice==='number'){
       $('eth-down-price').textContent=fmtUSD(eth.downPrice);
@@ -448,13 +453,13 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     pnlEl.textContent=fmtMoney(totalPnl);
     pnlEl.style.color=totalPnl>=0?'#00ff9d':'#ff3a5c';
     const winRate=sim.totalTrades>0?Math.round(sim.wins/sim.totalTrades*100)+'%':'—';
-    $('eth-stats').textContent=`${sim.totalTrades||0} 筆 · 勝率 ${winRate}`;
+    $('eth-stats').textContent=`${sim.totalTrades||0} 筆 · 勝率 ${winRate} · 費用 ${fmtMoney(sim.totalFees||0)}`;
 
     const trades=(sim.trades||[]).slice(0,6);
     $('eth-trades').innerHTML = trades.length ? trades.map(t=>{
       const win=t.pnl>=0;
       const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
-      const dir=t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:`${t.side} 方向性`;
+      const dir=t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:(t.tradeType==='early_exit'?`${t.side} 提早退出`:`${t.side} 方向性`);
       return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #ffffff08;gap:4px;">
         <span style="color:#444;">${dt}</span>
         <span class="${t.hedged?'up-b':(win?'up-b':'dn-b')}" style="font-size:9px;">${dir}</span>
@@ -481,15 +486,15 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
 
     $('pos-side').textContent=p.side;
     $('pos-side').className=p.side==='Up'?'green':'red';
-    $('pos-entry').textContent='$'+p.entryPrice.toFixed(3);
+    $('pos-entry').textContent='$'+p.entryPrice.toFixed(3)+(typeof p.entryDecisionPrice==='number'?'（判斷 $'+p.entryDecisionPrice.toFixed(3)+'）':'');
     $('pos-shares').textContent=p.shares.toFixed(2)+' 股'+(typeof p.stakeUsd==='number'?'（下注 $'+p.stakeUsd.toFixed(2)+'）':'');
 
     const hedgeBadge=$('pos-hedge-badge'), hedgeRow=$('pos-hedge-row');
     if(p.hedged){
       hedgeBadge.style.display='inline-block';
       hedgeRow.style.display='block';
-      $('pos-hedge-price').textContent=p.hedgeSide+' @ $'+p.hedgePrice.toFixed(3);
-      const locked=p.shares*(1-p.entryPrice-p.hedgePrice);
+      $('pos-hedge-price').textContent=p.hedgeSide+' @ $'+p.hedgePrice.toFixed(3)+(typeof p.hedgeDecisionPrice==='number'?'（判斷 $'+p.hedgeDecisionPrice.toFixed(3)+'）':'');
+      const locked=typeof p.lockedPnl==='number' ? p.lockedPnl : p.shares*(1-p.entryPrice-p.hedgePrice);
       const pnlEl=$('pos-pnl');
       pnlEl.textContent=fmtMoney(locked)+'（已鎖定）';
       pnlEl.style.color=locked>=0?'#00ff9d':'#ff3a5c';
@@ -509,6 +514,9 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     $('sum-trades').textContent=sim.totalTrades;
     $('sum-winrate').textContent=sim.totalTrades>0?Math.round(sim.wins/sim.totalTrades*100)+'%':'—';
     $('sum-pending').textContent=sim.pendingSettlements||0;
+    $('sum-fees').textContent=fmtMoney(sim.totalFees||0);
+    $('sum-trade-types').textContent=`${sim.lockedTrades||0} / ${sim.directionalTrades||0} / ${sim.earlyExits||0}`;
+    $('sum-drawdown').textContent=(sim.maxDrawdown||0).toFixed(2)+'%';
 
     if(typeof sim.portfolio==='number'){
       const pf=$('asset-portfolio');
@@ -562,7 +570,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       const list=trades.length?trades.map(t=>{
         const win=t.pnl>=0;
         const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
-        const dir=t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:`${t.side} 方向性`;
+        const dir=t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:(t.tradeType==='early_exit'?`${t.side} 提早退出`:`${t.side} 方向性`);
         return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #ffffff08;font-size:9.5px;gap:4px;">
           <span style="color:#444;">${dt}</span>
           <span class="${t.hedged?'up-b':(win?'up-b':'dn-b')}" style="font-size:9px;">${dir}</span>

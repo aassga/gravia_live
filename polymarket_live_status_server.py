@@ -31,6 +31,7 @@ PORT = 8767
 POLL_INTERVAL = 10  # 真實帳戶查詢，別抓太快，10 秒一次就夠
 
 BASELINE_FILE = os.path.join(os.path.dirname(__file__), "polymarket_live_baseline.json")
+STRATEGY_STATE_FILE = os.path.join(os.path.dirname(__file__), "polymarket_live_strategy_state.json")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("polymarket_live_status")
@@ -50,6 +51,31 @@ def _load_or_init_baseline(current_balance: float) -> dict:
         json.dump(baseline, f)
     log.info(f"設定總收益起始基準：${current_balance:.2f}")
     return baseline
+
+
+def _load_strategy_state() -> dict:
+    """讀取自動策略持久化狀態。這個狀態檔不含私鑰，本伺服器也不會寫入它。"""
+    if not os.path.exists(STRATEGY_STATE_FILE):
+        return {}
+    try:
+        with open(STRATEGY_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        position = state.get("position")
+        return {
+            "halted": bool(state.get("halted", False)),
+            "haltReason": state.get("haltReason"),
+            "position": position,
+            "pendingSettlements": len(state.get("pendingSettlements", [])),
+            "totalPnlEstimate": float(state.get("totalPnlEstimate", 0)),
+            "totalFeesEstimate": float(state.get("totalFeesEstimate", 0)),
+            "totalTrades": int(state.get("totalTrades", 0)),
+            "lockedTrades": int(state.get("lockedTrades", 0)),
+            "directionalTrades": int(state.get("directionalTrades", 0)),
+            "earlyExits": int(state.get("earlyExits", 0)),
+            "updatedAt": state.get("updatedAt"),
+        }
+    except Exception as exc:
+        return {"halted": True, "haltReason": f"strategy_state_read_failed: {exc}"}
 
 
 def _compute_open_positions(trades: list, max_tokens: int = 10) -> list:
@@ -115,6 +141,7 @@ def _fetch_state() -> dict:
     orders = live.get_open_orders()
     trades = live.get_trade_history(limit=30)
     positions = _compute_open_positions(trades)
+    strategy_state = _load_strategy_state()
 
     balance_usdc = int(balance_raw.get("balance", 0)) / 1_000_000
     baseline = _load_or_init_baseline(balance_usdc)
@@ -126,6 +153,8 @@ def _fetch_state() -> dict:
         "fetchedAt": time.time(),
         "funderAddress": live.FUNDER_ADDRESS,
         "liveTradingEnabled": live.LIVE_TRADING,
+        "strategyArmed": os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true",
+        "strategyExecutionEnabled": live.LIVE_TRADING and os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true",
         "balanceUsdc": balance_usdc,
         "baselineBalance": baseline["baselineBalance"],
         "baselineSetAt": baseline["baselineSetAt"],
@@ -133,6 +162,7 @@ def _fetch_state() -> dict:
         "openOrders": orders,
         "openPositions": positions,
         "trades": trades,
+        "strategyState": strategy_state,
     }
 
 

@@ -8,3 +8,17 @@ venv/
 
 # 真實損益頁面的本機執行狀態（起始基準金額），不是機密，但屬於執行期產生的資料
 polymarket_live_baseline.json
+polymarket_live_strategy_state.json
+polymarket_live_strategy_state.json.tmp
+
+# 紙上模擬的本機狀態、成交與報價歷史
+polymarket_sim.sqlite3
+polymarket_sim.sqlite3-wal
+polymarket_sim.sqlite3-shm
+
+# 執行期產生的 log，不進版控
+logs/
+
+# 測試快取
+tests/__pycache__/
+.pytest_cache/

@@ -110,6 +110,14 @@
   </div>
 
   <div class="panel">
+    <div class="panel-title">自動策略狀態</div>
+    <div id="strategy-health" style="font-size:18px;font-weight:700;color:#7a6a55;">尚未啟動</div>
+    <div id="strategy-position" class="sub-num">部位：—</div>
+    <div id="strategy-stats" class="sub-num">估算淨損益 — · 費用 — · 交易 —</div>
+    <div id="strategy-reason" class="sub-num" style="color:#ff3a5c;"></div>
+  </div>
+
+  <div class="panel">
     <div class="panel-title">目前持有部位（尚未兌換，即時市值）</div>
     <table>
       <thead><tr><th>Token</th><th>股數</th><th>進場價</th><th>現價</th><th>市值</th><th>損益</th></tr></thead>
@@ -200,9 +208,12 @@ function onData(d){
     connBadge.innerHTML = '<span class="badge-dot"></span> 查詢失敗' + (d.error ? '：' + d.error : '');
   }
 
-  if(d.liveTradingEnabled){
+  if(d.strategyExecutionEnabled){
     liveBadge.className = 'badge badge-live';
-    liveBadge.textContent = '下單開關：已開啟（LIVE_TRADING=true）';
+    liveBadge.textContent = '下單開關：已武裝（雙開關開啟）';
+  } else if(d.liveTradingEnabled){
+    liveBadge.className = 'badge badge-off';
+    liveBadge.textContent = '下單開關：LIVE 已開，策略未武裝';
   } else {
     liveBadge.className = 'badge badge-off';
     liveBadge.textContent = '下單開關：關閉（dry-run）';
@@ -224,6 +235,27 @@ function onData(d){
   }
 
   document.getElementById('funder-addr').textContent = d.funderAddress || '—';
+
+  const strategy=d.strategyState||{};
+  const health=document.getElementById('strategy-health');
+  if(!strategy.updatedAt && !strategy.halted){
+    health.textContent='尚未啟動'; health.style.color='#7a6a55';
+  }else if(strategy.halted){
+    health.textContent='⛔ 已自動停止下單'; health.style.color='#ff3a5c';
+  }else{
+    health.textContent='● 策略狀態正常'; health.style.color='#3ddc84';
+  }
+  const sp=strategy.position;
+  document.getElementById('strategy-position').textContent=sp
+    ? `部位：${sp.side}${sp.hedged?' / '+sp.hedgeSide+' 已鎖利':' 方向曝險'} · ${Number(sp.shares||0).toFixed(2)} 股`+
+      ` · 成交 $${Number(sp.entryPrice||0).toFixed(3)} / 判斷 $${Number(sp.entryLimitPrice||sp.entryPrice||0).toFixed(3)}`+
+      ` · ${sp.dryRun?'DRY-RUN':'REAL'}`
+    : `部位：空手 · 待結算 ${strategy.pendingSettlements||0}`;
+  document.getElementById('strategy-stats').textContent=
+    `保守淨損益估計 ${Number(strategy.totalPnlEstimate||0)>=0?'+':''}$${Number(strategy.totalPnlEstimate||0).toFixed(2)}`+
+    ` · 費用 $${Number(strategy.totalFeesEstimate||0).toFixed(2)} · 交易 ${strategy.totalTrades||0}`+
+    ` · 鎖利/方向/提早 ${strategy.lockedTrades||0}/${strategy.directionalTrades||0}/${strategy.earlyExits||0}`;
+  document.getElementById('strategy-reason').textContent=strategy.haltReason?`原因：${strategy.haltReason}`:'';
 
   const positions = d.openPositions || [];
   const trades = d.trades || [];
