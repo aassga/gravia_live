@@ -18317,3 +18317,13 @@
 2026-09-01 08:40:38,178 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=78344213648295450426890172539317215292663044955905684942331352493127247498106 "HTTP/2 200 OK"
 2026-09-01 08:40:38,452 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=4846715531790918381628480202289360627460924905313030829578647682427748882306 "HTTP/2 200 OK"
 2026-09-01 08:40:38,453 [INFO] 真實帳戶狀態：餘額 $15.63，持有部位 0 個，成交 30 筆
+2026-09-01 08:40:48,818 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 08:40:49,097 [INFO] HTTP Request: GET https://clob.polymarket.com/data/orders?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 08:40:49,377 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 08:40:49,699 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=28140491325609139681373495896906513299343718136247398549621295756464036662113 "HTTP/2 200 OK"
+2026-09-01 08:40:49,971 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=68423698683868272710335384176061423416953787015887257116224453529521725430901 "HTTP/2 200 OK"
+2026-09-01 08:40:50,245 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=36674330119101040538983828981293748516249927574148437913291204483484551528666 "HTTP/2 200 OK"
+2026-09-01 08:40:50,518 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=12422092068131822790779861513788149960789938631554648095147518925146866959219 "HTTP/2 200 OK"
+2026-09-01 08:40:50,798 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=78344213648295450426890172539317215292663044955905684942331352493127247498106 "HTTP/2 200 OK"
+2026-09-01 08:40:51,295 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=4846715531790918381628480202289360627460924905313030829578647682427748882306 "HTTP/2 200 OK"
+2026-09-01 08:40:51,297 [INFO] 真實帳戶狀態：餘額 $15.63，持有部位 0 個，成交 30 筆
