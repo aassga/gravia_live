@@ -42,7 +42,7 @@ log = logging.getLogger("polymarket_live_strategy")
 POLL_INTERVAL = 3
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_live_strategy_state.json")
 
-STAKE_PCT = max(0.5, min(25.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
+STAKE_PCT = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
 STRATEGY_ARMED = os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
 REAL_EXECUTION_ENABLED = live.LIVE_TRADING and STRATEGY_ARMED
 MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
@@ -51,6 +51,13 @@ DRY_RUN_BALANCE_USD = max(1.0, float(os.environ.get("POLY_DRY_RUN_BALANCE_USD", 
 ACTION_COOLDOWN_SECONDS = max(1.0, float(os.environ.get("POLY_ACTION_COOLDOWN_SECONDS", "10.0")))
 ORDER_CONFIRM_ATTEMPTS = max(1, int(os.environ.get("POLY_ORDER_CONFIRM_ATTEMPTS", "6")))
 ORDER_CONFIRM_INTERVAL = max(0.5, float(os.environ.get("POLY_ORDER_CONFIRM_INTERVAL", "1.0")))
+
+# 真實版套用模擬版 A/B 測試裡的「BTC 目前」這組門檻（sim.AB_VARIANT_BY_ID["main"]：0.40/0.90，
+# 底層就是 sim.SIM_ENTRY_MAX_PRICE/SIM_LOCK_MAX_SUM）。這裡引用 AB_VARIANT_BY_ID 而不是
+# 直接寫死數字，是為了跟模擬版共用同一個真實來源，模擬版調整這組門檻時真實版會自動跟著同步。
+_LIVE_VARIANT = sim.AB_VARIANT_BY_ID["main"]
+ENTRY_MAX_PRICE = _LIVE_VARIANT["entryMaxPrice"]
+LOCK_MAX_SUM    = _LIVE_VARIANT["lockMaxSum"]
 
 
 def _new_live_state() -> dict:
@@ -96,7 +103,17 @@ def save_live_state() -> None:
     tmp_path = STATE_FILE + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(live_state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, STATE_FILE)
+    # 這個檔案在 OneDrive 同步的資料夾裡，OneDrive 偶爾會在同步當下短暫鎖住檔案，
+    # 讓 os.replace 原子改名瞬間失敗（WinError 5）。重試幾次、每次等一下下就好，
+    # 不是真的權限問題，鎖通常幾十毫秒內就會放開。
+    for attempt in range(5):
+        try:
+            os.replace(tmp_path, STATE_FILE)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1 * (attempt + 1))
 
 
 def reset_live_state_for_tests() -> None:
@@ -219,6 +236,12 @@ async def _resolved_execution(plan: dict, response: dict, dry_run: bool) -> dict
     return {"price": price, "notional": notional, "fee": fee, "source": source}
 
 
+def _ask_depth(book: dict) -> float:
+    """訂單簿目前看得到的賣單總深度，用來把想要的股數縮到真的吃得到的量，
+    避免算出來的股數超過深度、FOK/FAK 整筆判定未成交，白白錯過機會。"""
+    return sum(float(a.get("size", 0)) for a in (book.get("asks") or []))
+
+
 def _buy_plan(side: str, book: dict, shares: float, fair_probability: float | None = None) -> dict | None:
     fill = sim.simulate_buy_fill(book, shares)
     if not fill:
@@ -243,7 +266,7 @@ def _sell_plan(side: str, book: dict, shares: float) -> dict | None:
 
 def _entry_candidate(side: str, book: dict, shares: float, fair_probability: float) -> dict | None:
     plan = _buy_plan(side, book, shares, fair_probability)
-    if not plan or plan["limitPrice"] > sim.SIM_ENTRY_MAX_PRICE:
+    if not plan or plan["limitPrice"] > ENTRY_MAX_PRICE:
         return None
     if plan["edge"] is None or plan["edge"] < sim.SIM_MIN_ENTRY_EDGE:
         return None
@@ -253,7 +276,7 @@ def _entry_candidate(side: str, book: dict, shares: float, fair_probability: flo
 def _target_pair_order(cash: float) -> tuple[float, float]:
     """跟模擬版共用同一個計算函式（sim.target_pair_order），只是帶入真實版自己的
     下注比例／資金上限／保留額——公式本身跟模擬版保證一致，不會各寫一份長歪。"""
-    return sim.target_pair_order(cash, STAKE_PCT, sim.SIM_LOCK_MAX_SUM, MAX_PAIR_BUDGET_USD, MIN_CASH_RESERVE_USD)
+    return sim.target_pair_order(cash, STAKE_PCT, LOCK_MAX_SUM, MAX_PAIR_BUDGET_USD, MIN_CASH_RESERVE_USD)
 
 
 def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: float) -> tuple[dict, dict] | None:
@@ -263,7 +286,7 @@ def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: floa
         return None
     total_cost = up["riskNotional"] + up["fee"] + down["riskNotional"] + down["fee"]
     net_per_share = (shares - total_cost) / shares
-    if up["limitPrice"] + down["limitPrice"] > sim.SIM_LOCK_MAX_SUM:
+    if up["limitPrice"] + down["limitPrice"] > LOCK_MAX_SUM:
         return None
     if net_per_share < sim.SIM_MIN_NET_LOCK_PER_SHARE or total_cost > cash - MIN_CASH_RESERVE_USD:
         return None
@@ -275,8 +298,27 @@ def _get_real_cash() -> float:
     return int(raw.get("balance", 0)) / 1_000_000
 
 
+# 每輪迴圈（約 3 秒一次）都查一次真實餘額太頻繁——閒置時沒有任何候選也照查不誤，
+# 洗一堆重複 log。餘額只會因為我們自己下單、或部位結算才會變，兩者都受 10 秒的
+# ACTION_COOLDOWN_SECONDS 限制，所以快取 8 秒（小於冷卻時間）不會影響下單決策的正確性。
+CASH_CACHE_TTL_SECONDS = 8.0
+_cash_cache: dict = {"value": None, "at": 0.0}
+
+
+def _invalidate_cash_cache() -> None:
+    _cash_cache["at"] = 0.0
+
+
 async def _strategy_cash(dry_run: bool) -> float:
-    return DRY_RUN_BALANCE_USD if dry_run else await asyncio.to_thread(_get_real_cash)
+    if dry_run:
+        return DRY_RUN_BALANCE_USD
+    now = time.time()
+    if _cash_cache["value"] is not None and now - _cash_cache["at"] < CASH_CACHE_TTL_SECONDS:
+        return _cash_cache["value"]
+    value = await asyncio.to_thread(_get_real_cash)
+    _cash_cache["value"] = value
+    _cash_cache["at"] = now
+    return value
 
 
 async def _ensure_no_unmanaged_current_position() -> bool:
@@ -302,16 +344,27 @@ async def _ensure_no_unmanaged_current_position() -> bool:
 async def _submit_fok(token_id: str, side: str, plan: dict, dry_run: bool) -> tuple[str, dict]:
     live_state["lastActionAt"] = time.time()
     save_live_state()
-    response = await asyncio.to_thread(
-        live.place_limit_order,
-        token_id,
-        side,
-        plan["limitPrice"],
-        plan["shares"],
-        dry_run,
-        "FOK",
-        not dry_run,
-    )
+    if not dry_run:
+        _invalidate_cash_cache()
+    from py_clob_client_v2.exceptions import PolyApiException
+
+    try:
+        response = await asyncio.to_thread(
+            live.place_limit_order,
+            token_id,
+            side,
+            plan["limitPrice"],
+            plan["shares"],
+            dry_run,
+            "FOK",
+            not dry_run,
+        )
+    except PolyApiException as exc:
+        # FOK 沒吃滿（訂單簿在下單瞬間跟決策當下的快照之間變薄了）是正常會發生的情況，
+        # 不是程式錯誤——CLOB 直接回 400 而不是回一個帶 status 的訂單物件，用例外表達。
+        # 當成跟 status=unmatched 一樣的「這次沒成交」處理，不要整包當未預期例外往外拋。
+        log.info(f"[LIVE] FOK 未成交（下單瞬間深度不夠）：{exc}")
+        return "not_filled", {"error": str(exc)}
     if live.order_response_filled(response):
         return "filled", response
 
@@ -567,15 +620,20 @@ async def evaluate_and_act(
         if budget < 1.0 or shares < 1.0:
             return
 
-        direct = _direct_pair_plans(up_book, down_book, shares, cash)
+        # 配對鎖利兩腿股數要一致，用兩邊深度較小的那個縮限；單邊方向性進場則各自
+        # 用自己那邊的深度縮限。縮到比想要的股數少，好過整筆因深度不夠而判定未成交。
+        paired_shares = min(shares, _ask_depth(up_book), _ask_depth(down_book))
+        direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
         if direct:
             await _execute_direct_pair(session, slug, direct[0], direct[1], fair, dry_run)
             return
         if not fair:
             return
+        up_shares = min(shares, _ask_depth(up_book))
+        down_shares = min(shares, _ask_depth(down_book))
         candidates = [
-            _entry_candidate("Up", up_book, shares, fair["fairUp"]),
-            _entry_candidate("Down", down_book, shares, fair["fairDown"]),
+            _entry_candidate("Up", up_book, up_shares, fair["fairUp"]) if up_shares >= 1.0 else None,
+            _entry_candidate("Down", down_book, down_shares, fair["fairDown"]) if down_shares >= 1.0 else None,
         ]
         candidates = [candidate for candidate in candidates if candidate]
         if candidates:
@@ -597,7 +655,7 @@ async def evaluate_and_act(
         net_per_share = (pos["shares"] - projected_cost) / pos["shares"]
         cash = await _strategy_cash(dry_run)
         if (
-            float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= sim.SIM_LOCK_MAX_SUM
+            float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= LOCK_MAX_SUM
             and net_per_share >= sim.SIM_MIN_NET_LOCK_PER_SHARE
             and hedge["riskNotional"] + hedge["fee"] <= max(0.0, cash - MIN_CASH_RESERVE_USD)
         ):
@@ -624,6 +682,7 @@ async def strategy_loop() -> None:
     )
     log.info(f"  pair budget={STAKE_PCT:.1f}% · hard cap=${MAX_PAIR_BUDGET_USD:.2f}")
     log.info(f"  cash reserve=${MIN_CASH_RESERVE_USD:.2f} · action cooldown={ACTION_COOLDOWN_SECONDS:.0f}s")
+    log.info(f"  entry <= ${ENTRY_MAX_PRICE}　lock sum <= ${LOCK_MAX_SUM}（{_LIVE_VARIANT['label']}）")
     log.info(
         f"  entry edge>={sim.SIM_MIN_ENTRY_EDGE:.3f} · net lock/share>={sim.SIM_MIN_NET_LOCK_PER_SHARE:.3f} "
         f"· no new entry under {sim.SIM_MIN_ENTRY_REMAINING:.0f}s"

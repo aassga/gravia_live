@@ -38,6 +38,7 @@ log = logging.getLogger("polymarket_live_status")
 
 CLIENTS: set = set()
 last_payload: dict = {"connected": False, "error": None, "fetchedAt": time.time()}
+_RESOLVED_TOKENS: set = set()  # 已確認市場結算、訂單簿撤掉的 token，之後不用再查，省 API 呼叫也省吵人的 404 log
 
 
 def _load_or_init_baseline(current_balance: float) -> dict:
@@ -97,6 +98,8 @@ def _compute_open_positions(trades: list, max_tokens: int = 10) -> list:
 
     positions = []
     for tid in seen_tokens:
+        if tid in _RESOLVED_TOKENS:
+            continue
         try:
             bal = client.get_balance_allowance(
                 params=BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=tid)
@@ -116,7 +119,12 @@ def _compute_open_positions(trades: list, max_tokens: int = 10) -> list:
             mid = client.get_midpoint(tid)
             current_price = float(mid.get("mid", 0) or 0)
         except Exception:
-            pass
+            # 查不到中價通常代表這個 token 的市場已經結算、訂單簿已被撤掉
+            # （輸的那邊 token 餘額不會歸零，但市場已經沒有意義了）——
+            # 這種情況視為已結算，不算持有中，不然結算過的舊部位會永遠留在清單裡。
+            # 市場結算是永久狀態，記下來以後不用再查，省得每輪都打 API 又洗一堆 404 log。
+            _RESOLVED_TOKENS.add(tid)
+            continue
 
         value = shares * current_price if current_price is not None else None
         pnl = (value - cost) if value is not None else None
