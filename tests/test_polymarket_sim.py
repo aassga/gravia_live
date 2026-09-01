@@ -83,15 +83,15 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual(up_fill["decisionPrice"] + down_fill["decisionPrice"], 0.91)
         self.assertFalse(sim._try_direct_pair("main", "btc-window", up_book, down_book))
 
-    def test_window_roll_does_not_clear_other_asset_position(self):
-        btc_pos = {"windowSlug": "btc-window"}
-        eth_pos = {"windowSlug": "eth-window"}
-        sim.ab_states["main"]["position"] = btc_pos
-        sim.ab_states["eth-main"]["position"] = eth_pos
-        sim.queue_settlement("btc-window")
+    def test_window_roll_does_not_clear_other_variant_position(self):
+        main_pos = {"windowSlug": "btc-window-a"}
+        loose_pos = {"windowSlug": "btc-window-b"}
+        sim.ab_states["main"]["position"] = main_pos
+        sim.ab_states["loose"]["position"] = loose_pos
+        sim.queue_settlement("btc-window-a")
         self.assertIsNone(sim.ab_states["main"]["position"])
-        self.assertEqual(sim.ab_states["main"]["pendingSettlements"], [btc_pos])
-        self.assertIs(sim.ab_states["eth-main"]["position"], eth_pos)
+        self.assertEqual(sim.ab_states["main"]["pendingSettlements"], [main_pos])
+        self.assertIs(sim.ab_states["loose"]["position"], loose_pos)
 
     def test_pending_directional_position_keeps_capital_reserved(self):
         pos = {

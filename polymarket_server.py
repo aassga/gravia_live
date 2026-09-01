@@ -20,6 +20,7 @@ import math
 import os
 import sqlite3
 import time
+from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from email.utils import parsedate_to_datetime
@@ -58,28 +59,33 @@ SIM_MIN_NET_LOCK_PER_SHARE  = 0.01  # 完成配對後至少淨賺 1¢/股
 SIM_EXIT_EDGE               = 0.02  # 市場可賣價高於模型持有價值 2¢/股時提早退出
 SIM_MIN_ENTRY_REMAINING     = 90.0  # 距離結算不足 90 秒，不再開新的單邊部位
 SIM_FAIR_MODEL_WEIGHT       = 0.65  # Binance 波動模型權重；其餘使用市場隱含機率校準
-SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025, "eth": 0.000040}
+SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SIM_DB_PATH = os.path.join(BASE_DIR, "polymarket_sim.sqlite3")
 
-# ── 追蹤的資產：BTC 是原本的主力，ETH 是新加的第二個市場，同一套抓取/策略邏輯共用，
-#    只是換一個 slug 前綴跟 Binance 報價代碼。
+# ── 追蹤的資產：只留 BTC。ETH 已經移除——5 分鐘短線盤本來就要專注在單一資產上，
+#    多資產只是分散注意力，沒有實際帶來額外的套利機會。
 ASSETS = [
     {"id": "btc", "label": "BTC", "slugPrefix": "btc-updown-5m-", "binanceSymbol": "BTCUSDT"},
-    {"id": "eth", "label": "ETH", "slugPrefix": "eth-updown-5m-", "binanceSymbol": "ETHUSDT"},
 ]
 
 # ── A/B 門檻測試：同時跑好幾組不同的進場/鎖利門檻，吃同一份真實報價，
 #    彼此獨立記帳，方便直接比較哪組門檻的實際表現比較好（而不是憑感覺猜）。
-#    這幾組全部都是 BTC 的。"main" 這組固定對應 SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM，
+#    "main" 這組固定對應 SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM，
 #    也是既有前端面板（部位卡片、成交紀錄列表）顯示的那一組，維持向後相容。
-#    ETH 目前只用單一策略（不做 A/B 比較），單獨用 "eth-main" 這個 id。
+#    "pure-arb" 這組刻意不設單邊進場門檻（entryMaxPrice=None，邏輯上也用不到）——
+#    只做 _try_direct_pair 那條「當下兩邊能同時買、直接鎖住利潤」的真無風險套利，
+#    找不到機會就空手，絕對不會退而求其次先賭單邊、留下方向性曝險。lockMaxSum
+#    對齊 cnyes 那篇報導講的公開研究參數：合計價格門檻 <= $0.95（也就是至少
+#    $0.05 原始價差，報導裡說這是「用於覆蓋執行滑點」的最低利潤門檻），
+#    比原本自己抓的 0.99 更嚴格，且 _try_direct_pair 現在也對齊了報導提到的
+#    另一個風控原則——單筆倉位封頂在可見深度的 50%，不會假設能吃光整本。
 AB_VARIANTS = [
     {"id": "conservative", "assetId": "btc", "label": "BTC 保守 0.30/0.85", "entryMaxPrice": 0.30, "lockMaxSum": 0.85},
     {"id": "main",         "assetId": "btc", "label": "BTC 目前 0.40/0.90", "entryMaxPrice": SIM_ENTRY_MAX_PRICE, "lockMaxSum": SIM_LOCK_MAX_SUM},
     {"id": "loose",        "assetId": "btc", "label": "BTC 寬鬆 0.45/0.95", "entryMaxPrice": 0.45, "lockMaxSum": 0.95},
-    {"id": "eth-main",     "assetId": "eth", "label": "ETH 0.40/0.90",      "entryMaxPrice": SIM_ENTRY_MAX_PRICE, "lockMaxSum": SIM_LOCK_MAX_SUM},
+    {"id": "pure-arb",     "assetId": "btc", "label": "BTC 純套利（只做同時雙邊）", "entryMaxPrice": None, "lockMaxSum": 0.95, "pureArbOnly": True},
 ]
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
 
@@ -95,6 +101,10 @@ def _new_market_state() -> dict:
         "spotChangePct": None,   # 24h 漲跌幅
         "klines":        [],     # 真實 1 分鐘 K 線（Binance），畫蠟燭圖用
         "connected":     False,
+        "upTokenId":     None,   # 目前這輪視窗的 token id，WS 收到報價時要靠這個反查是哪個資產
+        "downTokenId":   None,
+        "fair":          None,   # 最近一次算出來的公平價模型結果，WS 觸發的即時評估沿用這份，
+                                  # 不用每個 tick 都重算（那要另外打 Binance API，划不來）。
     }
 
 # ── 全域狀態：每個資產各自一份，互不干擾 ─────────────────────────────────────
@@ -487,7 +497,7 @@ async def fetch_active_market(session: aiohttp.ClientSession, slug_prefix: str) 
     也有很多從很久以前就從沒被正確標記 closed 的舊窗口卡在列表裡，
     不管排序方向，抓到的都不是「現在正在進行」的那一個。
     直接用時間算 slug（格式：<slug_prefix><窗口開始時間的 unix 秒>）最準，
-    這套邏輯跟資產無關，BTC/ETH 共用同一份，只是 slug_prefix 不同。
+    這套邏輯跟資產無關，只是帶入的 slug_prefix 不同。
     """
     window_start = int(real_now() // WINDOW_SECONDS) * WINDOW_SECONDS
     for start in (window_start, window_start - WINDOW_SECONDS):  # 抓不到當前窗口就退回上一個（剛好在交界處時的備援）
@@ -670,11 +680,18 @@ def _entry_candidate(side: str, book: dict, shares: float, fair_probability: flo
 def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
     """先檢查兩腿此刻是否可直接成交並鎖住淨利，這才是進場即無方向曝險的套利。
 
-    刻意不先按可見深度縮小股數——跟真實版的 FOK 語意一致：要嘛完整目標股數
-    兩腿都吃得到，要嘛整筆視為不可行（simulate_buy_fill 深度不足會回傳 None），
-    不會「深度不夠就自動改買比較少」，這樣模擬結果才不會比真實下單能做到的樂觀。"""
+    股數會先按可見深度的 50% 封頂（跟公開研究裡「倉位上限＝訂單簿深度的 50%」
+    這個風控原則對齊——超過這個比例會開始明顯吃掉自己的成交價，模擬出來的
+    利潤會比實際能拿到的樂觀）。封頂之後如果連目標股數都吃不滿，
+    才照原本邏輯整筆視為不可行（simulate_buy_fill 深度不足回傳 None）。"""
     variant = AB_VARIANT_BY_ID[variant_id]
     shares, budget = _target_order_size(variant_id)
+    if shares <= 0:
+        return False
+    up_depth = sum(float(a.get("size", 0)) for a in (up_book.get("asks") or []))
+    down_depth = sum(float(a.get("size", 0)) for a in (down_book.get("asks") or []))
+    depth_cap = min(up_depth, down_depth) * 0.5
+    shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
     if shares <= 0:
         return False
     up_fill = simulate_buy_fill(up_book, shares)
@@ -694,6 +711,9 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
         or total_decision_cost > cash
     ):
         return False
+    # 深度封頂後實際成交金額可能比原本算的目標預算小，記錄實際花費的金額，
+    # 不要留著封頂前那個沒用到的數字。
+    budget = up_fill["notional"] + up_fill["fee"] + down_fill["notional"] + down_fill["fee"]
     enter_position(variant_id, slug, "Up", up_fill, budget, None, None)
     hedge_position(variant_id, "Down", down_fill)
     return True
@@ -730,6 +750,10 @@ def simulate_trading(
         if remaining_seconds is None or remaining_seconds < SIM_MIN_ENTRY_REMAINING:
             return
         if _try_direct_pair(variant_id, slug, up_book, down_book):
+            return
+        if variant.get("pureArbOnly"):
+            # 純套利模式：找不到當下能同時鎖住的機會就不進場，寧可空手，
+            # 不退而求其次先賭單邊——這組存在的目的就是完全不承擔方向性風險。
             return
         if not fair:
             return
@@ -900,6 +924,269 @@ def queue_settlement(slug: str) -> None:
             st["position"] = None
     save_sim_state()
 
+# ── Polymarket 市場資料 WebSocket（只用在模擬版）───────────────────────────
+# 只是把「兩邊訂單簿報價」這件事從 3 秒輪詢一次的 REST，換成即時推播，
+# 讓 _try_direct_pair 那種「當下兩邊剛好都夠便宜」的真無風險套利機會更容易被抓到
+# ——這種瞬間通常很短暫，輪詢常常來不及看到就消失了。
+# 刻意完全不動 fetch_book/fetch_midpoint 這兩個函式本身：polymarket_live_strategy.py
+# 直接呼叫的是這兩個函式，維持原本的 REST 行為不變，這個 WS 只影響模擬版自己内部
+# 怎麼填 ms["upBook"]/ms["downBook"]，不會連帶影響真實下單那邊。
+MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+WS_PING_INTERVAL = 10.0
+WS_RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
+
+_ws_books: dict = {}              # token_id -> {"bids": {price_str: size}, "asks": {price_str: size}}
+_ws_meta: dict = {}               # token_id -> {"tickSize":, "minOrderSize":}，第一次見到時查一次就沿用
+_ws_wanted_tokens: set = set()    # 這一輪視窗真正需要的 token（隨視窗替換而更新）
+_ws_subscribed_tokens: set = set()  # WS 連線目前實際訂閱中的 token
+_ws_conn = None                   # 目前存活的 WS 連線物件，斷線時是 None
+_ws_connected = False
+
+
+async def _ws_ensure_meta(session: aiohttp.ClientSession, token_id: str) -> None:
+    """tick size / 最低下單股數不會在 WS 推播裡出現（那是靜態市場屬性，不是報價），
+    第一次遇到這個 token 時用 REST 查一次、順便拿它的初始快照墊檔，
+    避免視窗剛換、WS 資料還沒推過來之前的空窗期完全沒有報價可用。"""
+    if token_id in _ws_meta:
+        return
+    try:
+        book = await fetch_book(session, token_id)
+        _ws_meta[token_id] = {"tickSize": book["tickSize"], "minOrderSize": book["minOrderSize"]}
+        _ws_books[token_id] = {
+            "bids": {str(b["price"]): b["size"] for b in book["bids"]},
+            "asks": {str(a["price"]): a["size"] for a in book["asks"]},
+        }
+    except Exception as e:
+        log.warning(f"[WS] 查 tick size / 最低股數失敗 token={token_id}：{e}")
+
+
+async def _ws_set_wanted_tokens(token_ids: set) -> None:
+    """視窗換了、要追蹤的 token 也跟著換——如果 WS 目前是連線狀態就直接送訂閱/取消訂閱，
+    不然只更新「想要的清單」，等連線建立/重連時會整批依這份清單訂閱。"""
+    global _ws_wanted_tokens
+    _ws_wanted_tokens = set(token_ids)
+    if _ws_conn is None:
+        return
+    to_add = _ws_wanted_tokens - _ws_subscribed_tokens
+    to_remove = _ws_subscribed_tokens - _ws_wanted_tokens
+    try:
+        if to_remove:
+            await _ws_conn.send(json.dumps({"assets_ids": list(to_remove), "operation": "unsubscribe"}))
+            _ws_subscribed_tokens.difference_update(to_remove)
+        if to_add:
+            await _ws_conn.send(json.dumps({"assets_ids": list(to_add), "operation": "subscribe"}))
+            _ws_subscribed_tokens.update(to_add)
+    except Exception as e:
+        log.warning(f"[WS] 訂閱/取消訂閱失敗，等重連後會整批重新訂閱：{e}")
+
+
+# ── 做市可行性觀察實驗（純唯讀，完全不下單）───────────────────────────────
+# 只是記錄真實成交（last_trade_price）發生的頻率、量能、跟當下 best bid/ask 價差的
+# 關係，估算「如果真的去掛做市單，大概多常會被吃到」。這不是精確回測——不知道
+# 真的掛單會不會排在隊伍最前面，只是先用真實數據看這個市場擠不擠、有沒有量，
+# 值不值得投入蓋一整套掛單/改價/庫存管理的基礎設施。
+MM_TRADE_HISTORY_LIMIT = 300
+MM_SUMMARY_INTERVAL = 60.0
+
+_mm_trades: dict = {}          # token_id -> deque[{"ts","price","size","side"}]（最近成交）
+_mm_last_summary_at = 0.0
+
+
+def _mm_record_trade(payload: dict) -> None:
+    tid = payload.get("tokenId") or payload.get("asset_id")
+    if not tid:
+        return
+    try:
+        trade = {
+            "ts": float(payload.get("timestamp", 0)) / 1000.0,
+            "price": float(payload["price"]),
+            "size": float(payload["size"]),
+            "side": str(payload.get("side", "")).upper(),
+        }
+    except (KeyError, ValueError, TypeError):
+        return
+    _mm_trades.setdefault(tid, deque(maxlen=MM_TRADE_HISTORY_LIMIT)).append(trade)
+
+
+def _mm_maybe_log_summary() -> None:
+    """每隔一段時間印一次觀察摘要，不用真的去看程式碼或另外開頁面就能追蹤。"""
+    global _mm_last_summary_at
+    now = time.time()
+    if now - _mm_last_summary_at < MM_SUMMARY_INTERVAL:
+        return
+    _mm_last_summary_at = now
+    for ms in markets_state.values():
+        for side_label, tid in (("Up", ms.get("upTokenId")), ("Down", ms.get("downTokenId"))):
+            if not tid:
+                continue
+            dq = _mm_trades.get(tid)
+            recent = [t for t in dq if now - t["ts"] <= MM_SUMMARY_INTERVAL] if dq else []
+            book = _ws_get_book(tid)
+            spread = None
+            if book and book["bids"] and book["asks"]:
+                spread = book["asks"][0]["price"] - book["bids"][0]["price"]
+            spread_txt = f"${spread:.3f}" if spread is not None else "無雙邊報價"
+            if not recent:
+                log.info(f"[MM觀察:{side_label}] 過去{MM_SUMMARY_INTERVAL:.0f}秒無成交　目前價差={spread_txt}")
+                continue
+            total_size = sum(t["size"] for t in recent)
+            avg_size = total_size / len(recent)
+            log.info(
+                f"[MM觀察:{side_label}] 過去{MM_SUMMARY_INTERVAL:.0f}秒 成交{len(recent)}筆　"
+                f"總量={total_size:.1f}股　平均單筆={avg_size:.1f}股　目前價差={spread_txt}"
+            )
+
+
+def _ws_apply_message(msg: dict) -> None:
+    """套用一則 WS 訊息、更新本地訂單簿；有真的變動到的 token 會立刻觸發一次評估
+    （_on_ws_price_tick），不等下一個 3 秒輪詢——這就是補齊「文章那種即時反應速度」
+    的關鍵：真正無風險套利的瞬間往往很短暫，等輪詢常常已經來不及。
+    event_type 可能在最外層（book/price_change 實測過是這樣），也可能包在
+    type + payload 裡（文件上 last_trade_price 是這樣）——兩種都接。"""
+    event_type = msg.get("event_type") or msg.get("type")
+    payload = msg.get("payload", msg)
+    if event_type == "book":
+        tid = payload.get("asset_id")
+        if not tid:
+            return
+        _ws_books[tid] = {
+            "bids": {str(b["price"]): float(b["size"]) for b in payload.get("bids", [])},
+            "asks": {str(a["price"]): float(a["size"]) for a in payload.get("asks", [])},
+        }
+        _on_ws_price_tick(tid)
+    elif event_type == "price_change":
+        touched = set()
+        for change in payload.get("price_changes", []):
+            tid = change.get("asset_id")
+            if not tid:
+                continue
+            book = _ws_books.setdefault(tid, {"bids": {}, "asks": {}})
+            side_key = "bids" if str(change.get("side", "")).upper() == "BUY" else "asks"
+            price = str(change.get("price"))
+            size = float(change.get("size", 0) or 0)
+            if size <= 0:
+                book[side_key].pop(price, None)
+            else:
+                book[side_key][price] = size
+            touched.add(tid)
+        for tid in touched:
+            _on_ws_price_tick(tid)
+    elif event_type == "last_trade_price":
+        _mm_record_trade(payload)
+    _mm_maybe_log_summary()
+
+
+def _on_ws_price_tick(token_id: str) -> None:
+    """跟目前這輪視窗有關的 token 報價一有變動就立刻重跑一次評估（純記憶體運算，
+    沒有任何 I/O，很便宜，可以放心讓它跑得比 3 秒輪詢頻繁很多）。
+    刻意不呼叫 persist_quote——那個會寫 SQLite，頻率這麼高的話划不來，
+    報價歷史記錄還是交給原本的 3 秒輪詢週期就好。"""
+    for aid, ms in markets_state.items():
+        if token_id not in (ms.get("upTokenId"), ms.get("downTokenId")):
+            continue
+        market = ms.get("market")
+        if not market:
+            return
+        up_book = _ws_get_book(ms["upTokenId"])
+        down_book = _ws_get_book(ms["downTokenId"])
+        if up_book is None or down_book is None:
+            return
+        ms["upBook"], ms["downBook"] = up_book, down_book
+        slug = market["slug"]
+        remaining_seconds = (
+            None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
+        )
+        fair = ms.get("fair")
+        for variant_id, variant in AB_VARIANT_BY_ID.items():
+            if variant["assetId"] == aid:
+                simulate_trading(variant_id, slug, up_book, down_book, remaining_seconds, fair)
+        return
+
+
+async def market_ws_loop() -> None:
+    """背景常駐：連線 Polymarket 市場資料 WS，斷線自動重連（指數退避），
+    重連後依 _ws_wanted_tokens 整批重新訂閱目前這輪視窗的 token。"""
+    global _ws_conn, _ws_connected, _ws_subscribed_tokens
+    backoff_idx = 0
+    while True:
+        try:
+            async with websockets.connect(MARKET_WS_URL, ping_interval=None) as ws:
+                _ws_conn = ws
+                _ws_subscribed_tokens = set()
+                if _ws_wanted_tokens:
+                    await ws.send(json.dumps({"assets_ids": list(_ws_wanted_tokens), "type": "market"}))
+                    _ws_subscribed_tokens = set(_ws_wanted_tokens)
+                _ws_connected = True
+                backoff_idx = 0
+                log.info(f"[WS] 市場資料流已連線，訂閱 {len(_ws_subscribed_tokens)} 個 token")
+
+                last_ping = time.monotonic()
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=WS_PING_INTERVAL)
+                    except asyncio.TimeoutError:
+                        raw = None
+                    now = time.monotonic()
+                    if now - last_ping >= WS_PING_INTERVAL:
+                        await ws.send("PING")
+                        last_ping = now
+                    if raw is None or raw == "PONG":
+                        continue
+                    try:
+                        parsed = json.loads(raw)
+                    except Exception:
+                        continue
+                    for msg in (parsed if isinstance(parsed, list) else [parsed]):
+                        if isinstance(msg, dict):
+                            _ws_apply_message(msg)
+        except Exception as e:
+            log.warning(f"[WS] 市場資料流斷線，準備重連：{e}")
+        _ws_connected = False
+        _ws_conn = None
+        _ws_subscribed_tokens = set()
+        delay = WS_RECONNECT_BACKOFF[min(backoff_idx, len(WS_RECONNECT_BACKOFF) - 1)]
+        backoff_idx += 1
+        await asyncio.sleep(delay)
+
+
+def _ws_get_book(token_id: str, limit: int = 6) -> dict | None:
+    """回傳跟 fetch_book() 一模一樣格式的 dict，沒有資料就回傳 None 讓呼叫端退回 REST。"""
+    raw = _ws_books.get(token_id)
+    if not raw:
+        return None
+    bids = sorted(
+        ({"price": float(p), "size": s} for p, s in raw["bids"].items() if s > 0),
+        key=lambda x: -x["price"],
+    )[:limit]
+    asks = sorted(
+        ({"price": float(p), "size": s} for p, s in raw["asks"].items() if s > 0),
+        key=lambda x: x["price"],
+    )[:limit]
+    if not bids and not asks:
+        return None
+    meta = _ws_meta.get(token_id, {})
+    return {
+        "bids": bids,
+        "asks": asks,
+        "tickSize": meta.get("tickSize", 0.01),
+        "minOrderSize": meta.get("minOrderSize", 1.0),
+    }
+
+
+async def _get_book_ws_or_rest(session: aiohttp.ClientSession, token_id: str) -> dict:
+    if _ws_connected:
+        book = _ws_get_book(token_id)
+        if book is not None:
+            return book
+    return await fetch_book(session, token_id)
+
+
+async def _get_midpoint_ws_or_rest(session: aiohttp.ClientSession, token_id: str, book: dict) -> float:
+    if book["bids"] and book["asks"]:
+        return (book["bids"][0]["price"] + book["asks"][0]["price"]) / 2
+    return await fetch_midpoint(session, token_id)
+
+
 # ── 背景抓取任務 ───────────────────────────────────────────────────────────
 
 async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
@@ -924,20 +1211,34 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     up_id, down_id = _market_tokens(ms["market"])
     if not (up_id and down_id):
         return
+    ms["upTokenId"], ms["downTokenId"] = up_id, down_id
 
-    up_price, down_price, up_book, down_book, spot, klines = await asyncio.gather(
-        fetch_midpoint(session, up_id),
-        fetch_midpoint(session, down_id),
-        fetch_book(session, up_id),
-        fetch_book(session, down_id),
+    # 每輪都同步一次「想要的 token」（函式內部自己 diff，沒變就不會真的送訂閱訊息）；
+    # 順便確保 tick size / 最低股數已經查過，WS 才有資料可以馬上用。
+    await _ws_set_wanted_tokens({up_id, down_id})
+    await asyncio.gather(_ws_ensure_meta(session, up_id), _ws_ensure_meta(session, down_id))
+
+    up_book, down_book = await asyncio.gather(
+        _get_book_ws_or_rest(session, up_id),
+        _get_book_ws_or_rest(session, down_id),
+        return_exceptions=True,
+    )
+    if isinstance(up_book, Exception):
+        up_book = ms.get("upBook") or {"bids": [], "asks": []}
+    if isinstance(down_book, Exception):
+        down_book = ms.get("downBook") or {"bids": [], "asks": []}
+
+    up_price, down_price, spot, klines = await asyncio.gather(
+        _get_midpoint_ws_or_rest(session, up_id, up_book),
+        _get_midpoint_ws_or_rest(session, down_id, down_book),
         fetch_spot_price(session, asset["binanceSymbol"]),
         fetch_klines(session, asset["binanceSymbol"], 60),
         return_exceptions=True,
     )
     if not isinstance(up_price, Exception):   ms["upPrice"] = up_price
     if not isinstance(down_price, Exception): ms["downPrice"] = down_price
-    if not isinstance(up_book, Exception):    ms["upBook"] = up_book
-    if not isinstance(down_book, Exception):  ms["downBook"] = down_book
+    ms["upBook"] = up_book
+    ms["downBook"] = down_book
     if not isinstance(spot, Exception):
         ms["spotPrice"] = spot["price"]
         ms["spotChangePct"] = spot["changePct"]
@@ -947,6 +1248,7 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     slug = ms["market"]["slug"]
     remaining_seconds = None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
     fair = estimate_fair_up(aid)
+    ms["fair"] = fair  # WS 觸發的即時評估（_on_ws_price_tick）沿用這份，不用每個 tick 都重算
     for variant_id, variant in AB_VARIANT_BY_ID.items():
         if variant["assetId"] == aid:
             simulate_trading(variant_id, slug, ms["upBook"], ms["downBook"], remaining_seconds, fair)
@@ -974,12 +1276,9 @@ async def data_fetcher():
 # ── WebSocket 廣播 ─────────────────────────────────────────────────────────
 
 def build_ab_leaderboard() -> list:
-    """每組 A/B 門檻的即時戰績，前端拿來畫比較表，一眼看出目前哪組門檻表現最好。
-    只列 BTC 的門檻比較（ETH 目前只有單一策略，不參與比較，避免混在一起看起來像跨資產比較）。"""
+    """每組 A/B 門檻的即時戰績，前端拿來畫比較表，一眼看出目前哪組門檻表現最好。"""
     rows = []
     for v in AB_VARIANTS:
-        if v["assetId"] != "btc":
-            continue
         st = ab_states[v["id"]]
         cash, portfolio = compute_cash_and_portfolio(v["id"])
         win_rate = (st["wins"] / st["totalTrades"] * 100) if st["totalTrades"] else None
@@ -1005,7 +1304,7 @@ def build_ab_leaderboard() -> list:
     return rows
 
 def build_asset_summary(asset_id: str, variant_id: str) -> dict:
-    """單一資產的市場行情 + 對應策略戰績，BTC 跟 ETH 共用同一份組裝邏輯。"""
+    """單一資產的市場行情 + 對應策略戰績。"""
     ms = markets_state[asset_id]
     st = ab_states[variant_id]
     m = ms["market"] or {}
@@ -1064,7 +1363,6 @@ def build_asset_summary(asset_id: str, variant_id: str) -> dict:
 
 def build_full_payload() -> str:
     btc = build_asset_summary("btc", "main")
-    eth = build_asset_summary("eth", "eth-main")
     return json.dumps({
         "type": "full",
         "serverTimeMs": real_now() * 1000,  # 校正過的真實時間，前端拿來顯示時鐘、不用本機系統時間
@@ -1083,8 +1381,6 @@ def build_full_payload() -> str:
         "fair":         btc["fair"],
         "sim":          btc["sim"],
         "abVariants":   build_ab_leaderboard(),
-        # 新增：ETH 獨立一份，前端有新的 ETH 區塊會讀這裡
-        "eth": eth,
     })
 
 async def broadcast(payload: str) -> None:
@@ -1143,6 +1439,7 @@ async def main():
         await asyncio.gather(
             data_fetcher(),
             broadcast_loop(),
+            market_ws_loop(),
         )
 
 if __name__ == "__main__":

@@ -1,104 +1,270 @@
-2026-09-01 07:32:44,225 [INFO] ================================================================
-2026-09-01 07:32:44,228 [INFO]   Polymarket BTC Up/Down · 真實自動下單策略
-2026-09-01 07:32:44,230 [INFO]   LIVE_TRADING=True · POLY_STRATEGY_ARMED=True · REAL_EXECUTION=True
-2026-09-01 07:32:44,232 [INFO]   pair budget=30.0% · hard cap=$25.00
-2026-09-01 07:32:44,233 [INFO]   cash reserve=$0.00 · action cooldown=10s
-2026-09-01 07:32:44,235 [INFO]   entry <= $0.4　lock sum <= $0.9（BTC 目前 0.40/0.90）
-2026-09-01 07:32:44,237 [INFO]   entry edge>=0.025 · net lock/share>=0.010 · no new entry under 90s
-2026-09-01 07:32:44,239 [INFO] ================================================================
-2026-09-01 07:32:44,413 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788219000
-2026-09-01 07:32:45,465 [INFO] 連線到 https://clob.polymarket.com（chain_id=137, signature_type=3）...
-2026-09-01 07:32:45,836 [INFO] HTTP Request: POST https://clob.polymarket.com/auth/api-key "HTTP/2 400 Bad Request"
-2026-09-01 07:32:45,837 [ERROR] [py_clob_client_v2] request error status=400 url=https://clob.polymarket.com/auth/api-key body={"error":"Could not create api key"}
+2026-09-01 11:36:41,237 [INFO] ================================================================
+2026-09-01 11:36:41,240 [INFO]   Polymarket BTC Up/Down · 真實自動下單策略
+2026-09-01 11:36:41,243 [INFO]   LIVE_TRADING=True · POLY_STRATEGY_ARMED=True · REAL_EXECUTION=True
+2026-09-01 11:36:41,245 [INFO]   pair budget=10.0% · hard cap=$25.00
+2026-09-01 11:36:41,247 [INFO]   cash reserve=$0.00 · action cooldown=10s
+2026-09-01 11:36:41,249 [INFO]   entry <= $0.4　lock sum <= $0.9（BTC 目前 0.40/0.90）
+2026-09-01 11:36:41,252 [INFO]   entry edge>=0.025 · net lock/share>=0.010 · no new entry under 90s
+2026-09-01 11:36:41,254 [INFO] ================================================================
+2026-09-01 11:36:41,420 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788233700
+2026-09-01 11:36:42,409 [INFO] 連線到 https://clob.polymarket.com（chain_id=137, signature_type=3）...
+2026-09-01 11:36:42,772 [INFO] HTTP Request: POST https://clob.polymarket.com/auth/api-key "HTTP/2 400 Bad Request"
+2026-09-01 11:36:42,774 [ERROR] [py_clob_client_v2] request error status=400 url=https://clob.polymarket.com/auth/api-key body={"error":"Could not create api key"}
 
-2026-09-01 07:32:46,121 [INFO] HTTP Request: GET https://clob.polymarket.com/auth/derive-api-key "HTTP/2 200 OK"
-2026-09-01 07:32:46,122 [INFO] API 憑證取得成功
-2026-09-01 07:32:46,392 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:32:53,411 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:33:03,788 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:33:16,692 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:33:27,080 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:35:00,551 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788219300
-2026-09-01 07:35:03,780 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=91912192698866171433731772099074689745531206077166101651568943974277068698679 "HTTP/2 200 OK"
-2026-09-01 07:35:03,818 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=5600575873838335595831213718018115348304902783839787242761684053896464469832 "HTTP/2 200 OK"
-2026-09-01 07:35:04,109 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:35:14,637 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:35:25,036 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:35:35,398 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:35:45,804 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:35:56,181 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:36:06,557 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:36:16,959 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:36:27,393 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:36:37,773 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:36:48,197 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:36:58,576 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:37:08,921 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:37:19,277 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:37:29,614 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:37:39,983 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:37:50,385 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:38:00,770 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:38:11,140 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:38:21,590 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:40:01,764 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788219600
-2026-09-01 07:40:02,445 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=98442545778266857353352316708851029630127473063510733715040454516843566562783 "HTTP/2 200 OK"
-2026-09-01 07:40:02,483 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=7048798730931642733013493635254630783775449676521436838728534103713943101365 "HTTP/2 200 OK"
-2026-09-01 07:40:02,771 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:40:13,142 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:40:23,523 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:40:33,915 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:40:44,285 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:40:54,689 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:41:05,081 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:41:15,509 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:41:26,011 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:41:36,375 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:41:46,803 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:41:57,221 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:42:07,633 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:42:17,991 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:42:28,606 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:42:39,047 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:42:49,455 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:42:59,813 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:43:10,185 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:43:20,705 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:45:01,197 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788219900
-2026-09-01 07:45:01,875 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=102979582374052764937829653282463177265771591820189692681881305876763531462632 "HTTP/2 200 OK"
-2026-09-01 07:45:01,907 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=98612957523384946781170261189107884012545602634316718988894031510401531145729 "HTTP/2 200 OK"
-2026-09-01 07:45:02,205 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:45:12,584 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:45:22,953 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:45:33,326 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:45:43,734 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:45:54,173 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:46:04,541 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:46:14,994 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:46:25,381 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:46:35,991 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:46:46,362 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:46:56,740 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:47:07,167 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:47:17,520 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:47:27,903 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:47:38,258 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:47:48,652 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:47:59,111 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:48:09,509 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:48:19,908 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:48:30,275 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
-2026-09-01 07:50:00,997 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788220200
-2026-09-01 07:50:01,572 [ERROR] [py_clob_client_v2] request error: [WinError 10035] 無法立即完成通訊端操作，而且無法停止。
-2026-09-01 07:50:01,572 [ERROR] [py_clob_client_v2] request error: [WinError 10035] 無法立即完成通訊端操作，而且無法停止。
-2026-09-01 07:50:01,584 [CRITICAL] [LIVE] 策略已自動停止下單：preflight_position_check_failed: PolyApiException[status_code=None, error_message=Request exception!], PolyApiException[status_code=None, error_message=Request exception!]
-2026-09-01 07:55:02,704 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788220500
-2026-09-01 08:00:03,776 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788220800
-2026-09-01 08:05:02,397 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788221100
-2026-09-01 08:10:03,395 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788221400
-2026-09-01 08:15:03,062 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788221700
-2026-09-01 08:20:00,869 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788222000
-2026-09-01 08:25:02,910 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788222300
-2026-09-01 08:30:01,408 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788222600
-2026-09-01 08:35:03,427 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788222900
-2026-09-01 08:40:01,733 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788223200
+2026-09-01 11:36:43,045 [INFO] HTTP Request: GET https://clob.polymarket.com/auth/derive-api-key "HTTP/2 200 OK"
+2026-09-01 11:36:43,045 [INFO] API 憑證取得成功
+2026-09-01 11:36:43,313 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:36:43,367 [WARNING] [LIVE][REAL] 結算 btc-updown-5m-1788233100 outcome=Up type=directional 保守淨損益估計=$-7.73
+2026-09-01 11:36:50,503 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:37:01,022 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:37:11,601 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:37:28,952 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:37:39,506 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:37:50,077 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:38:00,628 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:38:11,182 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:40:02,863 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788234000
+2026-09-01 11:40:03,552 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=47615282314988048962232377836944794674273525829834186465285313272647874396868 "HTTP/2 200 OK"
+2026-09-01 11:40:03,573 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=40226981542536983444919787300677464823405496856507835248518908133696697843012 "HTTP/2 200 OK"
+2026-09-01 11:40:03,857 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:40:03,916 [WARNING] [LIVE][REAL] 結算 btc-updown-5m-1788233400 outcome=Up type=directional 保守淨損益估計=$-6.05
+2026-09-01 11:40:14,476 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:40:18,145 [INFO] HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=40226981542536983444919787300677464823405496856507835248518908133696697843012 "HTTP/2 200 OK"
+2026-09-01 11:40:18,429 [INFO] HTTP Request: GET https://clob.polymarket.com/version "HTTP/2 200 OK"
+2026-09-01 11:40:18,481 [INFO] HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=40226981542536983444919787300677464823405496856507835248518908133696697843012 "HTTP/2 200 OK"
+2026-09-01 11:40:18,487 [WARNING] [LIVE] 送出真實訂單 —— BUY token=40226981542536983444919787300677464823405496856507835248518908133696697843012 price=0.28 size=5.0 order_type=FOK
+2026-09-01 11:40:18,941 [INFO] HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+2026-09-01 11:40:18,942 [WARNING] [LIVE] 訂單回應：{'errorMsg': '', 'orderID': '0x2781b2cc4b9cef81eb7ad5ab450da647686501e9a77f6a1d632d4eae2ea802dd', 'takingAmount': '5.6', 'makingAmount': '1.4', 'status': 'matched', 'transactionsHashes': ['0xff74611f4e81a0c0a9c647a6ded4207e7cc517c097d6da6cb341a08ca50b3076'], 'success': True}
+2026-09-01 11:40:19,228 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 11:40:19,291 [WARNING] [LIVE][REAL] 進場 Up limit=$0.280 shares=5.00 edge=+0.0564
+2026-09-01 11:40:30,054 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:40:30,349 [INFO] HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=47615282314988048962232377836944794674273525829834186465285313272647874396868 "HTTP/2 200 OK"
+2026-09-01 11:40:30,394 [INFO] HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=47615282314988048962232377836944794674273525829834186465285313272647874396868 "HTTP/2 200 OK"
+2026-09-01 11:40:30,401 [WARNING] [LIVE] 送出真實訂單 —— BUY token=47615282314988048962232377836944794674273525829834186465285313272647874396868 price=0.6 size=5.0 order_type=FOK
+2026-09-01 11:40:30,838 [INFO] HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+2026-09-01 11:40:30,840 [WARNING] [LIVE] 訂單回應：{'errorMsg': '', 'orderID': '0x3db4e36c7edfdf873d9ce2ab9a99388d5b84f266d0916936d36c198dfce95974', 'takingAmount': '5.660376', 'makingAmount': '2.999999', 'status': 'matched', 'transactionsHashes': ['0x5c83d146598a2e2221e3d92e3d5dff60ecb1e81bc20e0d4cf31ec849c871d3fe'], 'success': True}
+2026-09-01 11:40:31,112 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 11:40:31,189 [WARNING] [LIVE][REAL] 第二腿 Down limit=$0.600 保守淨鎖利估計=$+0.45
+2026-09-01 11:45:02,793 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788234300
+2026-09-01 11:45:03,496 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=43563221828384692136123233694434965916017090066886112119829070319777312957161 "HTTP/2 200 OK"
+2026-09-01 11:45:03,525 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=69155566523801808459027226025122456458301701145644650202225982149126527340719 "HTTP/2 200 OK"
+2026-09-01 11:45:03,817 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:45:14,514 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:45:25,238 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:45:35,903 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:45:46,596 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:45:57,290 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:46:07,957 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:46:18,626 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:46:29,365 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:46:40,048 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:46:50,747 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:46:54,262 [WARNING] [LIVE][REAL] 結算 btc-updown-5m-1788233700 outcome=Up type=directional 保守淨損益估計=$-4.65
+2026-09-01 11:47:01,443 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:47:12,004 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:47:22,557 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:47:33,319 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:47:43,941 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:47:54,503 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:48:05,025 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:48:15,565 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:48:26,105 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:50:00,704 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788234600
+2026-09-01 11:50:01,394 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=57943863669306782178144283301840016735275708897993195729399951880990118580844 "HTTP/2 200 OK"
+2026-09-01 11:50:01,420 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=73762761860659734030891197316041785328834920454117099289556533947788426778871 "HTTP/2 200 OK"
+2026-09-01 11:50:01,705 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:50:01,994 [INFO] HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=57943863669306782178144283301840016735275708897993195729399951880990118580844 "HTTP/2 200 OK"
+2026-09-01 11:50:02,040 [INFO] HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=57943863669306782178144283301840016735275708897993195729399951880990118580844 "HTTP/2 200 OK"
+2026-09-01 11:50:02,048 [WARNING] [LIVE] 送出真實訂單 —— BUY token=57943863669306782178144283301840016735275708897993195729399951880990118580844 price=0.35 size=5.0 order_type=FOK
+2026-09-01 11:50:02,483 [INFO] HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+2026-09-01 11:50:02,484 [WARNING] [LIVE] 訂單回應：{'errorMsg': '', 'orderID': '0x43233ff9e6280c583bfd64b2b07997f4f2e39f3abb9f6406ea969a51fd5cd4c4', 'takingAmount': '5.64516', 'makingAmount': '1.749999', 'status': 'matched', 'transactionsHashes': ['0x31753a35c1d318ce3c9ae4e4adb368ddbbffe7dfe3403557d2639fd0faf22bdd'], 'success': True}
+2026-09-01 11:50:02,805 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 11:50:02,873 [WARNING] [LIVE][REAL] 進場 Down limit=$0.350 shares=5.00 edge=+0.0443
+2026-09-01 11:50:13,399 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:50:23,950 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:50:34,477 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:50:45,139 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:50:55,720 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:51:06,269 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:51:06,324 [WARNING] [LIVE][REAL] 結算 btc-updown-5m-1788234000 outcome=Down type=locked 保守淨損益估計=$+0.45
+2026-09-01 11:51:16,698 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:51:27,295 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:51:37,668 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:51:48,036 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:51:58,386 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:52:08,767 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:52:19,186 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:52:29,549 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:52:40,000 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:52:50,435 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:53:00,820 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:53:11,190 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:53:21,627 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:53:31,995 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:53:42,362 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:53:52,778 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:54:03,283 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:54:06,892 [INFO] HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=73762761860659734030891197316041785328834920454117099289556533947788426778871 "HTTP/2 200 OK"
+2026-09-01 11:54:06,937 [INFO] HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=73762761860659734030891197316041785328834920454117099289556533947788426778871 "HTTP/2 200 OK"
+2026-09-01 11:54:06,944 [WARNING] [LIVE] 送出真實訂單 —— BUY token=73762761860659734030891197316041785328834920454117099289556533947788426778871 price=0.53 size=5.0 order_type=FOK
+2026-09-01 11:54:07,662 [INFO] HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+2026-09-01 11:54:07,664 [WARNING] [LIVE] 訂單回應：{'errorMsg': '', 'orderID': '0x7581c4a6880c619dc8bdaef59422ecf2e68135860f5f2f7ed58e0a1f52f074f3', 'takingAmount': '5.096152', 'makingAmount': '2.649999', 'status': 'matched', 'transactionsHashes': ['0xc6d79a20bb1c3c2f6e92cdbc944d4a325a19b055478f547036e5f3dad07ec13f'], 'success': True}
+2026-09-01 11:54:07,940 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 11:54:08,008 [WARNING] [LIVE][REAL] 第二腿 Up limit=$0.530 保守淨鎖利估計=$+0.43
+2026-09-01 11:55:01,067 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788234900
+2026-09-01 11:55:01,733 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=64072557528806795697364097553081905342930799525954895195097442269026331622070 "HTTP/2 200 OK"
+2026-09-01 11:55:01,759 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=55626838406725060705648951173585005932163848685176118425081846586902220980454 "HTTP/2 200 OK"
+2026-09-01 11:55:02,046 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:55:12,590 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:55:23,134 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:55:33,691 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:55:44,311 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:55:54,830 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:56:05,414 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:56:15,945 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:56:26,499 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:56:37,121 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:56:47,759 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:56:58,404 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:57:09,054 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:57:19,680 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:57:26,960 [INFO] HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=64072557528806795697364097553081905342930799525954895195097442269026331622070 "HTTP/2 200 OK"
+2026-09-01 11:57:27,014 [INFO] HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=64072557528806795697364097553081905342930799525954895195097442269026331622070 "HTTP/2 200 OK"
+2026-09-01 11:57:27,022 [WARNING] [LIVE] 送出真實訂單 —— BUY token=64072557528806795697364097553081905342930799525954895195097442269026331622070 price=0.31 size=5.0 order_type=FOK
+2026-09-01 11:57:27,483 [INFO] HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+2026-09-01 11:57:27,485 [WARNING] [LIVE] 訂單回應：{'errorMsg': '', 'orderID': '0x8357e66942f61d501adf6c7ead52e55c90ffb4a58293f089b3f793b4dd261f17', 'takingAmount': '5.166665', 'makingAmount': '1.549999', 'status': 'matched', 'transactionsHashes': ['0x3f4dc668c8cfdb30c095c86b08daa99ef2700df53194a113addc89d0c404b225'], 'success': True}
+2026-09-01 11:57:27,776 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 11:57:27,844 [WARNING] [LIVE][REAL] 進場 Up limit=$0.310 shares=5.00 edge=+0.0347
+2026-09-01 11:57:38,460 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:57:49,099 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:57:59,713 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:58:10,349 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:58:20,974 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:58:31,591 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:58:42,251 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:58:52,944 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:59:03,513 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:59:14,090 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 11:59:24,646 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:00:01,646 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788235200
+2026-09-01 12:00:02,405 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=25733328574494573564106962933112715506635021858960967552608809708572094092689 "HTTP/2 200 OK"
+2026-09-01 12:00:02,436 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=18706160907335148497184028298198111650613620754589185724980516990903011854916 "HTTP/2 200 OK"
+2026-09-01 12:00:02,738 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:00:13,401 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:00:13,744 [INFO] HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=25733328574494573564106962933112715506635021858960967552608809708572094092689 "HTTP/2 200 OK"
+2026-09-01 12:00:13,791 [INFO] HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=25733328574494573564106962933112715506635021858960967552608809708572094092689 "HTTP/2 200 OK"
+2026-09-01 12:00:13,799 [WARNING] [LIVE] 送出真實訂單 —— BUY token=25733328574494573564106962933112715506635021858960967552608809708572094092689 price=0.34 size=5.0 order_type=FOK
+2026-09-01 12:00:14,685 [INFO] HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+2026-09-01 12:00:14,687 [WARNING] [LIVE] 訂單回應：{'errorMsg': '', 'orderID': '0xd37ab667b70d5f73b5d358898d7656f300dbad9cd13b3a2a754bc04ba512c909', 'takingAmount': '5.151514', 'makingAmount': '1.699999', 'status': 'matched', 'transactionsHashes': ['0x2de06930b45d6f1ae9cd5e0f1bce252b64511f8b11bbcba3fe30f51143cd4b43'], 'success': True}
+2026-09-01 12:00:14,981 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 12:00:15,469 [WARNING] [LIVE][REAL] 進場 Down limit=$0.340 shares=5.00 edge=+0.0830
+2026-09-01 12:00:26,609 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:00:37,284 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:00:47,980 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:00:58,709 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:01:09,463 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:01:20,143 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:01:30,820 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:01:41,492 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:01:52,170 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:02:02,930 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:02:13,598 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:02:24,291 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:02:34,934 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:02:45,609 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:02:56,308 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:03:07,196 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:03:17,856 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:03:28,559 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:03:39,478 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:03:42,960 [WARNING] [LIVE][REAL] 結算 btc-updown-5m-1788234600 outcome=Up type=locked 保守淨損益估計=$+0.43
+2026-09-01 12:03:50,096 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:04:00,659 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:04:11,211 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:04:55,339 [WARNING] [LIVE][REAL] 結算 btc-updown-5m-1788234900 outcome=Down type=directional 保守淨損益估計=$-1.62
+2026-09-01 12:05:01,873 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788235500
+2026-09-01 12:05:02,542 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=67225581639791542146677433330932315502316624859776065263784365377419792938599 "HTTP/2 200 OK"
+2026-09-01 12:05:02,583 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=87469275844464643981155407533839324142931345613048856190211009216034181841646 "HTTP/2 200 OK"
+2026-09-01 12:05:02,869 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:05:13,519 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:05:24,078 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:05:34,677 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:05:45,273 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:05:45,560 [INFO] HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=87469275844464643981155407533839324142931345613048856190211009216034181841646 "HTTP/2 200 OK"
+2026-09-01 12:05:45,606 [INFO] HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=87469275844464643981155407533839324142931345613048856190211009216034181841646 "HTTP/2 200 OK"
+2026-09-01 12:05:45,613 [WARNING] [LIVE] 送出真實訂單 —— BUY token=87469275844464643981155407533839324142931345613048856190211009216034181841646 price=0.38 size=5.0 order_type=FOK
+2026-09-01 12:05:46,023 [INFO] HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+2026-09-01 12:05:46,025 [WARNING] [LIVE] 訂單回應：{'errorMsg': '', 'orderID': '0xabb9303e8a16e8923a77ad0dfb84a4c9c5ae42ab3570a1e9c6e59b3b6ffedf40', 'takingAmount': '5.135134', 'makingAmount': '1.899999', 'status': 'matched', 'transactionsHashes': ['0xa635ceeac736170ea6764613ee50e1f663c13de4e6fa938468bfa06ae46d8dc7'], 'success': True}
+2026-09-01 12:05:46,301 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 12:05:46,369 [WARNING] [LIVE][REAL] 進場 Up limit=$0.380 shares=5.00 edge=+0.1287
+2026-09-01 12:05:56,928 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:06:07,488 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:06:18,068 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:06:28,581 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:06:39,129 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:06:49,798 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:07:00,339 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:07:11,106 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:07:21,637 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:07:32,200 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:07:42,814 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:07:53,396 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:08:03,938 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:08:14,450 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:08:18,137 [INFO] HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=67225581639791542146677433330932315502316624859776065263784365377419792938599 "HTTP/2 200 OK"
+2026-09-01 12:08:18,184 [INFO] HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=67225581639791542146677433330932315502316624859776065263784365377419792938599 "HTTP/2 200 OK"
+2026-09-01 12:08:18,192 [WARNING] [LIVE] 送出真實訂單 —— BUY token=67225581639791542146677433330932315502316624859776065263784365377419792938599 price=0.47 size=5.0 order_type=FOK
+2026-09-01 12:08:18,629 [INFO] HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+2026-09-01 12:08:18,631 [WARNING] [LIVE] 訂單回應：{'errorMsg': '', 'orderID': '0x6039233426f0b6144228ca50c8836fbbd16cf9677efb27e829efe1bae06b88fb', 'takingAmount': '5', 'makingAmount': '2.35', 'status': 'matched', 'transactionsHashes': ['0xc97c6fef2376ada13483cf243ee96e66870def5f5d26fd567365ce2f1938639d'], 'success': True}
+2026-09-01 12:08:18,917 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 12:08:18,983 [WARNING] [LIVE][REAL] 第二腿 Down limit=$0.470 保守淨鎖利估計=$+0.58
+2026-09-01 12:09:57,587 [WARNING] [LIVE][REAL] 結算 btc-updown-5m-1788235200 outcome=Up type=directional 保守淨損益估計=$-1.78
+2026-09-01 12:10:00,674 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788235800
+2026-09-01 12:10:01,338 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=65431178883338973010692527198004406206013349911888519386162331963654130902915 "HTTP/2 200 OK"
+2026-09-01 12:10:01,373 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=97427729965135284065918127408958061455841616459808014749548980163057297050935 "HTTP/2 200 OK"
+2026-09-01 12:10:01,665 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:10:12,224 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:10:22,755 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:10:33,284 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:10:43,868 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:10:54,412 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:11:04,984 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:11:15,595 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:11:26,158 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:11:36,720 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:11:47,299 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:11:57,832 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:12:08,386 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:12:18,953 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:12:29,504 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:12:40,026 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:12:50,561 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:13:01,104 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:13:11,663 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:13:22,226 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:15:00,249 [INFO] [MARKET] 切換到新窗口 btc-updown-5m-1788236100
+2026-09-01 12:15:00,922 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=93763641696122898792618166022688952841428796040883777424085172139114900521951 "HTTP/2 200 OK"
+2026-09-01 12:15:00,985 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=CONDITIONAL&token_id=15973703456008608149628327279400304376677831241481409862293892521282420370782 "HTTP/2 200 OK"
+2026-09-01 12:15:01,269 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:15:04,979 [INFO] HTTP Request: GET https://clob.polymarket.com/tick-size?token_id=15973703456008608149628327279400304376677831241481409862293892521282420370782 "HTTP/2 200 OK"
+2026-09-01 12:15:05,025 [INFO] HTTP Request: GET https://clob.polymarket.com/neg-risk?token_id=15973703456008608149628327279400304376677831241481409862293892521282420370782 "HTTP/2 200 OK"
+2026-09-01 12:15:05,030 [WARNING] [LIVE] 送出真實訂單 —— BUY token=15973703456008608149628327279400304376677831241481409862293892521282420370782 price=0.36 size=5.0 order_type=FOK
+2026-09-01 12:15:05,520 [INFO] HTTP Request: POST https://clob.polymarket.com/order "HTTP/2 200 OK"
+2026-09-01 12:15:05,521 [WARNING] [LIVE] 訂單回應：{'errorMsg': '', 'orderID': '0x007c2bf247d1a2821c96521732b85234c32fa6a4d477dd64c6234b3617338b24', 'takingAmount': '5.625', 'makingAmount': '1.8', 'status': 'matched', 'transactionsHashes': ['0x4c27337315ad52b7a9186fe536a528390b1d71d499d1dbc788fb559e3e3cd30f'], 'success': True}
+2026-09-01 12:15:05,798 [INFO] HTTP Request: GET https://clob.polymarket.com/data/trades?next_cursor=MA%3D%3D "HTTP/2 200 OK"
+2026-09-01 12:15:05,864 [WARNING] [LIVE][REAL] 進場 Down limit=$0.360 shares=5.00 edge=+0.0696
+2026-09-01 12:15:16,416 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:15:27,096 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:15:37,637 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:15:48,217 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:15:58,948 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:16:09,472 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:16:20,033 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:16:30,584 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:16:41,055 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:16:44,693 [WARNING] [LIVE][REAL] 結算 btc-updown-5m-1788235500 outcome=Up type=locked 保守淨損益估計=$+0.58
+2026-09-01 12:16:51,763 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:17:02,132 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:17:12,524 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:17:22,890 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
+2026-09-01 12:17:33,266 [INFO] HTTP Request: GET https://clob.polymarket.com/balance-allowance?signature_type=3&asset_type=COLLATERAL "HTTP/2 200 OK"
