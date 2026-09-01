@@ -741,6 +741,7 @@ def simulate_trading(
     down_book: dict,
     remaining_seconds: float | None,
     fair: dict | None,
+    allow_early_exit: bool = True,
 ) -> None:
     variant = AB_VARIANT_BY_ID[variant_id]
     st = ab_states[variant_id]
@@ -795,7 +796,12 @@ def simulate_trading(
             return
 
     # 若市場願意用顯著高於模型公平價的價格接手，提早賣出比繼續承擔方向風險更有利。
-    if fair:
+    # 刻意只在 3 秒輪詢節奏下檢查（allow_early_exit=False 時整段跳過）——WS 觸發的
+    # 即時評估拿到的是薄訂單簿當下那一瞬間算出來的可賣價，波動本來就大，同一個瞬間
+    # 閾值判斷用高頻率去採樣很容易把雜訊當成訊號。進場/補鎖利留在即時路徑是因為那邊
+    # 抓的是「機會」，錯過了就沒有；停損不一樣，真的行情反轉的話，3 秒後再確認一次
+    # 幾乎不會有差別，但可以濾掉大部分薄book瞬間跳動造成的誤判。
+    if allow_early_exit and fair:
         held_book = up_book if pos["side"] == "Up" else down_book
         exit_fill = simulate_sell_fill(held_book, pos["shares"])
         if exit_fill:
@@ -941,6 +947,47 @@ _ws_wanted_tokens: set = set()    # 這一輪視窗真正需要的 token（隨�
 _ws_subscribed_tokens: set = set()  # WS 連線目前實際訂閱中的 token
 _ws_conn = None                   # 目前存活的 WS 連線物件，斷線時是 None
 _ws_connected = False
+_ws_snapshot_tokens: set = set()
+_ws_book_updated_at: dict = {}
+_ws_last_message_at = 0.0
+_ws_price_listeners: set = set()
+_ws_simulation_ticks_enabled = True
+
+
+def register_ws_price_listener(callback) -> None:
+    """Register a sync or async callback called after a WS book change."""
+    _ws_price_listeners.add(callback)
+
+
+def unregister_ws_price_listener(callback) -> None:
+    _ws_price_listeners.discard(callback)
+
+
+def set_ws_simulation_ticks_enabled(enabled: bool) -> None:
+    """Control simulation fills triggered by WS ticks in this process."""
+    global _ws_simulation_ticks_enabled
+    _ws_simulation_ticks_enabled = bool(enabled)
+
+
+def ws_feed_status() -> dict:
+    """Return a small, credential-free WS health snapshot."""
+    age = None if not _ws_last_message_at else max(0.0, time.monotonic() - _ws_last_message_at)
+    return {
+        "connected": bool(_ws_connected),
+        "healthy": bool(_ws_connected and age is not None and age <= WS_PING_INTERVAL * 2.5),
+        "lastMessageAgeSeconds": age,
+        "subscribedTokens": len(_ws_subscribed_tokens),
+    }
+
+
+def _notify_ws_price_listeners(token_id: str) -> None:
+    for callback in tuple(_ws_price_listeners):
+        try:
+            result = callback(token_id)
+            if asyncio.iscoroutine(result):
+                asyncio.get_running_loop().create_task(result)
+        except Exception as exc:
+            log.exception(f"[WS] price listener failed for token={token_id}: {exc}")
 
 
 async def _ws_ensure_meta(session: aiohttp.ClientSession, token_id: str) -> None:
@@ -1053,6 +1100,8 @@ def _ws_apply_message(msg: dict) -> None:
             "bids": {str(b["price"]): float(b["size"]) for b in payload.get("bids", [])},
             "asks": {str(a["price"]): float(a["size"]) for a in payload.get("asks", [])},
         }
+        _ws_snapshot_tokens.add(tid)
+        _ws_book_updated_at[tid] = time.monotonic()
         _on_ws_price_tick(tid)
     elif event_type == "price_change":
         touched = set()
@@ -1070,7 +1119,11 @@ def _ws_apply_message(msg: dict) -> None:
                 book[side_key][price] = size
             touched.add(tid)
         for tid in touched:
-            _on_ws_price_tick(tid)
+            # Do not treat a delta received before the full book snapshot as a
+            # tradable book.  The server normally sends ``book`` first.
+            if tid in _ws_snapshot_tokens:
+                _ws_book_updated_at[tid] = time.monotonic()
+                _on_ws_price_tick(tid)
     elif event_type == "last_trade_price":
         _mm_record_trade(payload)
     _mm_maybe_log_summary()
@@ -1081,42 +1134,50 @@ def _on_ws_price_tick(token_id: str) -> None:
     沒有任何 I/O，很便宜，可以放心讓它跑得比 3 秒輪詢頻繁很多）。
     刻意不呼叫 persist_quote——那個會寫 SQLite，頻率這麼高的話划不來，
     報價歷史記錄還是交給原本的 3 秒輪詢週期就好。"""
-    for aid, ms in markets_state.items():
-        if token_id not in (ms.get("upTokenId"), ms.get("downTokenId")):
-            continue
-        market = ms.get("market")
-        if not market:
-            return
-        up_book = _ws_get_book(ms["upTokenId"])
-        down_book = _ws_get_book(ms["downTokenId"])
-        if up_book is None or down_book is None:
-            return
-        ms["upBook"], ms["downBook"] = up_book, down_book
-        slug = market["slug"]
-        remaining_seconds = (
-            None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
-        )
-        fair = ms.get("fair")
-        for variant_id, variant in AB_VARIANT_BY_ID.items():
-            if variant["assetId"] == aid:
-                simulate_trading(variant_id, slug, up_book, down_book, remaining_seconds, fair)
-        return
+    if _ws_simulation_ticks_enabled:
+        for aid, ms in markets_state.items():
+            if token_id not in (ms.get("upTokenId"), ms.get("downTokenId")):
+                continue
+            market = ms.get("market")
+            if not market:
+                break
+            up_book = _ws_get_book(ms["upTokenId"])
+            down_book = _ws_get_book(ms["downTokenId"])
+            if up_book is None or down_book is None:
+                break
+            ms["upBook"], ms["downBook"] = up_book, down_book
+            slug = market["slug"]
+            remaining_seconds = (
+                None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
+            )
+            fair = ms.get("fair")
+            for variant_id, variant in AB_VARIANT_BY_ID.items():
+                if variant["assetId"] == aid:
+                    simulate_trading(
+                        variant_id, slug, up_book, down_book, remaining_seconds, fair,
+                        allow_early_exit=False,
+                    )
+            break
+    _notify_ws_price_listeners(token_id)
 
 
 async def market_ws_loop() -> None:
     """背景常駐：連線 Polymarket 市場資料 WS，斷線自動重連（指數退避），
     重連後依 _ws_wanted_tokens 整批重新訂閱目前這輪視窗的 token。"""
     global _ws_conn, _ws_connected, _ws_subscribed_tokens
+    global _ws_last_message_at, _ws_snapshot_tokens
     backoff_idx = 0
     while True:
         try:
             async with websockets.connect(MARKET_WS_URL, ping_interval=None) as ws:
                 _ws_conn = ws
                 _ws_subscribed_tokens = set()
+                _ws_snapshot_tokens = set()
                 if _ws_wanted_tokens:
                     await ws.send(json.dumps({"assets_ids": list(_ws_wanted_tokens), "type": "market"}))
                     _ws_subscribed_tokens = set(_ws_wanted_tokens)
                 _ws_connected = True
+                _ws_last_message_at = time.monotonic()
                 backoff_idx = 0
                 log.info(f"[WS] 市場資料流已連線，訂閱 {len(_ws_subscribed_tokens)} 個 token")
 
@@ -1130,6 +1191,8 @@ async def market_ws_loop() -> None:
                     if now - last_ping >= WS_PING_INTERVAL:
                         await ws.send("PING")
                         last_ping = now
+                    if raw is not None:
+                        _ws_last_message_at = time.monotonic()
                     if raw is None or raw == "PONG":
                         continue
                     try:
@@ -1144,6 +1207,7 @@ async def market_ws_loop() -> None:
         _ws_connected = False
         _ws_conn = None
         _ws_subscribed_tokens = set()
+        _ws_snapshot_tokens = set()
         delay = WS_RECONNECT_BACKOFF[min(backoff_idx, len(WS_RECONNECT_BACKOFF) - 1)]
         backoff_idx += 1
         await asyncio.sleep(delay)
@@ -1170,15 +1234,19 @@ def _ws_get_book(token_id: str, limit: int = 6) -> dict | None:
         "asks": asks,
         "tickSize": meta.get("tickSize", 0.01),
         "minOrderSize": meta.get("minOrderSize", 1.0),
+        "quoteSource": "websocket" if token_id in _ws_snapshot_tokens else "initial_rest_snapshot",
+        "receivedAtMonotonic": _ws_book_updated_at.get(token_id),
     }
 
 
 async def _get_book_ws_or_rest(session: aiohttp.ClientSession, token_id: str) -> dict:
-    if _ws_connected:
+    if ws_feed_status()["healthy"] and token_id in _ws_snapshot_tokens:
         book = _ws_get_book(token_id)
         if book is not None:
             return book
-    return await fetch_book(session, token_id)
+    book = await fetch_book(session, token_id)
+    book["quoteSource"] = "rest_fallback"
+    return book
 
 
 async def _get_midpoint_ws_or_rest(session: aiohttp.ClientSession, token_id: str, book: dict) -> float:

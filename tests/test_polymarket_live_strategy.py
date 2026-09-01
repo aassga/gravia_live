@@ -1,6 +1,8 @@
+import asyncio
 import os
 import json
 import tempfile
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -178,6 +180,59 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(strategy.live_state["position"]["hedged"])
         self.assertTrue(strategy.live_state["position"]["dryRun"])
+
+    async def test_live_book_prefers_current_websocket_snapshot(self):
+        token = "ws-token"
+        ws_book = {
+            "bids": {"0.39": 10.0},
+            "asks": {"0.40": 10.0},
+        }
+        with (
+            patch.object(strategy.sim, "_ws_connected", True),
+            patch.object(strategy.sim, "_ws_last_message_at", time.monotonic()),
+            patch.object(strategy.sim, "_ws_snapshot_tokens", {token}),
+            patch.object(strategy.sim, "_ws_books", {token: ws_book}),
+            patch.object(strategy.sim, "fetch_book", AsyncMock()) as rest_fetch,
+        ):
+            book = await strategy.sim._get_book_ws_or_rest(None, token)
+        self.assertEqual(book["quoteSource"], "websocket")
+        self.assertEqual(book["asks"][0]["price"], 0.40)
+        rest_fetch.assert_not_awaited()
+
+    async def test_live_book_falls_back_to_rest_without_current_snapshot(self):
+        rest_book = {"bids": [], "asks": [], "tickSize": 0.01, "minOrderSize": 1.0}
+        with (
+            patch.object(strategy.sim, "_ws_connected", True),
+            patch.object(strategy.sim, "_ws_last_message_at", time.monotonic()),
+            patch.object(strategy.sim, "_ws_snapshot_tokens", set()),
+            patch.object(strategy.sim, "fetch_book", AsyncMock(return_value=rest_book)) as rest_fetch,
+        ):
+            book = await strategy.sim._get_book_ws_or_rest(None, "missing-token")
+        self.assertEqual(book["quoteSource"], "rest_fallback")
+        rest_fetch.assert_awaited_once()
+
+    async def test_ws_tick_immediately_evaluates_complete_book_pair(self):
+        market = {
+            "slug": "btc-window",
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        books = {
+            "up-token": {"bids": {"0.39": 10.0}, "asks": {"0.40": 10.0}},
+            "down-token": {"bids": {"0.59": 10.0}, "asks": {"0.60": 10.0}},
+        }
+        strategy.sim.state["market"] = market
+        strategy.sim.state["windowEndsAt"] = (strategy.sim.real_now() + 180) * 1000
+        with (
+            patch.object(strategy.sim, "_ws_connected", True),
+            patch.object(strategy.sim, "_ws_last_message_at", time.monotonic()),
+            patch.object(strategy.sim, "_ws_snapshot_tokens", {"up-token", "down-token"}),
+            patch.object(strategy.sim, "_ws_books", books),
+            patch.object(strategy, "evaluate_and_act", AsyncMock()) as evaluate,
+        ):
+            await strategy._evaluate_ws_tick("up-token", None, asyncio.Lock())
+        evaluate.assert_awaited_once()
+        self.assertEqual(strategy.live_state["quoteSource"], "websocket")
 
 
 if __name__ == "__main__":

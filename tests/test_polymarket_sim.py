@@ -117,6 +117,27 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual(sim.ab_states["main"]["totalPnl"], 12.34)
         self.assertIs(sim.sim_state, sim.ab_states["main"])
 
+    def test_websocket_book_change_notifies_registered_listener(self):
+        received = []
+        callback = received.append
+        old_enabled = sim._ws_simulation_ticks_enabled
+        sim.set_ws_simulation_ticks_enabled(False)
+        sim.register_ws_price_listener(callback)
+        try:
+            sim._ws_apply_message(
+                {
+                    "event_type": "book",
+                    "asset_id": "token-a",
+                    "bids": [{"price": "0.39", "size": "5"}],
+                    "asks": [{"price": "0.40", "size": "5"}],
+                }
+            )
+        finally:
+            sim.unregister_ws_price_listener(callback)
+            sim.set_ws_simulation_ticks_enabled(old_enabled)
+        self.assertEqual(received, ["token-a"])
+        self.assertEqual(sim._ws_get_book("token-a")["quoteSource"], "websocket")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,17 @@
 # Polymarket BTC/ETH Up/Down Dashboard
 
+## 實盤報價來源
+
+`polymarket_live_strategy.py` 以 Polymarket Market WebSocket
+（`wss://ws-subscriptions-clob.polymarket.com/ws/market`）接收 Up/Down 即時完整訂單簿與增量更新。
+每次簿價變動都會立即重新檢查進場、第二腿與提早退出條件；原本的 3 秒循環只保留市場換期、
+Binance 模型資料更新與結算工作。WebSocket 尚未取得當前連線的完整快照、連線不健康或斷線時，
+才會暫時改用 CLOB REST 訂單簿，連線恢復後自動切回 WebSocket。
+
+啟動紀錄中的 `[QUOTE] source=websocket` 代表兩邊都來自目前連線的 WebSocket 快照；
+`source=rest_fallback` 代表正在使用安全備援。這項變更不會略過
+`LIVE_TRADING` 與 `POLY_STRATEGY_ARMED` 兩道真實送單開關。
+
 使用 Polymarket 真實市場資料執行 BTC/ETH 5 分鐘 Up/Down 紙上交易模擬，
 並提供獨立、預設停用的真實下單工具。
 

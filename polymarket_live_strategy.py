@@ -76,6 +76,8 @@ def _new_live_state() -> dict:
         "haltReason": None,
         "unconfirmedOrder": None,
         "preflightSlug": None,
+        "quoteSource": "not_started",
+        "wsConnected": False,
         "updatedAt": time.time(),
     }
 
@@ -527,7 +529,7 @@ async def _emergency_unwind(session: aiohttp.ClientSession, reason: str) -> None
     if not pos or pos.get("hedged"):
         return
     try:
-        latest_book = await sim.fetch_book(session, pos["tokenId"])
+        latest_book = await sim._get_book_ws_or_rest(session, pos["tokenId"])
     except Exception as exc:
         log.error(f"[LIVE] 緊急退出前無法取得訂單簿：{exc}")
         return
@@ -600,13 +602,13 @@ async def evaluate_and_act(
 ) -> None:
     if live_state.get("halted"):
         return
-    if time.time() - float(live_state.get("lastActionAt", 0)) < ACTION_COOLDOWN_SECONDS:
-        return
 
     up_book, down_book = sim.state["upBook"], sim.state["downBook"]
     pos = live_state.get("position")
 
     if pos is None:
+        if time.time() - float(live_state.get("lastActionAt", 0)) < ACTION_COOLDOWN_SECONDS:
+            return
         if remaining_seconds is None or remaining_seconds < sim.SIM_MIN_ENTRY_REMAINING:
             return
         dry_run = not REAL_EXECUTION_ENABLED
@@ -673,6 +675,56 @@ async def evaluate_and_act(
                 await _close_position(exit_plan, dry_run, "market_bid_above_model_value")
 
 
+def _set_quote_status(source: str) -> None:
+    status = sim.ws_feed_status()
+    previous = live_state.get("quoteSource")
+    previous_connected = bool(live_state.get("wsConnected"))
+    live_state["quoteSource"] = source
+    live_state["wsConnected"] = bool(status["connected"])
+    if source != previous or bool(status["connected"]) != previous_connected:
+        log.info(
+            f"[QUOTE] source={source} ws_connected={status['connected']} "
+            f"subscribed_tokens={status['subscribedTokens']}"
+        )
+        save_live_state()
+
+
+async def _evaluate_ws_tick(
+    token_id: str,
+    session: aiohttp.ClientSession,
+    decision_lock: asyncio.Lock,
+) -> None:
+    """Evaluate immediately from a complete current-connection WS book pair."""
+    market = sim.state.get("market")
+    if not market or decision_lock.locked():
+        return
+    up_id, down_id = sim._market_tokens(market)
+    if token_id not in (up_id, down_id):
+        return
+    up_book = sim._ws_get_book(up_id)
+    down_book = sim._ws_get_book(down_id)
+    if (
+        up_book is None
+        or down_book is None
+        or up_book.get("quoteSource") != "websocket"
+        or down_book.get("quoteSource") != "websocket"
+    ):
+        return
+
+    async with decision_lock:
+        sim.state["upBook"], sim.state["downBook"] = up_book, down_book
+        if up_book["bids"] and up_book["asks"]:
+            sim.state["upPrice"] = (up_book["bids"][0]["price"] + up_book["asks"][0]["price"]) / 2
+        if down_book["bids"] and down_book["asks"]:
+            sim.state["downPrice"] = (
+                down_book["bids"][0]["price"] + down_book["asks"][0]["price"]
+            ) / 2
+        remaining = max(0.0, sim.state["windowEndsAt"] / 1000 - sim.real_now())
+        fair = sim.estimate_fair_up("btc")
+        _set_quote_status("websocket")
+        await evaluate_and_act(market["slug"], session, remaining, fair)
+
+
 async def strategy_loop() -> None:
     log.info("=" * 64)
     log.info("  Polymarket BTC Up/Down · 真實自動下單策略")
@@ -692,6 +744,16 @@ async def strategy_loop() -> None:
     log.info("=" * 64)
 
     async with aiohttp.ClientSession() as session:
+        decision_lock = asyncio.Lock()
+
+        async def on_ws_tick(token_id: str) -> None:
+            await _evaluate_ws_tick(token_id, session, decision_lock)
+
+        # The live process only consumes the shared WS book implementation; it
+        # must not execute the paper-simulation tick handler in the same process.
+        sim.set_ws_simulation_ticks_enabled(False)
+        sim.register_ws_price_listener(on_ws_tick)
+        ws_task = asyncio.create_task(sim.market_ws_loop(), name="polymarket-market-ws")
         while True:
             try:
                 cur = sim.state["market"]
@@ -712,23 +774,32 @@ async def strategy_loop() -> None:
                 if sim.state["market"]:
                     up_id, down_id = sim._market_tokens(sim.state["market"])
                     if up_id and down_id:
-                        up_price, down_price, up_book, down_book, spot, klines = await asyncio.gather(
-                            sim.fetch_midpoint(session, up_id),
-                            sim.fetch_midpoint(session, down_id),
-                            sim.fetch_book(session, up_id),
-                            sim.fetch_book(session, down_id),
+                        sim.state["upTokenId"] = up_id
+                        sim.state["downTokenId"] = down_id
+                        await sim._ws_set_wanted_tokens({up_id, down_id})
+                        await asyncio.gather(
+                            sim._ws_ensure_meta(session, up_id),
+                            sim._ws_ensure_meta(session, down_id),
+                        )
+                        up_book, down_book, spot, klines = await asyncio.gather(
+                            sim._get_book_ws_or_rest(session, up_id),
+                            sim._get_book_ws_or_rest(session, down_id),
                             sim.fetch_spot_price(session, "BTCUSDT"),
                             sim.fetch_klines(session, "BTCUSDT", 60),
                             return_exceptions=True,
                         )
-                        if not isinstance(up_price, Exception):
-                            sim.state["upPrice"] = up_price
-                        if not isinstance(down_price, Exception):
-                            sim.state["downPrice"] = down_price
                         if not isinstance(up_book, Exception):
                             sim.state["upBook"] = up_book
+                            if up_book["bids"] and up_book["asks"]:
+                                sim.state["upPrice"] = (
+                                    up_book["bids"][0]["price"] + up_book["asks"][0]["price"]
+                                ) / 2
                         if not isinstance(down_book, Exception):
                             sim.state["downBook"] = down_book
+                            if down_book["bids"] and down_book["asks"]:
+                                sim.state["downPrice"] = (
+                                    down_book["bids"][0]["price"] + down_book["asks"][0]["price"]
+                                ) / 2
                         if not isinstance(spot, Exception):
                             sim.state["spotPrice"] = spot["price"]
                             sim.state["spotChangePct"] = spot["changePct"]
@@ -737,7 +808,19 @@ async def strategy_loop() -> None:
 
                         remaining = max(0.0, sim.state["windowEndsAt"] / 1000 - sim.real_now())
                         fair = sim.estimate_fair_up("btc")
-                        await evaluate_and_act(sim.state["market"]["slug"], session, remaining, fair)
+                        if not isinstance(up_book, Exception) and not isinstance(down_book, Exception):
+                            source = (
+                                "websocket"
+                                if up_book.get("quoteSource") == "websocket"
+                                and down_book.get("quoteSource") == "websocket"
+                                else "rest_fallback"
+                            )
+                            _set_quote_status(source)
+                            if not decision_lock.locked():
+                                async with decision_lock:
+                                    await evaluate_and_act(
+                                        sim.state["market"]["slug"], session, remaining, fair
+                                    )
 
                 await retry_pending_settlements(session)
             except Exception as exc:
