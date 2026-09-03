@@ -578,6 +578,78 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pos["hedged"])
         self.assertEqual(pos["shares"], depth * strategy.sim.SIM_DEPTH_CAP_FRACTION)
 
+    def _set_market_for_preflight(self):
+        strategy.sim.state["market"] = {
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+
+    # 2026-09：真實案例——兩個 token 的餘額查詢原本用 asyncio.gather 同時發出，兩個背景
+    # 執行緒同時打中 py_clob_client_v2 共用的 httpx.Client(http2=True)、搶著建立第一條
+    # 連線，穩定重現 [Errno 11] Resource temporarily unavailable，連兩台不同 VPS 都一樣。
+    # 改成序列查詢＋重試一次後，下面驗證：(1) 兩次查詢確實不再同時發出、(2) 單次暫時性
+    # 錯誤靠重試自己救回來、不會白白觸發 halt。
+    async def test_preflight_check_queries_balances_sequentially_not_concurrently(self):
+        self._set_market_for_preflight()
+        in_flight = []
+        max_concurrent = 0
+
+        def fake_get_balance(token_id):
+            in_flight.append(token_id)
+            nonlocal max_concurrent
+            max_concurrent = max(max_concurrent, len(in_flight))
+            in_flight.remove(token_id)
+            return 0.0
+
+        with patch.object(strategy.live, "get_conditional_balance", side_effect=fake_get_balance):
+            result = await strategy._ensure_no_unmanaged_current_position()
+
+        self.assertTrue(result)
+        self.assertEqual(max_concurrent, 1)
+
+    async def test_preflight_check_retries_once_on_transient_error(self):
+        self._set_market_for_preflight()
+        calls = {"n": 0}
+
+        def flaky_get_balance(token_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("[Errno 11] Resource temporarily unavailable")
+            return 0.0
+
+        with (
+            patch.object(strategy.live, "get_conditional_balance", side_effect=flaky_get_balance),
+            patch.object(strategy.asyncio, "sleep", AsyncMock()),
+        ):
+            result = await strategy._ensure_no_unmanaged_current_position()
+
+        self.assertTrue(result)
+        self.assertFalse(strategy.live_state.get("halted"))
+
+    async def test_preflight_check_halts_when_retry_also_fails(self):
+        self._set_market_for_preflight()
+
+        def always_fails(token_id):
+            raise OSError("[Errno 11] Resource temporarily unavailable")
+
+        with (
+            patch.object(strategy.live, "get_conditional_balance", side_effect=always_fails),
+            patch.object(strategy.asyncio, "sleep", AsyncMock()),
+        ):
+            result = await strategy._ensure_no_unmanaged_current_position()
+
+        self.assertFalse(result)
+        self.assertTrue(strategy.live_state.get("halted"))
+
+    async def test_preflight_check_halts_on_real_unmanaged_position(self):
+        self._set_market_for_preflight()
+
+        with patch.object(strategy.live, "get_conditional_balance", side_effect=[3.0, 0.0]):
+            result = await strategy._ensure_no_unmanaged_current_position()
+
+        self.assertFalse(result)
+        self.assertTrue(strategy.live_state.get("halted"))
+
 
 if __name__ == "__main__":
     unittest.main()

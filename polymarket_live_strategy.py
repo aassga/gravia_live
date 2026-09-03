@@ -463,21 +463,32 @@ def _strategy_cash_sync(dry_run: bool) -> float | None:
     return _cash_cache["value"]
 
 
+async def _query_conditional_balance_with_retry(token_id: str) -> float:
+    """查詢單一 token 餘額，失敗重試一次。2026-09：這裡原本用 asyncio.gather 讓兩個
+    token 的查詢同時發出，結果兩個背景執行緒在程式剛啟動時同時打中 py_clob_client_v2
+    共用的 httpx.Client(http2=True)、搶著建立同一條連線的第一個 request，穩定重現
+    [Errno 11] Resource temporarily unavailable（連兩台不同 VPS 都一樣）。改成序列
+    查詢完全避開這個 race，並加一次重試——這個檢查失敗會直接讓整個策略停止下單，
+    不該讓單次暫時性錯誤就要人工介入重啟。"""
+    try:
+        return await asyncio.to_thread(live.get_conditional_balance, token_id)
+    except Exception:
+        await asyncio.sleep(1.0)
+        return await asyncio.to_thread(live.get_conditional_balance, token_id)
+
+
 async def _ensure_no_unmanaged_current_position() -> bool:
     """真實模式的首筆下單前，確認當前兩個 token 都沒有策略狀態之外的持倉。"""
     up_id, down_id = sim._market_tokens(sim.state["market"])
-    balances = await asyncio.gather(
-        asyncio.to_thread(live.get_conditional_balance, up_id),
-        asyncio.to_thread(live.get_conditional_balance, down_id),
-        return_exceptions=True,
-    )
-    if any(isinstance(balance, Exception) for balance in balances):
-        details = ", ".join(str(balance) for balance in balances if isinstance(balance, Exception))
-        _set_halt(f"preflight_position_check_failed: {details}")
+    try:
+        up_balance = await _query_conditional_balance_with_retry(up_id)
+        down_balance = await _query_conditional_balance_with_retry(down_id)
+    except Exception as exc:
+        _set_halt(f"preflight_position_check_failed: {exc}")
         return False
-    if float(balances[0]) >= 0.01 or float(balances[1]) >= 0.01:
+    if up_balance >= 0.01 or down_balance >= 0.01:
         _set_halt(
-            f"unmanaged_current_market_position up={float(balances[0]):.6f} down={float(balances[1]):.6f}"
+            f"unmanaged_current_market_position up={up_balance:.6f} down={down_balance:.6f}"
         )
         return False
     return True
