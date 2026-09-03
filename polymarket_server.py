@@ -110,10 +110,10 @@ SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025}
 # 股數封頂在「當下看得到的深度」的這個比例。2026-09：實盤好幾次撞到「模擬盤跟實盤在
 # 同一秒看到同一個機會，模擬盤保證吃得到、實盤卻因為深度不夠被拒」——這不是 bug，是
 # 紙上模擬（吃剛看到的快照，保證成交）跟真實下單（要跟其他真人搶同一份流動性，中間
-# 還有網路延遲）本質上的差異，沒辦法完全消除。從 0.5 調低到 0.3，讓兩邊都對「看到的
-# 深度」更保守一點，用犧牲一些原本吃得到的機會，換取真實下單被拒/只成交一部分的頻率
-# 降低。這個常數也是 polymarket_live_strategy.py 實盤股數封頂的來源，調整會同時影響兩邊。
-SIM_DEPTH_CAP_FRACTION      = 0.3
+# 還有網路延遲）本質上的差異，沒辦法完全消除。曾經從 0.5 調低到 0.3 想降低這個風險，
+# 但代價是每次能買的股數變少、賺得也變少，使用者要求先調回 0.5 試試看效果如何——
+# 這個常數也是 polymarket_live_strategy.py 實盤股數封頂的來源，調整會同時影響兩邊。
+SIM_DEPTH_CAP_FRACTION      = 0.5
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # 對齊公開資料裡「T-10 秒、window delta」那套做法：不是在窗口一開始就靠模型優勢
@@ -783,11 +783,10 @@ def log_price_sum_diagnostic(tag: str, up_book: dict, down_book: dict, lock_max_
 def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
     """先檢查兩腿此刻是否可直接成交並鎖住淨利，這才是進場即無方向曝險的套利。
 
-    股數會先按可見深度的 SIM_DEPTH_CAP_FRACTION（見該常數註解，2026-09 從 0.5
-    調低到 0.3）封頂——超過這個比例會開始明顯吃掉自己的成交價，模擬出來的
-    利潤會比實際能拿到的樂觀，也更容易在真實下單時因為深度已經被搶走而被拒。
-    封頂之後如果連目標股數都吃不滿，才照原本邏輯整筆視為不可行
-    （simulate_buy_fill 深度不足回傳 None）。"""
+    股數會先按可見深度的 SIM_DEPTH_CAP_FRACTION（見該常數註解）封頂——超過這個比例
+    會開始明顯吃掉自己的成交價，模擬出來的利潤會比實際能拿到的樂觀，也更容易在
+    真實下單時因為深度已經被搶走而被拒。封頂之後如果連目標股數都吃不滿，才照原本
+    邏輯整筆視為不可行（simulate_buy_fill 深度不足回傳 None）。"""
     variant = AB_VARIANT_BY_ID[variant_id]
     shares, budget = _target_order_size(variant_id)
     if shares <= 0:
