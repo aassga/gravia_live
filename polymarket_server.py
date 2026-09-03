@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import sqlite3
+import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -30,10 +31,35 @@ import aiohttp
 import websockets
 from websockets.server import serve
 
+if sys.platform == "win32":
+    # Windows 終端機預設編碼常是 cp950/cp936，中文 log 會變亂碼，強制改 UTF-8
+    # （polymarket_live_trader.py / polymarket_live_strategy.py 已經有這段，這支主程式
+    # 之前漏掉了——單獨執行看起來還好是因為 Windows Terminal 常常自己就是 UTF-8，
+    # 但 PowerShell 管線/重新導向會用系統預設編碼，這時候就會亂碼）。
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
+if __name__ == "__main__":
+    # `py polymarket_server.py` 直接執行時，這支檔案是以 __main__ 身份載入的；但
+    # --with-live 模式下 main() 稍後會 `import polymarket_live_strategy`，那支檔案
+    # 內部又是用 `import polymarket_server as sim` 取得這份模組——Python 不會把
+    # 「正在跑的 __main__」跟「用檔名匯入的同一支檔案」視為同一個模組物件，沒有這行的話
+    # 會重新執行一份全新、獨立的 polymarket_server.py，導致實盤那邊的 sim.state／
+    # sim.markets_state 永遠是空的初始狀態，市場資料永遠抓不到、evaluate_and_act
+    # 每次都在最前面就跳過，看起來像「沒出錯但也沒有在跑」。這裡先把自己註冊進
+    # sys.modules，讓稍後的 import 直接拿到這個正在跑的 __main__ 物件。
+    sys.modules.setdefault("polymarket_server", sys.modules[__name__])
+
 # ── 設定 ──────────────────────────────────────────────────────────────────
 HOST = "localhost"
 PORT = 8766             # Polymarket 紙上模擬 Dashboard
 POLL_INTERVAL = 3       # 報價輪詢間隔（秒）－ Polymarket 沒有強制要求 WebSocket，輪詢就綽綽有餘
+
+# 明確的啟動旗標，預設 False：不加這個參數，這支程式永遠只是純模擬、不可能送出任何
+# 真實訂單，不管 .env 的 LIVE_TRADING/POLY_STRATEGY_ARMED 是什麼狀態。只有同時「執行
+# 時明確加這個參數」+「.env 武裝」兩個條件都成立，才會真的去下真實單——這是刻意的
+# 兩層防呆，不想讓「跑模擬盤」這個平常無害的動作，光靠一個設定檔就能變成真實下單。
+WITH_LIVE = "--with-live" in sys.argv
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CLOB_BASE  = "https://clob.polymarket.com"
@@ -43,7 +69,12 @@ log = logging.getLogger("polymarket")
 
 # ── 模擬策略設定（紙上交易）────────────────────────────────────────────────
 SIM_ENTRY_MAX_PRICE   = 0.40   # 主要策略：只有價格 <= 這個門檻才考慮先進場一邊
-SIM_LOCK_MAX_SUM      = 0.90   # 主要策略：兩邊最差可成交限價 <= 門檻，且扣費用後達最低淨利才配對
+SIM_LOCK_MAX_SUM      = 0.95   # 主要策略：兩邊最差可成交限價 <= 門檻，且扣費用後達最低淨利才配對
+                                # （2026-09 從 0.90 放寬到 0.95，增加鎖利機會頻率——真正擋住虧損單的
+                                # 是 SIM_MIN_NET_LOCK_PER_SHARE 這個獨立的淨利門檻，不是這裡，所以
+                                # 放寬這個只會多考慮更多候選機會，不會放行扣完費用還虧錢的單。
+                                # 這個常數也是 polymarket_live_strategy.py 實盤 LOCK_MAX_SUM 的來源，
+                                # 放寬會同時影響實盤的鎖利門檻。）
 SIM_DEFAULT_BALANCE   = 100.0  # 起始虛擬總資產預設值（美元），可從前端輸入自訂（會重置模擬）
 SIM_MIN_BALANCE       = 1.0
 SIM_DEFAULT_STAKE_PCT = 15.0   # 每組完整兩腿預設佔目前資產組合 15%（僅紙上模擬）
@@ -56,37 +87,70 @@ SIM_TAKER_FEE_RATE          = 0.07
 SIM_SLIPPAGE_BPS            = 3.0   # 模擬收到報價到成交之間的額外價格惡化
 SIM_MIN_ENTRY_EDGE          = 0.025 # 模型公平機率扣除成本後，至少保留 2.5¢/股
 SIM_MIN_NET_LOCK_PER_SHARE  = 0.01  # 完成配對後至少淨賺 1¢/股
+SIM_MIN_ORDER_NOTIONAL_USD  = 1.0   # 跟實盤一致：單腿成交金額低於這個門檻就不下單（Polymarket 最小下注是 $1，不是 $5）
 SIM_EXIT_EDGE               = 0.02  # 市場可賣價高於模型持有價值 2¢/股時提早退出
-SIM_MIN_ENTRY_REMAINING     = 90.0  # 距離結算不足 90 秒，不再開新的單邊部位
 SIM_FAIR_MODEL_WEIGHT       = 0.65  # Binance 波動模型權重；其餘使用市場隱含機率校準
 SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025}
+
+# ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
+# 對齊公開資料裡「T-10 秒、window delta」那套做法：不是在窗口一開始就靠模型優勢
+# 賭單邊（那條退路驗證下來是 0% 勝率，2026-09 起已對其他變體關閉），而是等到窗口
+# 快結束、現價已經明顯偏離「這個窗口開盤時的價格」——這時已經沒什麼時間反轉，
+# 訊號的確定性遠比窗口剛開盤時高很多。
+LATE_DIRECTION_WINDOW_SECONDS      = 10.0  # 只在剩不到這個秒數才考慮晚進場
+LATE_DIRECTION_MIN_ENTRY_REMAINING = 3.0   # 剩不到這個秒數就別進了，怕來不及成交
+LATE_DIRECTION_MIN_DELTA_PCT       = 0.02  # 現價相對開盤價至少要偏移這個百分比（公開資料裡的「強訊號」門檻）
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SIM_DB_PATH = os.path.join(BASE_DIR, "polymarket_sim.sqlite3")
 
-# ── 追蹤的資產：只留 BTC。ETH 已經移除——5 分鐘短線盤本來就要專注在單一資產上，
-#    多資產只是分散注意力，沒有實際帶來額外的套利機會。
+# ── 追蹤的資產：Polymarket 目前總共只有這 7 個「5 分鐘漲跌」市場（直接對 Gamma API
+#    逐一探測 slug 驗證過，其餘主流幣如 ADA/AVAX/LINK/DOT 都沒有對應市場，不是列表不全）。
 ASSETS = [
-    {"id": "btc", "label": "BTC", "slugPrefix": "btc-updown-5m-", "binanceSymbol": "BTCUSDT"},
+    {"id": "btc",  "label": "BTC",  "slugPrefix": "btc-updown-5m-",  "binanceSymbol": "BTCUSDT"},
+    {"id": "eth",  "label": "ETH",  "slugPrefix": "eth-updown-5m-",  "binanceSymbol": "ETHUSDT"},
+    {"id": "sol",  "label": "SOL",  "slugPrefix": "sol-updown-5m-",  "binanceSymbol": "SOLUSDT"},
+    {"id": "xrp",  "label": "XRP",  "slugPrefix": "xrp-updown-5m-",  "binanceSymbol": "XRPUSDT"},
+    {"id": "doge", "label": "DOGE", "slugPrefix": "doge-updown-5m-", "binanceSymbol": "DOGEUSDT"},
+    {"id": "bnb",  "label": "BNB",  "slugPrefix": "bnb-updown-5m-",  "binanceSymbol": "BNBUSDT"},
+    {"id": "hype", "label": "HYPE", "slugPrefix": "hype-updown-5m-", "binanceSymbol": "HYPEUSDT"},
 ]
 
-# ── A/B 門檻測試：同時跑好幾組不同的進場/鎖利門檻，吃同一份真實報價，
-#    彼此獨立記帳，方便直接比較哪組門檻的實際表現比較好（而不是憑感覺猜）。
-#    "main" 這組固定對應 SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM，
-#    也是既有前端面板（部位卡片、成交紀錄列表）顯示的那一組，維持向後相容。
-#    "pure-arb" 這組刻意不設單邊進場門檻（entryMaxPrice=None，邏輯上也用不到）——
-#    只做 _try_direct_pair 那條「當下兩邊能同時買、直接鎖住利潤」的真無風險套利，
-#    找不到機會就空手，絕對不會退而求其次先賭單邊、留下方向性曝險。lockMaxSum
-#    對齊 cnyes 那篇報導講的公開研究參數：合計價格門檻 <= $0.95（也就是至少
-#    $0.05 原始價差，報導裡說這是「用於覆蓋執行滑點」的最低利潤門檻），
-#    比原本自己抓的 0.99 更嚴格，且 _try_direct_pair 現在也對齊了報導提到的
-#    另一個風控原則——單筆倉位封頂在可見深度的 50%，不會假設能吃光整本。
-AB_VARIANTS = [
-    {"id": "conservative", "assetId": "btc", "label": "BTC 保守 0.30/0.85", "entryMaxPrice": 0.30, "lockMaxSum": 0.85},
-    {"id": "main",         "assetId": "btc", "label": "BTC 目前 0.40/0.90", "entryMaxPrice": SIM_ENTRY_MAX_PRICE, "lockMaxSum": SIM_LOCK_MAX_SUM},
-    {"id": "loose",        "assetId": "btc", "label": "BTC 寬鬆 0.45/0.95", "entryMaxPrice": 0.45, "lockMaxSum": 0.95},
-    {"id": "pure-arb",     "assetId": "btc", "label": "BTC 純套利（只做同時雙邊）", "entryMaxPrice": None, "lockMaxSum": 0.95, "pureArbOnly": True},
+# ── A/B 門檻測試：每個資產各自跑同一套四組門檻設定，彼此獨立記帳，方便直接比較
+#    「同一套策略邏輯放到不同資產上，表現差多少」。variant id 格式是
+#    "<資產id>-<組別>"（例如 "btc-main"），"<資產>-main" 這組固定對應
+#    SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM。"<資產>-late-direction" 是實驗組：
+#    進場邏輯跟其他三組不同，不用 entryMaxPrice/fair 模型賭單邊，而是只在窗口剩不到
+#    10 秒、且現價已經明顯偏離開盤價時才進場賭方向，對齊公開資料裡「window delta」
+#    那套做法，且進場後不補鎖利、不提早出場。
+#    （附註：conservative/main/loose 找不到能立即鎖住兩邊的機會就空手，不賭單邊——
+#    這條退路歷史勝率是 0%（42 戰 0 勝、-$364.75，BTC 上驗證的），關閉／重開過幾次，
+#    2026-09 確認維持關閉。核心策略就是「兩邊都買才進場」，找不到就不進場。）
+_VARIANT_CONFIGS = [
+    {"key": "conservative", "labelSuffix": "保守 0.30/0.90", "entryMaxPrice": 0.30, "lockMaxSum": 0.90},
+    {"key": "main",         "labelSuffix": "目前 0.40/0.95", "entryMaxPrice": SIM_ENTRY_MAX_PRICE, "lockMaxSum": SIM_LOCK_MAX_SUM},
+    {"key": "loose",        "labelSuffix": "寬鬆 0.45/0.98", "entryMaxPrice": 0.45, "lockMaxSum": 0.98},
 ]
+AB_VARIANTS = []
+for _asset in ASSETS:
+    for _cfg in _VARIANT_CONFIGS:
+        AB_VARIANTS.append({
+            "id":            f"{_asset['id']}-{_cfg['key']}",
+            "assetId":       _asset["id"],
+            "label":         f"{_asset['label']} {_cfg['labelSuffix']}",
+            "entryMaxPrice": _cfg["entryMaxPrice"],
+            "lockMaxSum":    _cfg["lockMaxSum"],
+        })
+    AB_VARIANTS.append({
+        "id":                    f"{_asset['id']}-late-direction",
+        "assetId":               _asset["id"],
+        "label":                 f"{_asset['label']} 晚進場方向性（T-10s）",
+        "entryMaxPrice":         None,
+        "lockMaxSum":            SIM_LOCK_MAX_SUM,
+        "lateDirectionOnly":     True,
+        "lateDirectionMaxPrice": 0.92,
+    })
+del _asset, _cfg
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
 
 def _new_market_state() -> dict:
@@ -98,6 +162,7 @@ def _new_market_state() -> dict:
         "upBook":        {"bids": [], "asks": []},
         "downBook":      {"bids": [], "asks": []},
         "spotPrice":     None,   # Binance Futures 參考價；不是市場結算用的 Chainlink TWAP
+        "windowOpenSpotPrice": None,  # 這一輪窗口第一次觀察到的現價，晚進場方向性策略用來算偏移幅度
         "spotChangePct": None,   # 24h 漲跌幅
         "klines":        [],     # 真實 1 分鐘 K 線（Binance），畫蠟燭圖用
         "connected":     False,
@@ -137,7 +202,7 @@ shared_config = {
     "runId":        int(time.time() * 1000),
 }
 
-sim_state = ab_states["main"]  # 向後相容：既有程式碼引用 sim_state 的地方，等同於 "main" 這組
+sim_state = ab_states["btc-main"]  # 向後相容：既有程式碼引用 sim_state 的地方，等同於 "main" 這組
 
 def set_stake_pct(pct: float) -> None:
     shared_config["stakePct"] = max(SIM_MIN_STAKE_PCT, min(SIM_MAX_STAKE_PCT, float(pct)))
@@ -152,7 +217,7 @@ def reset_with_balance(start_balance: float) -> None:
         ab_states[vid] = _new_variant_state()
         ab_states[vid]["peakPortfolio"] = shared_config["startBalance"]
     global sim_state
-    sim_state = ab_states["main"]
+    sim_state = ab_states["btc-main"]
     save_sim_state()
     log.info(f"[SIM] 重置：起始資產=${shared_config['startBalance']:,.2f}（全部 A/B 組一起重置）")
 
@@ -453,7 +518,7 @@ def load_sim_state() -> None:
             ab_states[variant_id] = defaults
         except Exception as exc:
             log.warning(f"[SIM:{variant_id}] 無法載入狀態，改用空白狀態：{exc}")
-    sim_state = ab_states["main"]
+    sim_state = ab_states["btc-main"]
 
 
 def persist_trade(variant_id: str, trade: dict) -> None:
@@ -665,16 +730,31 @@ def hedge_position(variant_id: str, side: str, fill: dict) -> None:
     )
 
 
-def _entry_candidate(side: str, book: dict, shares: float, fair_probability: float, max_price: float) -> dict | None:
-    # 跟真實版一樣不先按深度縮小股數：深度不夠 simulate_buy_fill 會直接回傳 None（等同 FOK 未成交）。
-    fill = simulate_buy_fill(book, shares)
-    if not fill or fill["decisionNotional"] < 1.0 or fill["decisionPrice"] > max_price:
-        return None
-    all_in_per_share = (fill["decisionNotional"] + fill["decisionFee"]) / fill["shares"]
-    edge = fair_probability - all_in_per_share
-    if edge < SIM_MIN_ENTRY_EDGE:
-        return None
-    return {"side": side, "fill": fill, "fair": fair_probability, "edge": edge}
+# ── 診斷用：比對模擬盤／實盤兩條獨立 WS 連線在同一個瞬間看到的報價是否有落差 ──
+# 只在兩邊最佳賣價加總「接近」鎖利門檻時才記錄（不是每個 tick 都記，會洗版），
+# 且每個 tag 節流最多每 0.5 秒記一次。查完之後這段可以刪掉，不影響正式邏輯。
+_diag_log_at: dict = {}
+DIAG_NEAR_MISS_MARGIN = 0.05
+
+
+def log_price_sum_diagnostic(tag: str, up_book: dict, down_book: dict, lock_max_sum: float) -> None:
+    up_asks = up_book.get("asks") or []
+    down_asks = down_book.get("asks") or []
+    if not up_asks or not down_asks:
+        return
+    up_ask = float(up_asks[0]["price"])
+    down_ask = float(down_asks[0]["price"])
+    price_sum = up_ask + down_ask
+    if price_sum > lock_max_sum + DIAG_NEAR_MISS_MARGIN:
+        return
+    now = time.monotonic()
+    if now - _diag_log_at.get(tag, 0.0) < 0.5:
+        return
+    _diag_log_at[tag] = now
+    log.info(
+        f"[DIAG:{tag}] t={time.time():.3f} price_sum={price_sum:.4f} "
+        f"up_ask={up_ask:.4f} down_ask={down_ask:.4f} lockMaxSum={lock_max_sum:.2f}"
+    )
 
 
 def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
@@ -696,7 +776,15 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
         return False
     up_fill = simulate_buy_fill(up_book, shares)
     down_fill = simulate_buy_fill(down_book, shares)
-    if not up_fill or not down_fill or up_fill["notional"] < 1 or down_fill["notional"] < 1:
+    if (
+        not up_fill or not down_fill
+        or up_fill["notional"] < SIM_MIN_ORDER_NOTIONAL_USD
+        or down_fill["notional"] < SIM_MIN_ORDER_NOTIONAL_USD
+        # Polymarket 真正的下限是「股數」不是金額——查證過真實 API 回傳的
+        # minOrderSize 是 5 股，不是 $5，跟實盤 polymarket_live_strategy.py 用同一個欄位對齊。
+        or up_fill["shares"] < float(up_book.get("minOrderSize", 1) or 1)
+        or down_fill["shares"] < float(down_book.get("minOrderSize", 1) or 1)
+    ):
         return False
     price_sum = up_fill["decisionPrice"] + down_fill["decisionPrice"]
     total_decision_cost = (
@@ -717,6 +805,46 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     enter_position(variant_id, slug, "Up", up_fill, budget, None, None)
     hedge_position(variant_id, "Down", down_fill)
     return True
+
+
+def _try_late_direction_entry(
+    variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float
+) -> None:
+    """晚進場方向性策略：只在窗口快結束、現價已經明顯偏離開盤價時才賭方向。
+
+    跟其他變體「一開窗口就靠模型優勢賭單邊」完全相反——那條路統計下來是 0% 勝率
+    （鎖不到對沖，往往正代表市場對另一邊已有強烈共識，而共識通常是對的）。
+    這裡反過來利用同一個道理：等到只剩最後幾秒，現價相對開盤價的偏移還沒完全
+    反映在賠率上，且已經沒什麼時間反轉，這時候的方向性判斷確定性才夠高。
+    """
+    if remaining_seconds > LATE_DIRECTION_WINDOW_SECONDS or remaining_seconds < LATE_DIRECTION_MIN_ENTRY_REMAINING:
+        return
+    variant = AB_VARIANT_BY_ID[variant_id]
+    ms = markets_state[variant["assetId"]]
+    open_price = ms.get("windowOpenSpotPrice")
+    spot = ms.get("spotPrice")
+    if not open_price or not spot or open_price <= 0:
+        return
+    delta_pct = (spot - open_price) / open_price * 100
+    if abs(delta_pct) < LATE_DIRECTION_MIN_DELTA_PCT:
+        return
+    side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
+    shares, budget = _target_order_size(variant_id)
+    if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+        return
+    fill = simulate_buy_fill(book, shares)
+    if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
+        return
+    # 真正的下限是「股數」不是金額：查證過真實 API 回傳的 minOrderSize 是 5 股，不是 $5。
+    if fill["shares"] < float(book.get("minOrderSize", 1) or 1):
+        return
+    if fill["decisionPrice"] > variant["lateDirectionMaxPrice"]:
+        return
+    enter_position(variant_id, slug, side, fill, budget, None, None)
+    log.info(
+        f"[SIM:{variant_id}] 晚進場方向性 {side} Δ={delta_pct:+.3f}% "
+        f"剩餘={remaining_seconds:.1f}s VWAP=${fill['vwap']:.4f}"
+    )
 
 
 def _close_directional_position(variant_id: str, fill: dict, reason: str) -> None:
@@ -748,30 +876,24 @@ def simulate_trading(
     pos = st["position"]
 
     if pos is None:
-        if remaining_seconds is None or remaining_seconds < SIM_MIN_ENTRY_REMAINING:
+        if remaining_seconds is None or remaining_seconds <= 0:
             return
         if _try_direct_pair(variant_id, slug, up_book, down_book):
             return
-        if variant.get("pureArbOnly"):
-            # 純套利模式：找不到當下能同時鎖住的機會就不進場，寧可空手，
-            # 不退而求其次先賭單邊——這組存在的目的就是完全不承擔方向性風險。
-            return
-        if not fair:
-            return
-        target_shares, budget = _target_order_size(variant_id)
-        if target_shares <= 0 or budget < 1:
-            return
-        candidates = [
-            _entry_candidate("Up", up_book, target_shares, fair["fairUp"], variant["entryMaxPrice"]),
-            _entry_candidate("Down", down_book, target_shares, fair["fairDown"], variant["entryMaxPrice"]),
-        ]
-        candidates = [c for c in candidates if c]
-        if candidates:
-            best = max(candidates, key=lambda c: c["edge"])
-            enter_position(variant_id, slug, best["side"], best["fill"], budget, best["fair"], best["edge"])
+        if variant.get("lateDirectionOnly"):
+            _try_late_direction_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        # 其餘變體：找不到能立即鎖住兩邊的機會就空手，不退而求其次先賭單邊留下方向性
+        # 曝險——這條退路統計下來歷史勝率是 0%（42 戰 0 勝、-$364.75），關閉／重開過
+        # 幾次，2026-09 確認維持關閉。核心策略就是「兩邊都買才進場」，找不到就不進場。
         return
 
     if pos["hedged"] or pos["windowSlug"] != slug:
+        return
+
+    if variant.get("lateDirectionOnly"):
+        # 晚進場方向性策略的核心就是抱著這個部位到結算，不補鎖利、不提早出場——
+        # 進場當下對邊通常正好夠便宜可以「鎖利」，但那樣等於把方向性優勢換成
+        # 極小的鎖利價差，違背了這組存在的目的。
         return
 
     other_side = "Down" if pos["side"] == "Up" else "Up"
@@ -943,7 +1065,9 @@ WS_RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
 
 _ws_books: dict = {}              # token_id -> {"bids": {price_str: size}, "asks": {price_str: size}}
 _ws_meta: dict = {}               # token_id -> {"tickSize":, "minOrderSize":}，第一次見到時查一次就沿用
-_ws_wanted_tokens: set = set()    # 這一輪視窗真正需要的 token（隨視窗替換而更新）
+_ws_wanted_by_asset: dict = {}    # asset_id -> 這一輪視窗該資產需要的 token，7 個資產各自更新，
+                                   # 合併起來才是 _ws_wanted_tokens——不能讓某個資產的更新覆蓋掉其他資產。
+_ws_wanted_tokens: set = set()    # 目前所有資產合併起來真正需要的 token（隨各資產視窗替換而更新）
 _ws_subscribed_tokens: set = set()  # WS 連線目前實際訂閱中的 token
 _ws_conn = None                   # 目前存活的 WS 連線物件，斷線時是 None
 _ws_connected = False
@@ -1007,11 +1131,15 @@ async def _ws_ensure_meta(session: aiohttp.ClientSession, token_id: str) -> None
         log.warning(f"[WS] 查 tick size / 最低股數失敗 token={token_id}：{e}")
 
 
-async def _ws_set_wanted_tokens(token_ids: set) -> None:
-    """視窗換了、要追蹤的 token 也跟著換——如果 WS 目前是連線狀態就直接送訂閱/取消訂閱，
-    不然只更新「想要的清單」，等連線建立/重連時會整批依這份清單訂閱。"""
+async def _ws_set_wanted_tokens(asset_id: str, token_ids: set) -> None:
+    """某個資產這一輪視窗換了、要追蹤的 token 也跟著換——只更新這個資產自己的那份，
+    再跟其他資產目前的合併成整體想要的清單，不能整批覆蓋掉（不然 7 個資產輪流呼叫
+    這個函式時，後面呼叫的資產會把前面資產的訂閱蓋掉）。
+    如果 WS 目前是連線狀態就直接送訂閱/取消訂閱，不然只更新「想要的清單」，
+    等連線建立/重連時會整批依這份清單訂閱。"""
     global _ws_wanted_tokens
-    _ws_wanted_tokens = set(token_ids)
+    _ws_wanted_by_asset[asset_id] = set(token_ids)
+    _ws_wanted_tokens = set().union(*_ws_wanted_by_asset.values()) if _ws_wanted_by_asset else set()
     if _ws_conn is None:
         return
     to_add = _ws_wanted_tokens - _ws_subscribed_tokens
@@ -1151,6 +1279,8 @@ def _on_ws_price_tick(token_id: str) -> None:
                 None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
             )
             fair = ms.get("fair")
+            if aid == "btc":
+                log_price_sum_diagnostic(f"sim-ws-{aid}", up_book, down_book, SIM_LOCK_MAX_SUM)
             for variant_id, variant in AB_VARIANT_BY_ID.items():
                 if variant["assetId"] == aid:
                     simulate_trading(
@@ -1272,6 +1402,7 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
             queue_settlement(cur["slug"])
         ms["market"] = new_market
         ms["windowEndsAt"] = _iso_to_ms(new_market["endDate"])
+        ms["windowOpenSpotPrice"] = None  # 換窗口了，開盤價重新觀察
         log.info(f"[MARKET:{aid}] 切換到新窗口 {new_market['slug']}　結束於 {new_market['endDate']}")
 
     if not ms["market"]:
@@ -1283,7 +1414,7 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
 
     # 每輪都同步一次「想要的 token」（函式內部自己 diff，沒變就不會真的送訂閱訊息）；
     # 順便確保 tick size / 最低股數已經查過，WS 才有資料可以馬上用。
-    await _ws_set_wanted_tokens({up_id, down_id})
+    await _ws_set_wanted_tokens(aid, {up_id, down_id})
     await asyncio.gather(_ws_ensure_meta(session, up_id), _ws_ensure_meta(session, down_id))
 
     up_book, down_book = await asyncio.gather(
@@ -1310,6 +1441,8 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     if not isinstance(spot, Exception):
         ms["spotPrice"] = spot["price"]
         ms["spotChangePct"] = spot["changePct"]
+        if ms["windowOpenSpotPrice"] is None:
+            ms["windowOpenSpotPrice"] = spot["price"]
     if not isinstance(klines, Exception) and klines:
         ms["klines"] = klines
 
@@ -1317,6 +1450,8 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     remaining_seconds = None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
     fair = estimate_fair_up(aid)
     ms["fair"] = fair  # WS 觸發的即時評估（_on_ws_price_tick）沿用這份，不用每個 tick 都重算
+    if aid == "btc":
+        log_price_sum_diagnostic(f"sim-poll-{aid}", ms["upBook"], ms["downBook"], SIM_LOCK_MAX_SUM)
     for variant_id, variant in AB_VARIANT_BY_ID.items():
         if variant["assetId"] == aid:
             simulate_trading(variant_id, slug, ms["upBook"], ms["downBook"], remaining_seconds, fair)
@@ -1324,15 +1459,19 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     ms["connected"] = True
     persist_quote(aid, fair)
 
+async def _fetch_one_asset_safe(session: aiohttp.ClientSession, asset: dict) -> None:
+    try:
+        await _fetch_one_asset(session, asset)
+    except Exception as e:
+        log.error(f"Fetch error [{asset['id']}]: {e}")
+        markets_state[asset["id"]]["connected"] = False
+
 async def data_fetcher():
     async with aiohttp.ClientSession() as session:
         while True:
-            for asset in ASSETS:
-                try:
-                    await _fetch_one_asset(session, asset)
-                except Exception as e:
-                    log.error(f"Fetch error [{asset['id']}]: {e}")
-                    markets_state[asset["id"]]["connected"] = False
+            # 7 個資產平行抓，不要一個一個 await——依序抓的話單輪耗時會是 7 個資產的
+            # 總和，很容易吃掉大半個 POLL_INTERVAL，導致晚抓到的資產報價明顯落後。
+            await asyncio.gather(*(_fetch_one_asset_safe(session, asset) for asset in ASSETS))
 
             try:
                 await retry_pending_settlements(session)  # 每輪都重試還沒結算成功的舊窗口（跨資產一起處理）
@@ -1352,6 +1491,7 @@ def build_ab_leaderboard() -> list:
         win_rate = (st["wins"] / st["totalTrades"] * 100) if st["totalTrades"] else None
         rows.append({
             "id":            v["id"],
+            "assetId":       v["assetId"],
             "label":         v["label"],
             "entryMaxPrice": v["entryMaxPrice"],
             "lockMaxSum":    v["lockMaxSum"],
@@ -1362,6 +1502,8 @@ def build_ab_leaderboard() -> list:
             "cash":          cash,
             "portfolio":     portfolio,
             "hasPosition":   st["position"] is not None,
+            "position":      st["position"],
+            "pendingSettlements": len(st["pendingSettlements"]),
             "totalFees":     st.get("totalFees", 0.0),
             "lockedTrades":  st.get("lockedTrades", 0),
             "directionalTrades": st.get("directionalTrades", 0),
@@ -1371,17 +1513,15 @@ def build_ab_leaderboard() -> list:
         })
     return rows
 
-def build_asset_summary(asset_id: str, variant_id: str) -> dict:
-    """單一資產的市場行情 + 對應策略戰績。"""
+def build_asset_payload(asset_id: str) -> dict:
+    """單一資產的市場行情。策略戰績不在這裡——每個資產各自 4 組（conservative/main/
+    loose/late-direction），都在 build_ab_leaderboard() 裡用 "<資產id>-<組別>" 的 id
+    區分，前端依網址參數 ?asset= 篩選要看哪個資產的那 4 組。"""
     ms = markets_state[asset_id]
-    st = ab_states[variant_id]
     m = ms["market"] or {}
     remaining_seconds = None
     if ms["windowEndsAt"] is not None:
         remaining_seconds = max(0.0, ms["windowEndsAt"] / 1000 - real_now())
-    cash, portfolio = compute_cash_and_portfolio(variant_id)
-    variant = AB_VARIANT_BY_ID[variant_id]
-    fair = estimate_fair_up(asset_id)
     return {
         "market": {
             "slug":     m.get("slug"),
@@ -1398,56 +1538,26 @@ def build_asset_summary(asset_id: str, variant_id: str) -> dict:
         "spotChangePct": ms["spotChangePct"],
         "klines":       ms.get("klines", []),
         "connected":    ms["connected"],
-        "fair":         fair,
-        "sim": {
-            "position":    st["position"],
-            "pendingSettlements": len(st["pendingSettlements"]),
-            "trades":      st["trades"],
-            "totalPnl":    st["totalPnl"],
-            "totalTrades": st["totalTrades"],
-            "wins":        st["wins"],
-            "totalFees":   st.get("totalFees", 0.0),
-            "lockedTrades": st.get("lockedTrades", 0),
-            "directionalTrades": st.get("directionalTrades", 0),
-            "earlyExits":  st.get("earlyExits", 0),
-            "maxDrawdown": st.get("maxDrawdown", 0.0),
+        "fair":         ms.get("fair"),
+    }
+
+def build_full_payload() -> str:
+    return json.dumps({
+        "type": "full",
+        "serverTimeMs": real_now() * 1000,  # 校正過的真實時間，前端拿來顯示時鐘、不用本機系統時間
+        "assets":       {a["id"]: build_asset_payload(a["id"]) for a in ASSETS},
+        "assetList":    [{"id": a["id"], "label": a["label"]} for a in ASSETS],
+        "sharedConfig": {
             "startBalance": shared_config["startBalance"],
             "minBalance":   SIM_MIN_BALANCE,
-            "cash":         cash,
-            "portfolio":    portfolio,
-            "entryMaxPrice": variant["entryMaxPrice"],
-            "lockMaxSum":    variant["lockMaxSum"],
             "stakePct":      shared_config["stakePct"],
-            "stakeUsd":      min(cash, portfolio * (shared_config["stakePct"] / 100)),
             "minStakePct":   SIM_MIN_STAKE_PCT,
             "maxStakePct":   SIM_MAX_STAKE_PCT,
             "takerFeeRate":  SIM_TAKER_FEE_RATE,
             "slippageBps":   SIM_SLIPPAGE_BPS,
             "minEntryEdge":  SIM_MIN_ENTRY_EDGE,
             "minNetLockPerShare": SIM_MIN_NET_LOCK_PER_SHARE,
-            "minEntryRemaining": SIM_MIN_ENTRY_REMAINING,
         },
-    }
-
-def build_full_payload() -> str:
-    btc = build_asset_summary("btc", "main")
-    return json.dumps({
-        "type": "full",
-        "serverTimeMs": real_now() * 1000,  # 校正過的真實時間，前端拿來顯示時鐘、不用本機系統時間
-        # 以下這幾個頂層欄位維持跟原本一樣（等於 BTC），是既有前端面板在讀的，向後相容不動它們
-        "market":           btc["market"],
-        "windowEndsAt":     btc["windowEndsAt"],
-        "remainingSeconds": btc["remainingSeconds"],
-        "upPrice":      btc["upPrice"],
-        "downPrice":    btc["downPrice"],
-        "upBook":       btc["upBook"],
-        "downBook":     btc["downBook"],
-        "btcPrice":     btc["spotPrice"],
-        "btcChangePct": btc["spotChangePct"],
-        "klines":       btc["klines"],
-        "connected":    btc["connected"],
-        "fair":         btc["fair"],
-        "sim":          btc["sim"],
         "abVariants":   build_ab_leaderboard(),
     })
 
@@ -1501,14 +1611,17 @@ async def main():
     log.info(f"  模擬記錄: {SIM_DB_PATH}")
     log.info("  成交假設: Ask/Bid 深度 VWAP + Taker fee + 不利滑點")
     log.info("  開啟 web/polymarket.html 查看即時數據")
+    if WITH_LIVE:
+        log.info("  ⚠ --with-live 已啟用：會在這個進程裡跑真實下單邏輯（仍受 .env 雙開關控制）")
     log.info("=" * 50)
 
+    tasks = [data_fetcher(), broadcast_loop(), market_ws_loop()]
+    if WITH_LIVE:
+        import polymarket_live_strategy as live_strategy
+        tasks.append(live_strategy.run_embedded())
+
     async with serve(ws_handler, HOST, PORT):
-        await asyncio.gather(
-            data_fetcher(),
-            broadcast_loop(),
-            market_ws_loop(),
-        )
+        await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
     asyncio.run(main())

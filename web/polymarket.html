@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Gravia · Polymarket BTC Up/Down — 即時</title>
+<title>Gravia · Polymarket Up/Down — 即時</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧪</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
@@ -57,8 +57,8 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
 }
 .lbl{font-family:'Share Tech Mono';font-size:11px;letter-spacing:2px;color:#555;text-transform:uppercase;}
 .pink{color:#ff2d78;}.green{color:#00ff9d;}.red{color:#ff3a5c;}.yellow{color:#ffd700;}.gray{color:#555;}
-.row1{display:grid;grid-template-columns:1fr 1fr 260px 240px;gap:6px;}
-.row2{display:grid;grid-template-columns:1fr 220px 260px;gap:6px;}
+.row1{display:grid;grid-template-columns:1fr 1fr 260px;gap:6px;}
+.row2{display:grid;grid-template-columns:1fr 220px;gap:6px;}
 .live-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff2d78;box-shadow:0 0 6px #ff2d78;animation:pulse 1.5s infinite;}
 .live-dot-g{background:#00ff9d !important;box-shadow:0 0 6px #00ff9d !important;}
 .dot-gray{background:#444 !important;box-shadow:none !important;animation:none !important;}
@@ -81,7 +81,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     <div style="display:flex;align-items:center;gap:10px;font-family:'Share Tech Mono';">
       <span style="color:#ff2d78;font-size:15.5px;font-weight:700;">◈ GRAVIA</span>
       <span class="gray">·</span>
-      <span class="gray">POLYMARKET BTC UP/DOWN</span>
+      <span class="gray" id="asset-name-label">POLYMARKET UP/DOWN</span>
       <span id="conn-badge" class="badge-live badge-disc">
         <span id="conn-dot" class="live-dot dot-gray"></span>連接中
       </span>
@@ -94,20 +94,23 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     </div>
   </div>
 
+  <!-- ASSET TABS：切換要看的資產，按鈕上直接顯示該資產目前總損益，方便一眼比較 7 個資產 -->
+  <div id="asset-tabs" style="display:flex;gap:6px;flex-wrap:wrap;padding:2px 4px;"></div>
+
   <!-- STATUS BAR -->
   <div style="display:flex;gap:14px;padding:0 4px;color:#444;font-family:'Share Tech Mono';font-size:10.5px;letter-spacing:1px;align-items:center;">
     <span id="status-text" style="color:#555;">等待數據中...</span>
-    <span>BTC 參考價 <span id="btc-price" style="color:#f0f0f0">—</span> <span id="btc-change">—</span></span>
+    <span><span id="spot-label">參考價</span> <span id="btc-price" style="color:#f0f0f0">—</span> <span id="btc-change">—</span></span>
     <span style="flex:1"></span>
     <span id="mkt-question" style="color:#888;">—</span>
     <span>剩餘 <span id="mkt-countdown" class="yellow">—</span></span>
   </div>
 
-  <!-- BTC CHART -->
+  <!-- CHART -->
   <div class="panel panel-g" style="padding:6px 8px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
       <div style="display:flex;align-items:baseline;gap:10px;">
-        <span class="gray" style="font-family:'Share Tech Mono';">BTC/USDT 1分鐘 · 即時</span>
+        <span class="gray" id="chart-label" style="font-family:'Share Tech Mono';">1分鐘 · 即時</span>
         <span id="chart-price" style="font-size:16px;font-weight:700;">—</span>
       </div>
       <span style="font-size:10px;color:#00ff9d;background:#00ff9d0a;padding:1px 5px;border-radius:2px;">真實數據</span>
@@ -150,34 +153,18 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
         </div>
       </div>
     </div>
-
-    <!-- POSITION -->
-    <div class="panel" style="border-color:#ff2d7880;">
-      <div class="lbl pink" style="margin-bottom:4px;">◈ 模擬倉位</div>
-      <div id="pos-empty" style="font-size:9px;color:#555;">— 觀望中，等待訊號 —</div>
-      <div id="pos-active" style="display:none;">
-        <div style="display:flex;justify-content:space-between;font-size:9.5px;">
-          <span>方向 <span id="pos-side" class="green" style="font-weight:700;">—</span></span>
-          <span id="pos-hedge-badge" class="up-b" style="display:none;">已鎖利</span>
-        </div>
-        <div style="font-size:9px;color:#444;margin-top:3px;">進場價 <span id="pos-entry" style="color:#ccc">—</span></div>
-        <div id="pos-hedge-row" style="font-size:9px;color:#444;display:none;">鎖利價 <span id="pos-hedge-price" style="color:#ccc">—</span></div>
-        <div style="font-size:9px;color:#444;">股數 <span id="pos-shares" style="color:#ccc">—</span></div>
-        <div style="font-size:13px;font-weight:700;margin-top:4px;">預估損益 <span id="pos-pnl">—</span></div>
-      </div>
-    </div>
   </div>
 
   <!-- ROW 2: RECENT TRADES / PNL SUMMARY -->
   <div class="row2">
 
-    <!-- RECENT TRADES (A/B 三組各自獨立記帳) -->
+    <!-- 個別策略：每組 A/B 各自的部位、損益總計、成交紀錄 -->
     <div class="panel">
       <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-        <span class="lbl">◦ 已結算窗口 · A/B 各自記帳</span>
+        <span class="lbl">◦ 個別策略 · A/B 各自記帳</span>
         <span id="rt-count" class="gray">0</span>
       </div>
-      <div id="rt-list" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">
+      <div id="rt-list" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:6px;">
         <div style="color:#444;padding:4px 0;font-size:10.5px;">尚無交易</div>
       </div>
     </div>
@@ -221,24 +208,6 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
         </div>
       </div>
     </div>
-
-    <!-- PNL SUMMARY -->
-    <div class="panel panel-g">
-      <div class="lbl green" style="margin-bottom:6px;">◦ 損益總計</div>
-      <div id="sum-pnl" style="font-size:26px;font-weight:700;letter-spacing:-1px;">$0.00</div>
-      <div style="display:flex;gap:14px;margin-top:8px;flex-wrap:wrap;">
-        <div><div class="lbl">交易數</div><div id="sum-trades" style="font-size:14px;">0</div></div>
-        <div><div class="lbl">勝率</div><div id="sum-winrate" class="green" style="font-size:14px;">—</div></div>
-        <div><div class="lbl">結算中</div><div id="sum-pending" class="yellow" style="font-size:14px;">0</div></div>
-        <div><div class="lbl">累計費用</div><div id="sum-fees" style="font-size:14px;">$0.00</div></div>
-        <div><div class="lbl">鎖利 / 方向 / 提早</div><div id="sum-trade-types" style="font-size:14px;">0 / 0 / 0</div></div>
-        <div><div class="lbl">最大回撤</div><div id="sum-drawdown" class="red" style="font-size:14px;">0.00%</div></div>
-      </div>
-      <div style="margin-top:8px;border-top:1px solid #1a1a1a;padding-top:6px;font-size:9px;color:#444;">
-        策略：單邊 Ask VWAP ≤ <span id="sum-entry-th">$0.40</span> 且公平價優勢足夠才進場；兩邊總價 ≤ <span id="sum-lock-th">$0.90</span> 且扣費用後為正才鎖利
-        <br>每組完整配對最多使用 <span id="sum-stake">15%</span> 資產（含預留第二腿與費用）
-      </div>
-    </div>
   </div>
 
   <!-- A/B 門檻測試（彙總表，各自成交紀錄改顯示在上面「已結算窗口」框內） -->
@@ -274,9 +243,22 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     return m+'m'+String(s).padStart(2,'0')+'s';
   };
 
+  // 7 個資產都跑同一套邏輯（見 polymarket_server.py 的 ASSETS），這裡直接列出來畫分頁籤，
+  // 不用等第一筆 WS 資料回來才有分頁可以按。
+  const ASSET_LIST=[
+    {id:'btc',  label:'BTC'},
+    {id:'eth',  label:'ETH'},
+    {id:'sol',  label:'SOL'},
+    {id:'xrp',  label:'XRP'},
+    {id:'doge', label:'DOGE'},
+    {id:'bnb',  label:'BNB'},
+    {id:'hype', label:'HYPE'},
+  ];
+  const _urlAsset=new URLSearchParams(location.search).get('asset');
+  let currentAsset=ASSET_LIST.some(a=>a.id===_urlAsset)?_urlAsset:'btc';
+
   let logEntries=[];
-  let lastSim=null;
-  let lastKlines=[];
+  let lastPayload=null;
   let remainingSeconds=null;
   let clockOffsetMs=0;  // 伺服器校正過的真實時間 - 本機時間；本機時鐘可能不準，別直接用 Date.now()
 
@@ -329,56 +311,98 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   }
 
   function onFull(d){
-    if(d.market){
-      $('mkt-question').textContent=d.market.question||'—';
-    }
-    if(typeof d.remainingSeconds==='number'){
-      remainingSeconds=d.remainingSeconds;  // 伺服器已校正過真實時間，直接採用，不跟本機時鐘比對
-    }
+    lastPayload=d;
     if(typeof d.serverTimeMs==='number'){
       clockOffsetMs=d.serverTimeMs-Date.now();
     }
-    if(typeof d.btcPrice==='number'){
-      $('btc-price').textContent='$'+d.btcPrice.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2});
+    renderCurrentAsset();
+    addLog('數據',currentAsset.toUpperCase()+' 報價已更新','#e8e8e8');
+  }
+
+  function switchAsset(assetId){
+    if(assetId===currentAsset) return;
+    currentAsset=assetId;
+    const url=new URL(location.href);
+    url.searchParams.set('asset',currentAsset);
+    history.replaceState(null,'',url);
+    renderCurrentAsset();
+  }
+
+  // 切分頁籤時直接拿最近一次收到的完整 payload 重畫，不用等下一輪 WS 推播才看得到——
+  // 後端每輪已經把 7 個資產的資料都廣播給所有連線，前端只是換一份挑出來顯示。
+  function renderCurrentAsset(){
+    renderTabs();
+    if(!lastPayload) return;
+    const d=lastPayload;
+    const a=(d.assets||{})[currentAsset]||{};
+    const assetInfo=ASSET_LIST.find(x=>x.id===currentAsset)||{label:currentAsset.toUpperCase()};
+    document.title='Gravia · Polymarket '+assetInfo.label+' Up/Down — 即時';
+    $('asset-name-label').textContent='POLYMARKET '+assetInfo.label+' UP/DOWN';
+    $('spot-label').textContent=assetInfo.label+' 參考價';
+    $('chart-label').textContent=assetInfo.label+'/USDT 1分鐘 · 即時';
+
+    if(a.market){
+      $('mkt-question').textContent=a.market.question||'—';
+    }
+    if(typeof a.remainingSeconds==='number'){
+      remainingSeconds=a.remainingSeconds;  // 伺服器已校正過真實時間，直接採用，不跟本機時鐘比對
+    }
+    if(typeof a.spotPrice==='number'){
+      $('btc-price').textContent='$'+a.spotPrice.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2});
       const chg=$('btc-change');
-      if(typeof d.btcChangePct==='number'){
-        chg.textContent=(d.btcChangePct>=0?'▲':'▼')+Math.abs(d.btcChangePct).toFixed(2)+'%（24h）';
-        chg.className=d.btcChangePct>=0?'green':'red';
+      if(typeof a.spotChangePct==='number'){
+        chg.textContent=(a.spotChangePct>=0?'▲':'▼')+Math.abs(a.spotChangePct).toFixed(2)+'%（24h）';
+        chg.className=a.spotChangePct>=0?'green':'red';
       }
     }
 
-    if(typeof d.upPrice==='number'){
-      $('up-price').textContent=fmtUSD(d.upPrice);
-      const fair=d.fair&&typeof d.fair.fairUp==='number' ? ` · 模型 ${(d.fair.fairUp*100).toFixed(1)}%` : '';
-      $('up-prob').textContent='市場 '+(d.upPrice*100).toFixed(1)+'%'+fair;
+    if(typeof a.upPrice==='number'){
+      $('up-price').textContent=fmtUSD(a.upPrice);
+      const fair=a.fair&&typeof a.fair.fairUp==='number' ? ` · 模型 ${(a.fair.fairUp*100).toFixed(1)}%` : '';
+      $('up-prob').textContent='市場 '+(a.upPrice*100).toFixed(1)+'%'+fair;
     }
-    if(typeof d.downPrice==='number'){
-      $('down-price').textContent=fmtUSD(d.downPrice);
-      $('down-prob').textContent=(d.downPrice*100).toFixed(1)+'%';
-    }
-
-    if(d.upBook) renderBook('up',d.upBook);
-    if(d.downBook) renderBook('down',d.downBook);
-
-    if(d.klines&&d.klines.length>0){
-      lastKlines=d.klines;
-      drawChart(lastKlines);
+    if(typeof a.downPrice==='number'){
+      $('down-price').textContent=fmtUSD(a.downPrice);
+      $('down-prob').textContent=(a.downPrice*100).toFixed(1)+'%';
     }
 
-    if(d.sim){
-      lastSim=d.sim;
-      renderPosition(d.sim);
-      renderSummary(d.sim);
-      $('sum-entry-th').textContent='$'+d.sim.entryMaxPrice.toFixed(2);
-      $('sum-lock-th').textContent='$'+d.sim.lockMaxSum.toFixed(2);
-      $('sum-stake').textContent=d.sim.stakePct.toFixed(1)+'%';
-      $('tb-trades').textContent=d.sim.totalTrades;
-      $('tb-winrate').textContent=d.sim.totalTrades>0?Math.round(d.sim.wins/d.sim.totalTrades*100)+'%':'—';
-    }
+    if(a.upBook) renderBook('up',a.upBook);
+    if(a.downBook) renderBook('down',a.downBook);
 
-    if(d.abVariants) renderAbLeaderboard(d.abVariants);
+    if(a.klines&&a.klines.length>0) drawChart(a.klines);
 
-    addLog('數據',`UP=${(d.upPrice*100).toFixed(1)}% DOWN=${(d.downPrice*100).toFixed(1)}%`,'#e8e8e8');
+    const variants=(d.abVariants||[]).filter(v=>v.assetId===currentAsset);
+    renderAbLeaderboard(variants);
+    renderSummary(variants,d.sharedConfig||{});
+
+    const totalTrades=variants.reduce((s,v)=>s+v.totalTrades,0);
+    const totalWins=variants.reduce((s,v)=>s+v.wins,0);
+    $('tb-trades').textContent=totalTrades;
+    $('tb-winrate').textContent=totalTrades>0?Math.round(totalWins/totalTrades*100)+'%':'—';
+  }
+
+  function renderTabs(){
+    const d=lastPayload;
+    const byAsset={};
+    ((d&&d.abVariants)||[]).forEach(v=>{
+      (byAsset[v.assetId]=byAsset[v.assetId]||[]).push(v);
+    });
+    $('asset-tabs').innerHTML=ASSET_LIST.map(a=>{
+      const vs=byAsset[a.id]||[];
+      const totalPnl=vs.reduce((s,v)=>s+(v.totalPnl||0),0);
+      const active=a.id===currentAsset;
+      const pnlColor=!vs.length?'#555':(totalPnl>0?'#00ff9d':(totalPnl<0?'#ff3a5c':'#888'));
+      return `<button type="button" data-asset="${a.id}" style="display:flex;flex-direction:column;
+        align-items:center;gap:1px;padding:4px 10px;background:${active?'#ff2d7822':'#0d0d0d'};
+        border:1px solid ${active?'#ff2d78':'#333'};border-radius:3px;cursor:pointer;
+        font-family:'JetBrains Mono';">
+        <span style="font-size:11px;font-weight:700;color:${active?'#ff2d78':'#ccc'};">${a.label}</span>
+        <span style="font-size:9.5px;color:${pnlColor};">${vs.length?fmtMoney(totalPnl):'—'}</span>
+      </button>`;
+    }).join('');
+    [...$('asset-tabs').querySelectorAll('button')].forEach(btn=>{
+      btn.addEventListener('click',()=>switchAsset(btn.dataset.asset));
+    });
   }
 
   function renderBook(side,book){
@@ -390,64 +414,26 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       <span>${b.price.toFixed(2)}</span><span style="color:#555">${b.size.toFixed(0)}</span></div>`).join('');
   }
 
-  function renderPosition(sim){
-    const empty=$('pos-empty'), active=$('pos-active');
-    const p=sim.position;
-    if(!p){ empty.style.display='block'; active.style.display='none'; return; }
-    empty.style.display='none'; active.style.display='block';
-
-    $('pos-side').textContent=p.side;
-    $('pos-side').className=p.side==='Up'?'green':'red';
-    $('pos-entry').textContent='$'+p.entryPrice.toFixed(3)+(typeof p.entryDecisionPrice==='number'?'（判斷 $'+p.entryDecisionPrice.toFixed(3)+'）':'');
-    $('pos-shares').textContent=p.shares.toFixed(2)+' 股'+(typeof p.stakeUsd==='number'?'（下注 $'+p.stakeUsd.toFixed(2)+'）':'');
-
-    const hedgeBadge=$('pos-hedge-badge'), hedgeRow=$('pos-hedge-row');
-    if(p.hedged){
-      hedgeBadge.style.display='inline-block';
-      hedgeRow.style.display='block';
-      $('pos-hedge-price').textContent=p.hedgeSide+' @ $'+p.hedgePrice.toFixed(3)+(typeof p.hedgeDecisionPrice==='number'?'（判斷 $'+p.hedgeDecisionPrice.toFixed(3)+'）':'');
-      const locked=typeof p.lockedPnl==='number' ? p.lockedPnl : p.shares*(1-p.entryPrice-p.hedgePrice);
-      const pnlEl=$('pos-pnl');
-      pnlEl.textContent=fmtMoney(locked)+'（已鎖定）';
-      pnlEl.style.color=locked>=0?'#00ff9d':'#ff3a5c';
-    } else {
-      hedgeBadge.style.display='none';
-      hedgeRow.style.display='none';
-      $('pos-pnl').textContent='方向性曝險中，等結算';
-      $('pos-pnl').style.color='#ffd700';
-    }
-  }
-
-
-  function renderSummary(sim){
-    const el=$('sum-pnl');
-    el.textContent=fmtMoney(sim.totalPnl);
-    el.style.color=sim.totalPnl>=0?'#00ff9d':'#ff3a5c';
-    $('sum-trades').textContent=sim.totalTrades;
-    $('sum-winrate').textContent=sim.totalTrades>0?Math.round(sim.wins/sim.totalTrades*100)+'%':'—';
-    $('sum-pending').textContent=sim.pendingSettlements||0;
-    $('sum-fees').textContent=fmtMoney(sim.totalFees||0);
-    $('sum-trade-types').textContent=`${sim.lockedTrades||0} / ${sim.directionalTrades||0} / ${sim.earlyExits||0}`;
-    $('sum-drawdown').textContent=(sim.maxDrawdown||0).toFixed(2)+'%';
-
-    if(typeof sim.portfolio==='number'){
+  function renderSummary(variants,cfg){
+    const mainRow=variants.find(v=>v.id===currentAsset+'-main');
+    if(mainRow){
       const pf=$('asset-portfolio');
-      pf.textContent='$'+sim.portfolio.toFixed(2);
-      pf.style.color=sim.portfolio>=sim.startBalance?'#00ff9d':'#ff3a5c';
+      pf.textContent='$'+mainRow.portfolio.toFixed(2);
+      pf.style.color=mainRow.portfolio>=(cfg.startBalance||0)?'#00ff9d':'#ff3a5c';
+      $('asset-cash').textContent='$'+mainRow.cash.toFixed(2);
+      if(typeof cfg.stakePct==='number'){
+        const stakeUsd=Math.min(mainRow.cash,mainRow.portfolio*(cfg.stakePct/100));
+        $('asset-stake-hint').textContent=stakeUsd.toFixed(2);
+      }
     }
-    if(typeof sim.cash==='number'){
-      $('asset-cash').textContent='$'+sim.cash.toFixed(2);
-    }
-    if(typeof sim.startBalance==='number'){
-      $('asset-start').textContent=sim.startBalance.toFixed(0);
+    if(typeof cfg.startBalance==='number'){
+      $('asset-start').textContent=cfg.startBalance.toFixed(0);
       const balInput=$('cfg-start-balance');
-      if(document.activeElement!==balInput) balInput.value=Math.round(sim.startBalance);
+      if(document.activeElement!==balInput) balInput.value=Math.round(cfg.startBalance);
     }
-    if(typeof sim.stakeUsd==='number') $('asset-stake-hint').textContent=sim.stakeUsd.toFixed(2);
-
     const stakeSelect=$('cfg-stake-pct');
-    if(typeof sim.stakePct==='number' && document.activeElement!==stakeSelect){
-      const pct=String(Math.round(sim.stakePct));
+    if(typeof cfg.stakePct==='number' && document.activeElement!==stakeSelect){
+      const pct=String(Math.round(cfg.stakePct));
       if([...stakeSelect.options].some(o=>o.value===pct)) stakeSelect.value=pct;
     }
   }
@@ -474,11 +460,58 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       }).join('')}
     `;
 
-    // 每組各自獨立的成交紀錄，顯示在「已結算窗口」框內，維持原本 conservative/main/loose
+    // 每組獨立卡片：部位 + 損益總計 + 成交紀錄，維持原本 conservative/main/loose
     // 順序（不跟著排名跳動），方便固定位置比對
     $('rt-count').textContent=variants.reduce((sum,v)=>sum+v.totalTrades,0);
     $('rt-list').innerHTML=variants.map(v=>{
-      const trades=(v.trades||[]).slice(0,8);
+      const isBest=v.id===best && v.totalTrades>0;
+      const pnlColor=v.totalPnl>0?'#00ff9d':(v.totalPnl<0?'#ff3a5c':'#888');
+
+      const p=v.position;
+      let posHtml;
+      const POS_BOX_HEIGHT=78;  // 固定高度：不管有沒有鎖利那行，三欄下面的成交紀錄都從同一個 Y 座標開始
+      if(!p){
+        posHtml=`<div style="font-size:9px;color:#444;margin-bottom:6px;height:${POS_BOX_HEIGHT}px;display:flex;align-items:center;justify-content:center;">— 空手，觀望中 —</div>`;
+      } else {
+        const sideColor=p.side==='Up'?'#00ff9d':'#ff3a5c';
+        let pnlLine;
+        if(p.hedged){
+          const locked=typeof p.lockedPnl==='number' ? p.lockedPnl : p.shares*(1-p.entryPrice-p.hedgePrice);
+          pnlLine=`<div style="font-weight:700;margin-top:2px;color:${locked>=0?'#00ff9d':'#ff3a5c'};">${fmtMoney(locked)}（已鎖定）</div>`;
+        } else {
+          pnlLine='<div style="font-weight:700;margin-top:2px;color:#ffd700;">方向性曝險中，等結算</div>';
+        }
+        posHtml=`<div style="font-size:9.5px;background:#00000055;border-radius:2px;padding:4px 6px;margin-bottom:6px;height:${POS_BOX_HEIGHT}px;box-sizing:border-box;overflow:hidden;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span>方向 <span style="color:${sideColor};font-weight:700;">${p.side}</span></span>
+            ${p.hedged?'<span class="up-b">已鎖利</span>':''}
+          </div>
+          <div style="color:#444;margin-top:2px;">進場 $${p.entryPrice.toFixed(3)}（判斷 $${(p.entryDecisionPrice ?? p.entryPrice).toFixed(3)}）</div>
+          <div style="color:#444;">${p.shares.toFixed(2)} 股（下注 $${(p.stakeUsd||0).toFixed(2)}）</div>
+          ${p.hedged?`<div style="color:#444;">鎖利價 ${p.hedgeSide} @ $${p.hedgePrice.toFixed(3)}</div>`:''}
+          ${pnlLine}
+        </div>`;
+      }
+
+      const summaryHtml=`<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
+          <span style="color:${isBest?'#00ff9d':'#ccc'};font-size:9.5px;letter-spacing:1px;">${isBest?'★ ':''}${v.label}</span>
+          <span style="color:${pnlColor};font-weight:700;font-size:16px;">${fmtMoney(v.totalPnl)}</span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:nowrap;overflow:hidden;font-size:9px;color:#888;margin-bottom:3px;white-space:nowrap;">
+          <span>交易 ${v.totalTrades}</span>
+          <span>勝率 ${v.winRate!=null?Math.round(v.winRate)+'%':'—'}</span>
+          <span class="yellow">結算中 ${v.pendingSettlements||0}</span>
+          <span>費用 $${(v.totalFees||0).toFixed(2)}</span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:nowrap;overflow:hidden;font-size:9px;color:#888;margin-bottom:4px;white-space:nowrap;">
+          <span>鎖利/方向/提早 ${v.lockedTrades||0}/${v.directionalTrades||0}/${v.earlyExits||0}</span>
+          <span class="red">回撤 ${(v.maxDrawdown||0).toFixed(2)}%</span>
+        </div>
+        <div style="font-size:8.5px;color:#444;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+          ${typeof v.entryMaxPrice==='number'?'進場≤$'+v.entryMaxPrice.toFixed(2)+' · ':'只做鎖利／晚進場方向性 · '}鎖利合計≤$${v.lockMaxSum.toFixed(2)} · 資產 $${v.portfolio.toFixed(2)}
+        </div>`;
+
+      const trades=v.trades||[];
       const list=trades.length?trades.map(t=>{
         const win=t.pnl>=0;
         const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
@@ -490,9 +523,11 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
           <span style="color:${win?'#00ff9d':'#ff3a5c'};font-weight:600;">${fmtMoney(t.pnl)}</span>
         </div>`;
       }).join(''):'<div style="color:#444;padding:4px 0;font-size:9.5px;">尚無交易</div>';
-      return `<div style="background:#0a0a0a;border:1px solid #ffffff0c;border-radius:3px;padding:6px 8px;">
-        <div style="color:#888;font-size:9.5px;letter-spacing:1px;margin-bottom:4px;">${v.label}</div>
-        <div style="max-height:180px;overflow-y:auto;">${list}</div>
+
+      return `<div style="background:#0a0a0a;border:1px solid ${isBest?'#00ff9d44':'#ffffff0c'};border-radius:3px;padding:8px;display:flex;flex-direction:column;height:380px;">
+        ${summaryHtml}
+        ${posHtml}
+        <div style="flex:1;min-height:0;overflow-y:auto;border-top:1px solid #ffffff0c;padding-top:2px;">${list}</div>
       </div>`;
     }).join('');
   }
@@ -623,6 +658,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   })();
 
   renderLog();
+  renderTabs();
   connect();
 })();
 </script>

@@ -71,15 +71,30 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(summary["price"], 0.43)
         self.assertAlmostEqual(summary["notional"], 4.3)
 
-    def test_entry_candidate_requires_fee_adjusted_edge(self):
-        book = {
-            "tickSize": 0.01,
-            "minOrderSize": 1,
-            "asks": [{"price": 0.35, "size": 100}],
-            "bids": [],
-        }
-        self.assertIsNotNone(strategy._entry_candidate("Up", book, 10, 0.60))
-        self.assertIsNone(strategy._entry_candidate("Up", book, 10, 0.37))
+    async def test_late_direction_skips_outside_window(self):
+        strategy.sim.state["windowOpenSpotPrice"] = 100.0
+        strategy.sim.state["spotPrice"] = 100.5  # +0.5%，遠超門檻
+        up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.60, "size": 100}], "bids": []}
+        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": []}
+        filled = await strategy._try_late_direction_entry(
+            "btc-window", up_book, down_book, remaining_seconds=30.0, shares=10.0, dry_run=True
+        )
+        self.assertFalse(filled)
+        self.assertIsNone(strategy.live_state["position"])
+
+    async def test_late_direction_enters_favored_side_near_close(self):
+        strategy.sim.state["windowOpenSpotPrice"] = 100.0
+        strategy.sim.state["spotPrice"] = 100.5  # +0.5%，偏 Up
+        up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.60, "size": 100}], "bids": []}
+        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": []}
+        filled = await strategy._try_late_direction_entry(
+            "btc-window", up_book, down_book, remaining_seconds=5.0, shares=10.0, dry_run=True
+        )
+        self.assertTrue(filled)
+        pos = strategy.live_state["position"]
+        self.assertEqual(pos["side"], "Up")
+        self.assertEqual(pos["strategy"], "late_direction")
+        self.assertFalse(pos["hedged"])
 
     def test_direct_pair_checks_worst_case_limit_and_fees(self):
         up_book = {
@@ -100,16 +115,18 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(10 - total, 0)
 
     def test_direct_pair_rejects_same_tick_boundary_as_simulation(self):
+        # 數字挑在剛好卡在目前 LOCK_MAX_SUM（0.95，跟隨 sim.AB_VARIANT_BY_ID["btc-late-direction"]）
+        # 兩側：tick-aligned 的保守限價加總超過門檻，應該被拒絕。
         up_book = {
             "tickSize": 0.01,
             "minOrderSize": 1,
-            "asks": [{"price": 0.44, "size": 100}],
+            "asks": [{"price": 0.48, "size": 100}],
             "bids": [],
         }
         down_book = {
             "tickSize": 0.01,
             "minOrderSize": 1,
-            "asks": [{"price": 0.45, "size": 100}],
+            "asks": [{"price": 0.49, "size": 100}],
             "bids": [],
         }
         self.assertIsNone(strategy._direct_pair_plans(up_book, down_book, 10, 100))
@@ -135,7 +152,80 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             execution = await strategy._resolved_execution(plan, {"orderID": "order-1"}, False)
         self.assertEqual(execution["source"], "matched_trades")
         self.assertEqual(execution["price"], 0.405)
+        self.assertEqual(execution["shares"], 10.0)
         self.assertAlmostEqual(execution["fee"], strategy.sim.taker_fee(10.0, 0.405))
+
+    async def test_real_execution_still_uses_real_fill_when_shares_differ_from_plan(self):
+        # 2026-09 真實案例：規劃 13 股，FOK 實際成交 13.565216 股。舊版會因為股數對不上
+        # 整段丟棄真實成交資料、退回保守限價記帳，跟 Polymarket 官方紀錄對不起來。
+        # 現在應該一律採用真實資料，並把真實股數回報出去讓部位追蹤跟著校正。
+        plan = {"observedVwap": 0.22, "limitPrice": 0.24, "shares": 13.0}
+        summary = {"shares": 13.565216, "price": 0.23, "notional": 3.12, "fee": None}
+        with patch.object(trader, "get_order_fill_summary", return_value=summary):
+            execution = await strategy._resolved_execution(plan, {"orderID": "order-1"}, False)
+        self.assertEqual(execution["source"], "matched_trades")
+        self.assertEqual(execution["price"], 0.23)
+        self.assertEqual(execution["shares"], 13.565216)
+
+    async def test_hedge_records_share_mismatch_and_uses_min_for_locked_pnl(self):
+        strategy.live_state["lastActionAt"] = 0
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window",
+            "side": "Down",
+            "tokenId": "down-token",
+            "shares": 13.565216,
+            "entryNotional": 3.12,
+            "entryRiskNotional": 3.12,
+            "entryFee": 0.05,
+            "entryRiskFee": 0.05,
+            "hedged": False,
+            "dryRun": False,
+        }
+        hedge_plan = {
+            "side": "Up",
+            "observedVwap": 0.60,
+            "limitPrice": 0.61,
+            "shares": 13.0,
+            "riskNotional": 8.0,
+            "fee": 0.2,
+        }
+        summary = {"shares": 14.41818, "price": 0.55, "notional": 7.93, "fee": None}
+        with (
+            patch.object(strategy, "_token_id", return_value="up-token"),
+            patch.object(
+                strategy,
+                "_submit_fok",
+                AsyncMock(return_value=("filled", {"orderID": "order-hedge"})),
+            ),
+            patch.object(trader, "get_order_fill_summary", return_value=summary),
+        ):
+            await strategy._hedge_position(hedge_plan, False)
+        pos = strategy.live_state["position"]
+        self.assertEqual(pos["hedgeShares"], 14.41818)
+        self.assertIsNotNone(pos["shareMismatch"])
+        self.assertAlmostEqual(pos["shareMismatch"]["unhedgedResidual"], 14.41818 - 13.565216)
+        # 較保守的鎖利估計應該用兩腿較小的股數，不是無條件用進場那腿的股數。
+        min_shares = min(13.565216, 14.41818)
+        self.assertAlmostEqual(pos["lockedPnlEstimate"], min_shares - strategy._position_paid_cost(pos))
+
+    def test_settle_pnl_uses_winning_sides_own_share_count_when_mismatched(self):
+        pos = {
+            "side": "Down",
+            "shares": 13.565216,
+            "hedged": True,
+            "hedgeSide": "Up",
+            "hedgeShares": 14.41818,
+            "entryNotional": 3.12,
+            "entryFee": 0.05,
+            "hedgeNotional": 7.93,
+            "hedgeFee": 0.2,
+        }
+        # Up 贏：應該拿 hedgeShares（真的持有的 Up 股數）算 payout，不是無條件用 pos["shares"]。
+        pnl_up_wins = strategy._settle_pnl_estimate(pos, "Up")
+        self.assertAlmostEqual(pnl_up_wins, 14.41818 - (3.12 + 0.05 + 7.93 + 0.2))
+        # Down 贏：應該拿 shares（真的持有的 Down 股數）算 payout。
+        pnl_down_wins = strategy._settle_pnl_estimate(pos, "Down")
+        self.assertAlmostEqual(pnl_down_wins, 13.565216 - (3.12 + 0.05 + 7.93 + 0.2))
 
     async def test_second_leg_failure_triggers_emergency_unwind(self):
         first = {"side": "Up", "edge": 0.1}
@@ -151,10 +241,63 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             await strategy._execute_direct_pair(None, "btc-window", first, second, fair, True)
         unwind.assert_awaited_once()
 
-    async def test_no_new_entry_near_resolution(self):
+    async def test_emergency_unwind_retries_once_on_transient_settlement_lag(self):
+        # 2026-09 真實交易案例：第一腿剛成交，緊急平倉的 SELL 第一次被 CLOB 拒絕
+        # （剛成交的部位鏈上還沒入帳，回 balance: 0），短暫等一下重試就成交了。
+        # _emergency_unwind 現在應該自己重試一次，不是撞一次就放棄讓部位繼續單邊曝險。
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window",
+            "side": "Down",
+            "tokenId": "tok",
+            "shares": 13.0,
+            "dryRun": False,
+            "hedged": False,
+        }
+        with (
+            patch.object(strategy, "EMERGENCY_UNWIND_RETRY_INTERVAL", 0.01),
+            patch.object(strategy.sim, "_get_book_ws_or_rest", AsyncMock(return_value={"bids": [], "asks": []})),
+            patch.object(strategy, "_sell_plan", return_value={"side": "Down", "shares": 13.0, "limitPrice": 0.30}),
+            patch.object(strategy, "_close_position", AsyncMock(side_effect=["not_filled", "filled"])) as close,
+        ):
+            await strategy._emergency_unwind(None, "direct_pair_second_leg_failed")
+        self.assertEqual(close.await_count, 2)
+
+    async def test_emergency_unwind_stops_retrying_once_hedged_elsewhere(self):
+        # 重試等待的空檔裡，如果正常補鎖利路徑已經把部位對沖掉了，不該再搶著平倉。
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window",
+            "side": "Down",
+            "tokenId": "tok",
+            "shares": 13.0,
+            "dryRun": False,
+            "hedged": False,
+        }
+
+        async def hedge_it_during_wait(_seconds):
+            strategy.live_state["position"]["hedged"] = True
+
+        with (
+            patch.object(strategy, "EMERGENCY_UNWIND_RETRY_INTERVAL", 0.01),
+            patch.object(strategy.sim, "_get_book_ws_or_rest", AsyncMock(return_value={"bids": [], "asks": []})),
+            patch.object(strategy, "_sell_plan", return_value={"side": "Down", "shares": 13.0, "limitPrice": 0.30}),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="not_filled")) as close,
+            patch("asyncio.sleep", side_effect=hedge_it_during_wait),
+        ):
+            await strategy._emergency_unwind(None, "direct_pair_second_leg_failed")
+        self.assertEqual(close.await_count, 1)
+
+    async def test_no_new_entry_after_window_closed(self):
+        # 90 秒門檻已經拿掉（鎖利不需要、晚進場方向性還得靠它才能在剩不到 10 秒時動作），
+        # 現在唯一會擋新倉位的是「已經沒剩餘時間」。
         with patch.object(strategy, "_strategy_cash", AsyncMock()) as cash:
-            await strategy.evaluate_and_act("btc-window", None, 30.0, {"fairUp": 0.5, "fairDown": 0.5})
+            await strategy.evaluate_and_act("btc-window", None, 0.0, {"fairUp": 0.5, "fairDown": 0.5})
         cash.assert_not_awaited()
+
+    async def test_new_entry_allowed_with_little_time_left(self):
+        # 剩 30 秒——舊的 90 秒門檻會擋掉這個情境，新設計應該放行到鎖利／晚進場方向性判斷。
+        with patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)) as cash:
+            await strategy.evaluate_and_act("btc-window", None, 30.0, {"fairUp": 0.5, "fairDown": 0.5})
+        cash.assert_awaited_once()
 
     async def test_full_dry_run_pair_never_signs_or_sends(self):
         strategy.live_state["lastActionAt"] = 0
@@ -211,7 +354,13 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(book["quoteSource"], "rest_fallback")
         rest_fetch.assert_awaited_once()
 
-    async def test_ws_tick_immediately_evaluates_complete_book_pair(self):
+    def test_ws_tick_immediately_evaluates_complete_book_pair(self):
+        # _on_ws_tick_sync 取代了舊版 _evaluate_ws_tick：判斷本身改成純同步、零延遲
+        # 執行（不再靠 asyncio.create_task 排程整段判斷），只有真的要送單才切到 async。
+        # 見 _ws_action_in_flight 旁的說明——排程延遲曾經造成實盤錯過模擬盤同步抓到的
+        # 鎖利機會。這裡驗證的是「收到完整 WS book pair 後立刻同步套用到 sim.state
+        # 並標記 quoteSource=websocket」這個可觀察行為，不再依賴內部呼叫 evaluate_and_act
+        # 這個已經不存在的中介步驟。
         market = {
             "slug": "btc-window",
             "outcomes": json.dumps(["Up", "Down"]),
@@ -228,11 +377,70 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             patch.object(strategy.sim, "_ws_last_message_at", time.monotonic()),
             patch.object(strategy.sim, "_ws_snapshot_tokens", {"up-token", "down-token"}),
             patch.object(strategy.sim, "_ws_books", books),
-            patch.object(strategy, "evaluate_and_act", AsyncMock()) as evaluate,
         ):
-            await strategy._evaluate_ws_tick("up-token", None, asyncio.Lock())
-        evaluate.assert_awaited_once()
+            strategy._on_ws_tick_sync("up-token", None, asyncio.Lock())
         self.assertEqual(strategy.live_state["quoteSource"], "websocket")
+        self.assertEqual(strategy.sim.state["upBook"]["quoteSource"], "websocket")
+        self.assertEqual(strategy.sim.state["downBook"]["quoteSource"], "websocket")
+
+    async def test_ws_tick_sync_enters_lock_pair_without_waiting_for_a_scheduled_pass(self):
+        # 這個測試驗證這次修的問題本身：一個真的可以鎖利的 WS book pair，_on_ws_tick_sync
+        # 必須「當下同步判斷出機會」（不必等 asyncio.create_task 排程），只有真的送單那步
+        # 才切到 async task。判斷完成後只需要事件迴圈跑一輪（asyncio.sleep(0)）讓那顆
+        # task 執行完，不需要任何額外的輪詢週期。
+        strategy.live_state["lastActionAt"] = 0
+        market = {
+            "slug": "btc-window",
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        strategy.sim.state["market"] = market
+        strategy.sim.state["windowEndsAt"] = (strategy.sim.real_now() + 180) * 1000
+        books = {
+            "up-token": {"bids": {"0.38": 100.0}, "asks": {"0.39": 100.0}},
+            "down-token": {"bids": {"0.38": 100.0}, "asks": {"0.39": 100.0}},
+        }
+        decision_lock = asyncio.Lock()
+        with (
+            patch.object(strategy.sim, "_ws_connected", True),
+            patch.object(strategy.sim, "_ws_last_message_at", time.monotonic()),
+            patch.object(strategy.sim, "_ws_snapshot_tokens", {"up-token", "down-token"}),
+            patch.object(strategy.sim, "_ws_books", books),
+            patch.object(trader, "build_order", side_effect=AssertionError("dry-run must not sign")),
+        ):
+            strategy._on_ws_tick_sync("up-token", None, decision_lock)
+            self.assertTrue(strategy._ws_action_in_flight["v"], "opportunity was not detected synchronously")
+            # 讓事件迴圈跑一輪，把 create_task 排出去的送單 task 執行完。
+            for _ in range(5):
+                await asyncio.sleep(0)
+        self.assertTrue(strategy.live_state["position"]["hedged"])
+        self.assertTrue(strategy.live_state["position"]["dryRun"])
+        self.assertFalse(strategy._ws_action_in_flight["v"])
+
+    async def test_direct_pair_shares_capped_at_50pct_of_depth(self):
+        # 跟模擬版 sim._try_direct_pair 對齊：股數封頂在可見深度的 50%，不是 100%。
+        strategy.live_state["lastActionAt"] = 0
+        strategy.sim.state["market"] = {
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        strategy.sim.state["upBook"] = {
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.10, "size": 20}], "bids": [],
+        }
+        strategy.sim.state["downBook"] = {
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.10, "size": 20}], "bids": [],
+        }
+        # 現金給大一點，確保是深度（不是資金）在限制股數，跟本機 .env 的 STAKE_PCT 設多少無關。
+        with patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100_000.0)):
+            await strategy.evaluate_and_act(
+                "btc-window", None, 180.0, {"fairUp": 0.5, "fairDown": 0.5}
+            )
+        pos = strategy.live_state["position"]
+        self.assertIsNotNone(pos)
+        self.assertTrue(pos["hedged"])
+        self.assertEqual(pos["shares"], 10.0)
 
 
 if __name__ == "__main__":

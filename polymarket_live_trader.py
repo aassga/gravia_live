@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 
 if sys.platform == "win32":
     # Windows 終端機預設編碼常是 cp950/cp936，中文 log 會變亂碼，強制改 UTF-8
@@ -41,6 +42,10 @@ if sys.platform == "win32":
 
 log = logging.getLogger("polymarket_live")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# httpx（py_clob_client_v2 底層用的 HTTP 函式庫）預設會把每一次請求都印成 INFO log，
+# 背景餘額刷新任務固定每 8 秒打一次 API，這樣洗下去 log 會被灌爆。調高門檻只是
+# 少印這些「已發出請求」的紀錄，不影響我們自己的 log、也不影響任何下單邏輯。
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 try:
     from dotenv import load_dotenv
@@ -61,6 +66,9 @@ LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").strip().lower() == "true"
 SIGNATURE_TYPE = int(os.environ.get("POLY_SIGNATURE_TYPE", "3"))
 
 _client = None  # lazy-initialized singleton
+_client_lock = threading.Lock()  # get_client() 會透過 asyncio.to_thread 從不同背景執行緒呼叫
+                                  # （策略主迴圈 vs 背景餘額刷新任務都可能同時是第一個呼叫者），
+                                  # 用鎖避免兩邊都通過「還沒初始化」的檢查、各自重複建立一次 client。
 
 
 def _require_private_key() -> None:
@@ -77,31 +85,35 @@ def get_client():
     if _client is not None:
         return _client
 
-    _require_private_key()
+    with _client_lock:
+        if _client is not None:  # 等鎖的期間可能已經被另一個執行緒建立好了
+            return _client
 
-    from py_clob_client_v2.client import ClobClient
+        _require_private_key()
 
-    log.info(f"連線到 {CLOB_HOST}（chain_id={CHAIN_ID}, signature_type={SIGNATURE_TYPE}）...")
+        from py_clob_client_v2.client import ClobClient
 
-    if FUNDER_ADDRESS:
-        # 資金在另一個錢包（proxy / deposit wallet），這把私鑰只負責簽名
-        client = ClobClient(
-            CLOB_HOST,
-            key=PRIVATE_KEY,
-            chain_id=CHAIN_ID,
-            signature_type=SIGNATURE_TYPE,
-            funder=FUNDER_ADDRESS,
-        )
-    else:
-        # 私鑰本身就是持有資金的錢包
-        client = ClobClient(CLOB_HOST, key=PRIVATE_KEY, chain_id=CHAIN_ID)
+        log.info(f"連線到 {CLOB_HOST}（chain_id={CHAIN_ID}, signature_type={SIGNATURE_TYPE}）...")
 
-    creds = client.create_or_derive_api_key()
-    client.set_api_creds(creds)
-    log.info("API 憑證取得成功")
+        if FUNDER_ADDRESS:
+            # 資金在另一個錢包（proxy / deposit wallet），這把私鑰只負責簽名
+            client = ClobClient(
+                CLOB_HOST,
+                key=PRIVATE_KEY,
+                chain_id=CHAIN_ID,
+                signature_type=SIGNATURE_TYPE,
+                funder=FUNDER_ADDRESS,
+            )
+        else:
+            # 私鑰本身就是持有資金的錢包
+            client = ClobClient(CLOB_HOST, key=PRIVATE_KEY, chain_id=CHAIN_ID)
 
-    _client = client
-    return _client
+        creds = client.create_or_derive_api_key()
+        client.set_api_creds(creds)
+        log.info("API 憑證取得成功")
+
+        _client = client
+        return _client
 
 
 def get_usdc_balance() -> dict:

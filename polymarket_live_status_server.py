@@ -20,6 +20,7 @@ import time
 
 from websockets.server import serve
 
+import polymarket_live_strategy as strategy
 import polymarket_live_trader as live
 
 if sys.platform == "win32":
@@ -74,6 +75,7 @@ def _load_strategy_state() -> dict:
             "directionalTrades": int(state.get("directionalTrades", 0)),
             "earlyExits": int(state.get("earlyExits", 0)),
             "updatedAt": state.get("updatedAt"),
+            "trades": state.get("trades", []),
         }
     except Exception as exc:
         return {"halted": True, "haltReason": f"strategy_state_read_failed: {exc}"}
@@ -171,6 +173,14 @@ def _fetch_state() -> dict:
         "openPositions": positions,
         "trades": trades,
         "strategyState": strategy_state,
+        "strategyConfig": {
+            "label": strategy._LIVE_VARIANT["label"],
+            "stakePct": strategy.STAKE_PCT,
+            "lockMaxSum": strategy.LOCK_MAX_SUM,
+            "lateDirectionMaxPrice": strategy.LATE_DIRECTION_MAX_PRICE,
+            "maxPairBudgetUsd": strategy.MAX_PAIR_BUDGET_USD,
+            "minCashReserveUsd": strategy.MIN_CASH_RESERVE_USD,
+        },
     }
 
 

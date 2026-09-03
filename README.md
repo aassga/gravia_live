@@ -95,13 +95,31 @@ Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計�
 - 只有 FOK 訂單回覆 `matched` 才當作成交；`delayed` 長時間無法確認時會自動停止下單。
 - 真實策略狀態儲存在 `polymarket_live_strategy_state.json`，重啟後不會忘記持倉與停止原因。
 
-先保持 `LIVE_TRADING=false` 執行：
+### 建議做法：嵌入模擬盤進程（`--with-live`），共用同一條 WS 連線
+
+實盤跟模擬盤各自開一條獨立 WebSocket 連線的話，兩邊收到同一筆報價更新的時間點不保證相同——鎖利機會常常只存在幾百毫秒，一邊先動手鎖住深度時，另一邊可能因為晚收到同一筆更新而撲空。要讓兩邊判斷完全同步，改用 `--with-live` 旗標啟動模擬盤，讓實盤邏輯（`run_embedded()`）直接掛在模擬盤進程裡、共用同一條 WS 連線：
+
+```powershell
+py polymarket_server.py --with-live
+```
+
+啟動紀錄看到 `⚠ --with-live 已啟用` 代表成功掛載。**這個模式下不要再另外執行 `py polymarket_live_strategy.py`**——兩個進程各自對同一個帳戶下單會互相搶單、重複下單，或同時誤判「目前沒有未管理的持倉」。是否真的送出真實訂單，仍然完全由 `.env` 的 `LIVE_TRADING` 與 `POLY_STRATEGY_ARMED` 兩道開關決定，跟是否加 `--with-live` 無關。
+
+先保持 `LIVE_TRADING=false` 用這個指令跑：
+
+```powershell
+py polymarket_server.py --with-live
+```
+
+待完整跑過多個市場窗口、確認狀態頁與成交條件後，再由你自行決定是否把 `.env` 的 `LIVE_TRADING` 與 `POLY_STRATEGY_ARMED` 改成 `true`。
+
+### 舊做法：獨立進程（`polymarket_live_strategy.py`）
 
 ```powershell
 py polymarket_live_strategy.py
 ```
 
-待完整跑過多個市場窗口、確認狀態頁與成交條件後，再由你自行決定是否開啟真實下單。
+會自己開一條獨立 WS 連線（`strategy_loop()`），邏輯完全相同，但跟模擬盤之間會有上述的時間差，不建議再使用；保留只是為了不強制中斷既有的執行方式。
 
 ## 常見問題
 

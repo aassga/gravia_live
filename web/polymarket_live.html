@@ -112,6 +112,8 @@
   <div class="panel">
     <div class="panel-title">自動策略狀態</div>
     <div id="strategy-health" style="font-size:18px;font-weight:700;color:#7a6a55;">尚未啟動</div>
+    <div id="strategy-name" class="sub-num" style="color:#ffb020;font-size:12.5px;font-weight:600;margin-top:4px;">策略：—</div>
+    <div id="strategy-config" class="sub-num">每注佔資產 — ・ 鎖利合計上限 — ・ 單組上限 —</div>
     <div id="strategy-position" class="sub-num">部位：—</div>
     <div id="strategy-stats" class="sub-num">估算淨損益 — · 費用 — · 交易 —</div>
     <div id="strategy-reason" class="sub-num" style="color:#ff3a5c;"></div>
@@ -126,12 +128,13 @@
   </div>
 
   <div class="panel">
-    <div class="panel-title">真實成交紀錄</div>
+    <div class="panel-title">策略成交紀錄（跟模擬盤同一套記帳方式）</div>
     <table>
-      <thead><tr><th>時間</th><th>方向</th><th>價格</th><th>數量</th><th>Token</th></tr></thead>
+      <thead><tr><th>時間</th><th>方向</th><th>下注</th><th>損益</th><th></th></tr></thead>
       <tbody id="trades-body"><tr><td colspan="5" class="empty-row">目前沒有成交紀錄</td></tr></tbody>
     </table>
   </div>
+
 
   <div class="footer-note">ws://localhost:8767 · polymarket_live_status_server.py · 純唯讀，不執行任何下單動作</div>
 
@@ -180,20 +183,32 @@ function renderPositions(positions){
 }
 
 function renderTrades(trades){
+  // 跟模擬盤（web/polymarket.html 的 renderAbLeaderboard）同一套記帳方式：
+  // 時間、方向＋類型（鎖利／方向性／提早退出）、下注金額、損益。
   const body = document.getElementById('trades-body');
   if(!trades || trades.length === 0){
     body.innerHTML = '<tr><td colspan="5" class="empty-row">目前沒有成交紀錄</td></tr>';
     return;
   }
-  body.innerHTML = trades.map(t => `
+  body.innerHTML = trades.map(t => {
+    const win = Number(t.pnlEstimate || 0) >= 0;
+    const mismatchNote = t.shareMismatch ? `（股數不符，殘值 ${Number(t.shareMismatch.unhedgedResidual).toFixed(4)} 股需人工核對）` : '';
+    const dir = (t.hedged
+      ? `${t.side}/${t.hedgeSide} 鎖利`
+      : (t.tradeType === 'early_exit' ? `${t.side} 提早退出` : `${t.side} 方向性`)) + mismatchNote;
+    const badgeClass = t.shareMismatch ? 'side-sell' : (t.hedged || win ? 'side-buy' : 'side-sell');
+    const pnl = Number(t.pnlEstimate || 0);
+    const pnlText = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+    return `
     <tr>
-      <td>${fmtTime(t.match_time || t.timestamp)}</td>
-      <td>${sideSpan(t.side)}</td>
-      <td>$${Number(t.price ?? 0).toFixed(3)}</td>
-      <td>${Number(t.size ?? 0).toFixed(2)}</td>
-      <td class="addr">${shortToken(t.asset_id || t.token_id)}</td>
+      <td>${fmtTime(t.exitTime)}</td>
+      <td><span class="${badgeClass}">${dir}</span></td>
+      <td>$${Number(t.stakeUsd || 0).toFixed(2)}</td>
+      <td class="${win ? 'side-buy' : 'side-sell'}" style="font-weight:600;">${pnlText}</td>
+      <td class="addr">${t.dryRun === false ? 'REAL' : 'DRY-RUN'}</td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
 }
 
 function onData(d){
@@ -236,6 +251,13 @@ function onData(d){
 
   document.getElementById('funder-addr').textContent = d.funderAddress || '—';
 
+  const cfg=d.strategyConfig||{};
+  document.getElementById('strategy-name').textContent = cfg.label ? `策略：${cfg.label}` : '策略：—';
+  document.getElementById('strategy-config').textContent = typeof cfg.stakePct==='number'
+    ? `每注佔資產 ${cfg.stakePct.toFixed(1)}%（複利）・ 鎖利合計上限 $${Number(cfg.lockMaxSum||0).toFixed(2)}`+
+      ` ・ 單組上限 $${Number(cfg.maxPairBudgetUsd||0).toFixed(2)} ・ 現金保留 $${Number(cfg.minCashReserveUsd||0).toFixed(2)}`
+    : '每注佔資產 — ・ 鎖利合計上限 — ・ 單組上限 —';
+
   const strategy=d.strategyState||{};
   const health=document.getElementById('strategy-health');
   if(!strategy.updatedAt && !strategy.halted){
@@ -262,7 +284,7 @@ function onData(d){
   document.getElementById('orders-summary').textContent = `持有部位 ${positions.length} 個 · 成交 ${trades.length} 筆`;
 
   renderPositions(positions);
-  renderTrades(trades);
+  renderTrades(strategy.trades || []);
 }
 
 function connect(){

@@ -13,13 +13,15 @@ class PolymarketSimulationTests(unittest.TestCase):
         if sim._sim_db is not None:
             sim._sim_db.close()
         sim._sim_db = None
-        sim.shared_config.update({"startBalance": 100.0, "stakePct": 3.0, "runId": 1})
+        sim.shared_config.update({"startBalance": 100.0, "stakePct": 15.0, "runId": 1})
         for variant in sim.AB_VARIANTS:
             sim.ab_states[variant["id"]] = sim._new_variant_state()
-        sim.sim_state = sim.ab_states["main"]
+        sim.sim_state = sim.ab_states["btc-main"]
         for market in sim.markets_state.values():
             market["upBook"] = {"bids": [], "asks": []}
             market["downBook"] = {"bids": [], "asks": []}
+            market["windowOpenSpotPrice"] = None
+            market["spotPrice"] = None
 
     def tearDown(self):
         if sim._sim_db is not None:
@@ -66,32 +68,41 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_direct_pair_requires_positive_net_lock(self):
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
-        self.assertTrue(sim._try_direct_pair("main", "btc-window", up_book, down_book))
-        position = sim.ab_states["main"]["position"]
+        self.assertTrue(sim._try_direct_pair("btc-main", "btc-window", up_book, down_book))
+        position = sim.ab_states["btc-main"]["position"]
         self.assertTrue(position["hedged"])
         self.assertGreater(position["lockedPnl"], 0)
-        cash, portfolio = sim.compute_cash_and_portfolio("main")
+        cash, portfolio = sim.compute_cash_and_portfolio("btc-main")
         self.assertGreater(cash, 0)
         self.assertAlmostEqual(portfolio, 100.0 + position["lockedPnl"])
 
+    def test_direct_pair_rejects_when_below_real_min_order_shares(self):
+        # Polymarket 真正的下限是股數（查證過真實 API 是 5 股），不是金額——就算金額、
+        # 深度都夠，股數不到 minOrderSize 一樣不能進場。
+        up_book = {"tickSize": 0.01, "minOrderSize": 1000, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "minOrderSize": 1000, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+        self.assertFalse(sim._try_direct_pair("btc-main", "btc-window", up_book, down_book))
+
     def test_direct_pair_uses_same_tick_aligned_decision_price_as_live(self):
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.44, "size": 1_000.0}], "bids": []}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.45, "size": 1_000.0}], "bids": []}
+        # 數字挑在剛好卡在 btc-main 目前的 lockMaxSum（0.95）兩側：樂觀的 vwap 加總
+        # 看起來夠便宜會通過，但保守的 tick-aligned 決策價加總超過門檻，應該被拒絕。
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.46, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.48, "size": 1_000.0}], "bids": []}
         up_fill = sim.simulate_buy_fill(up_book, 10.0)
         down_fill = sim.simulate_buy_fill(down_book, 10.0)
-        self.assertLess(up_fill["vwap"] + down_fill["vwap"], 0.90)
-        self.assertEqual(up_fill["decisionPrice"] + down_fill["decisionPrice"], 0.91)
-        self.assertFalse(sim._try_direct_pair("main", "btc-window", up_book, down_book))
+        self.assertLess(up_fill["vwap"] + down_fill["vwap"], 0.95)
+        self.assertEqual(up_fill["decisionPrice"] + down_fill["decisionPrice"], 0.96)
+        self.assertFalse(sim._try_direct_pair("btc-main", "btc-window", up_book, down_book))
 
     def test_window_roll_does_not_clear_other_variant_position(self):
         main_pos = {"windowSlug": "btc-window-a"}
         loose_pos = {"windowSlug": "btc-window-b"}
-        sim.ab_states["main"]["position"] = main_pos
-        sim.ab_states["loose"]["position"] = loose_pos
+        sim.ab_states["btc-main"]["position"] = main_pos
+        sim.ab_states["btc-loose"]["position"] = loose_pos
         sim.queue_settlement("btc-window-a")
-        self.assertIsNone(sim.ab_states["main"]["position"])
-        self.assertEqual(sim.ab_states["main"]["pendingSettlements"], [main_pos])
-        self.assertIs(sim.ab_states["loose"]["position"], loose_pos)
+        self.assertIsNone(sim.ab_states["btc-main"]["position"])
+        self.assertEqual(sim.ab_states["btc-main"]["pendingSettlements"], [main_pos])
+        self.assertIs(sim.ab_states["btc-loose"]["position"], loose_pos)
 
     def test_pending_directional_position_keeps_capital_reserved(self):
         pos = {
@@ -102,20 +113,52 @@ class PolymarketSimulationTests(unittest.TestCase):
             "entryFee": sim.taker_fee(10.0, 0.30),
             "hedged": False,
         }
-        sim.ab_states["main"]["pendingSettlements"] = [pos]
-        cash, portfolio = sim.compute_cash_and_portfolio("main")
+        sim.ab_states["btc-main"]["pendingSettlements"] = [pos]
+        cash, portfolio = sim.compute_cash_and_portfolio("btc-main")
         expected = 100.0 - sim._position_paid_cost(pos)
         self.assertAlmostEqual(cash, expected)
         self.assertAlmostEqual(portfolio, expected)
 
     def test_state_survives_restart(self):
-        sim.ab_states["main"]["totalPnl"] = 12.34
+        sim.ab_states["btc-main"]["totalPnl"] = 12.34
         sim.save_sim_state()
-        sim.ab_states["main"] = sim._new_variant_state()
-        sim.sim_state = sim.ab_states["main"]
+        sim.ab_states["btc-main"] = sim._new_variant_state()
+        sim.sim_state = sim.ab_states["btc-main"]
         sim.load_sim_state()
-        self.assertEqual(sim.ab_states["main"]["totalPnl"], 12.34)
-        self.assertIs(sim.sim_state, sim.ab_states["main"])
+        self.assertEqual(sim.ab_states["btc-main"]["totalPnl"], 12.34)
+        self.assertIs(sim.sim_state, sim.ab_states["btc-main"])
+
+    def test_late_direction_skips_outside_window(self):
+        ms = sim.markets_state["btc"]
+        ms["windowOpenSpotPrice"] = 100.0
+        ms["spotPrice"] = 100.5  # +0.5%，遠超門檻
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.60, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+        sim._try_late_direction_entry("btc-late-direction", "btc-window", up_book, down_book, remaining_seconds=30.0)
+        self.assertIsNone(sim.ab_states["btc-late-direction"]["position"])
+
+    def test_late_direction_enters_favored_side_near_close(self):
+        ms = sim.markets_state["btc"]
+        ms["windowOpenSpotPrice"] = 100.0
+        ms["spotPrice"] = 100.5  # +0.5%，偏 Up
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.60, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+        sim._try_late_direction_entry("btc-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
+        pos = sim.ab_states["btc-late-direction"]["position"]
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos["side"], "Up")
+        self.assertFalse(pos["hedged"])
+
+    def test_late_direction_position_never_auto_hedges(self):
+        ms = sim.markets_state["btc"]
+        ms["windowOpenSpotPrice"] = 100.0
+        ms["spotPrice"] = 100.5
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.60, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": []}  # 便宜到能鎖利
+        sim._try_late_direction_entry("btc-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
+        self.assertFalse(sim.ab_states["btc-late-direction"]["position"]["hedged"])
+        sim.simulate_trading("btc-late-direction", "btc-window", up_book, down_book, remaining_seconds=4.0, fair=None)
+        self.assertFalse(sim.ab_states["btc-late-direction"]["position"]["hedged"])
 
     def test_websocket_book_change_notifies_registered_listener(self):
         received = []
