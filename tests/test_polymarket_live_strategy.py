@@ -417,20 +417,24 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(strategy.live_state["position"]["dryRun"])
         self.assertFalse(strategy._ws_action_in_flight["v"])
 
-    async def test_direct_pair_shares_capped_at_50pct_of_depth(self):
-        # 跟模擬版 sim._try_direct_pair 對齊：股數封頂在可見深度的 50%，不是 100%。
+    async def test_direct_pair_shares_capped_at_configured_fraction_of_depth(self):
+        # 跟模擬版 sim._try_direct_pair 對齊：股數封頂在可見深度的
+        # sim.SIM_DEPTH_CAP_FRACTION（2026-09 從 0.5 調低到 0.3——實盤好幾次撞到模擬盤
+        # 鎖到、實盤卻因為深度被搶走而被拒，調低這個比例是為了降低這個風險），不是 100%。
         strategy.live_state["lastActionAt"] = 0
         strategy.sim.state["market"] = {
             "outcomes": json.dumps(["Up", "Down"]),
             "clobTokenIds": json.dumps(["up-token", "down-token"]),
         }
+        depth = 60  # 封頂後 (depth * SIM_DEPTH_CAP_FRACTION) 要小於 MAX_PAIR_BUDGET_USD
+                    # 換算出的股數上限，才能確定是深度、不是資金，在限制最終股數。
         strategy.sim.state["upBook"] = {
             "tickSize": 0.01, "minOrderSize": 1,
-            "asks": [{"price": 0.10, "size": 20}], "bids": [],
+            "asks": [{"price": 0.10, "size": depth}], "bids": [],
         }
         strategy.sim.state["downBook"] = {
             "tickSize": 0.01, "minOrderSize": 1,
-            "asks": [{"price": 0.10, "size": 20}], "bids": [],
+            "asks": [{"price": 0.10, "size": depth}], "bids": [],
         }
         # 現金給大一點，確保是深度（不是資金）在限制股數，跟本機 .env 的 STAKE_PCT 設多少無關。
         with patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100_000.0)):
@@ -440,7 +444,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         pos = strategy.live_state["position"]
         self.assertIsNotNone(pos)
         self.assertTrue(pos["hedged"])
-        self.assertEqual(pos["shares"], 10.0)
+        self.assertEqual(pos["shares"], depth * strategy.sim.SIM_DEPTH_CAP_FRACTION)
 
 
 if __name__ == "__main__":

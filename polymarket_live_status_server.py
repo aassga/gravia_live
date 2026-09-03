@@ -31,6 +31,9 @@ HOST = "localhost"
 PORT = 8767
 POLL_INTERVAL = 10  # 真實帳戶查詢，別抓太快，10 秒一次就夠
 
+# 跟 polymarket_server.py 用同一個環境變數名稱，同一台機器上兩支程式回報一致的地區標籤。
+SERVER_REGION = os.environ.get("SERVER_REGION", "未設定地區")
+
 BASELINE_FILE = os.path.join(os.path.dirname(__file__), "polymarket_live_baseline.json")
 STRATEGY_STATE_FILE = os.path.join(os.path.dirname(__file__), "polymarket_live_strategy_state.json")
 
@@ -147,7 +150,11 @@ def _compute_open_positions(trades: list, max_tokens: int = 10) -> list:
 
 def _fetch_state() -> dict:
     """同步呼叫 py_clob_client_v2（會阻塞），外面用 asyncio.to_thread 包起來跑，不卡住其他連線。"""
+    # 直接量測這次真的會發生的請求（查真實餘額），不是額外另外打一個 ping 端點——
+    # 這樣量到的數字才是實際下單/查帳時真的會遇到的延遲，不是理論值。
+    _ping_t0 = time.monotonic()
     balance_raw = live.get_usdc_balance()
+    ping_ms = (time.monotonic() - _ping_t0) * 1000
     orders = live.get_open_orders()
     trades = live.get_trade_history(limit=30)
     positions = _compute_open_positions(trades)
@@ -161,6 +168,8 @@ def _fetch_state() -> dict:
         "connected": True,
         "error": None,
         "fetchedAt": time.time(),
+        "serverRegion": SERVER_REGION,
+        "clobPingMs": ping_ms,
         "funderAddress": live.FUNDER_ADDRESS,
         "liveTradingEnabled": live.LIVE_TRADING,
         "strategyArmed": os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true",

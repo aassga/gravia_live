@@ -817,10 +817,11 @@ async def evaluate_and_act(
 
         # 先試鎖利（找不到就空手，不賭單邊——這條退路模擬盤驗證下來是 0% 勝率，
         # 詳見對話紀錄）；鎖不到才在窗口快結束時改用晚進場方向性當備案。
-        # 股數先按可見深度的 50% 封頂，跟模擬版 sim._try_direct_pair 對齊（超過這個比例
-        # 會開始明顯吃掉自己的成交價，直接吃到 100% 深度算出來的利潤會比實際能拿到的樂觀）；
-        # 封頂後再無條件捨去到整數，對應真實下單實際能送出的精度。
-        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * 0.5
+        # 股數先按可見深度的 sim.SIM_DEPTH_CAP_FRACTION 封頂，跟模擬版 sim._try_direct_pair
+        # 對齊（2026-09 從 0.5 調低到 0.3——實測好幾次模擬盤鎖到、實盤同一秒卻因為深度
+        # 被搶走而被拒，見該常數註解）；封頂後再無條件捨去到整數，對應真實下單實際能
+        # 送出的精度。
+        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * sim.SIM_DEPTH_CAP_FRACTION
         paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
         direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
         if direct:
@@ -964,7 +965,7 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
         if budget < 1.0 or shares < 1.0:
             return
 
-        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * 0.5
+        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * sim.SIM_DEPTH_CAP_FRACTION
         paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
         direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
         if direct:

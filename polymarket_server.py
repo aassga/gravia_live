@@ -31,6 +31,17 @@ import aiohttp
 import websockets
 from websockets.server import serve
 
+# 這支檔案本身以前沒有呼叫 load_dotenv()——只有 --with-live 模式下，main() 稍後才會
+# import polymarket_live_trader，那支檔案內部才會載入 .env。純模擬模式（不加
+# --with-live）完全不需要 .env，一直以來沒事；但像 SERVER_REGION 這種「模擬盤自己
+# 也想讀的設定」在檔案最上面就讀了，那時候 .env 根本還沒載入，永遠只會拿到預設值。
+# 這裡直接載入一次，兩種模式下都能正確讀到 .env——重複呼叫 load_dotenv() 是安全的。
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 if sys.platform == "win32":
     # Windows 終端機預設編碼常是 cp950/cp936，中文 log 會變亂碼，強制改 UTF-8
     # （polymarket_live_trader.py / polymarket_live_strategy.py 已經有這段，這支主程式
@@ -54,6 +65,11 @@ if __name__ == "__main__":
 HOST = "localhost"
 PORT = 8766             # Polymarket 紙上模擬 Dashboard
 POLL_INTERVAL = 3       # 報價輪詢間隔（秒）－ Polymarket 沒有強制要求 WebSocket，輪詢就綽綽有餘
+
+# 這個進程實際運行的地區標籤，純粹顯示用（例如 "TW-Home" / "AWS eu-west-1 Dublin"）。
+# 每台機器的 .env 各自設定自己的值，同一份程式碼不用改就能在前端分辨現在是本機還是
+# VPS 在跑——這是延遲比較（見 SERVER_PING_MS）的重要對照組。
+SERVER_REGION = os.environ.get("SERVER_REGION", "未設定地區")
 
 # 明確的啟動旗標，預設 False：不加這個參數，這支程式永遠只是純模擬、不可能送出任何
 # 真實訂單，不管 .env 的 LIVE_TRADING/POLY_STRATEGY_ARMED 是什麼狀態。只有同時「執行
@@ -91,6 +107,13 @@ SIM_MIN_ORDER_NOTIONAL_USD  = 1.0   # 跟實盤一致：單腿成交金額低於
 SIM_EXIT_EDGE               = 0.02  # 市場可賣價高於模型持有價值 2¢/股時提早退出
 SIM_FAIR_MODEL_WEIGHT       = 0.65  # Binance 波動模型權重；其餘使用市場隱含機率校準
 SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025}
+# 股數封頂在「當下看得到的深度」的這個比例。2026-09：實盤好幾次撞到「模擬盤跟實盤在
+# 同一秒看到同一個機會，模擬盤保證吃得到、實盤卻因為深度不夠被拒」——這不是 bug，是
+# 紙上模擬（吃剛看到的快照，保證成交）跟真實下單（要跟其他真人搶同一份流動性，中間
+# 還有網路延遲）本質上的差異，沒辦法完全消除。從 0.5 調低到 0.3，讓兩邊都對「看到的
+# 深度」更保守一點，用犧牲一些原本吃得到的機會，換取真實下單被拒/只成交一部分的頻率
+# 降低。這個常數也是 polymarket_live_strategy.py 實盤股數封頂的來源，調整會同時影響兩邊。
+SIM_DEPTH_CAP_FRACTION      = 0.3
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # 對齊公開資料裡「T-10 秒、window delta」那套做法：不是在窗口一開始就靠模型優勢
@@ -760,17 +783,18 @@ def log_price_sum_diagnostic(tag: str, up_book: dict, down_book: dict, lock_max_
 def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
     """先檢查兩腿此刻是否可直接成交並鎖住淨利，這才是進場即無方向曝險的套利。
 
-    股數會先按可見深度的 50% 封頂（跟公開研究裡「倉位上限＝訂單簿深度的 50%」
-    這個風控原則對齊——超過這個比例會開始明顯吃掉自己的成交價，模擬出來的
-    利潤會比實際能拿到的樂觀）。封頂之後如果連目標股數都吃不滿，
-    才照原本邏輯整筆視為不可行（simulate_buy_fill 深度不足回傳 None）。"""
+    股數會先按可見深度的 SIM_DEPTH_CAP_FRACTION（見該常數註解，2026-09 從 0.5
+    調低到 0.3）封頂——超過這個比例會開始明顯吃掉自己的成交價，模擬出來的
+    利潤會比實際能拿到的樂觀，也更容易在真實下單時因為深度已經被搶走而被拒。
+    封頂之後如果連目標股數都吃不滿，才照原本邏輯整筆視為不可行
+    （simulate_buy_fill 深度不足回傳 None）。"""
     variant = AB_VARIANT_BY_ID[variant_id]
     shares, budget = _target_order_size(variant_id)
     if shares <= 0:
         return False
     up_depth = sum(float(a.get("size", 0)) for a in (up_book.get("asks") or []))
     down_depth = sum(float(a.get("size", 0)) for a in (down_book.get("asks") or []))
-    depth_cap = min(up_depth, down_depth) * 0.5
+    depth_cap = min(up_depth, down_depth) * SIM_DEPTH_CAP_FRACTION
     shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
     if shares <= 0:
         return False
@@ -1466,12 +1490,36 @@ async def _fetch_one_asset_safe(session: aiohttp.ClientSession, asset: dict) -> 
         log.error(f"Fetch error [{asset['id']}]: {e}")
         markets_state[asset["id"]]["connected"] = False
 
+# 量測到 CLOB API 的真實來回時間，給前端顯示用——單純 ping 量到的是最近的 Cloudflare
+# 節點，量不出真正決定下單快慢的「轉送到 Polymarket 後端 + 處理 + 回傳」這段（實測過
+# 兩者差到 10 倍以上，見對話紀錄），所以這裡量測的是一次真實 HTTP 請求。
+#
+# 2026-09：一開始讓這個量測共用 data_fetcher() 抓 7 個資產報價那個 session，結果量到
+# 900ms 起跳，比同一台機器單獨測快了 30 倍以上——原因是那個 session 剛好在同一瞬間
+# 有一大批（7 資產 × 好幾個端點）並發請求擠在同一個連線池排隊，量到的是「排在我們
+# 自己那批請求後面的等待時間」，不是真實網路延遲，會誤導使用者以為連線變慢了。改成
+# 用完全獨立的 session／連線池，只用來量這一件事，才不會被自己的其他流量污染。
+_ping_state: dict = {"ms": None, "at": 0.0}
+
+
+async def _measure_clob_ping(ping_session: aiohttp.ClientSession) -> None:
+    t0 = time.monotonic()
+    try:
+        async with ping_session.get(CLOB_BASE + "/", timeout=aiohttp.ClientTimeout(total=5)) as r:
+            await r.read()
+        _ping_state["ms"] = (time.monotonic() - t0) * 1000
+    except Exception:
+        _ping_state["ms"] = None
+    _ping_state["at"] = time.time()
+
+
 async def data_fetcher():
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession() as session, aiohttp.ClientSession() as ping_session:
         while True:
             # 7 個資產平行抓，不要一個一個 await——依序抓的話單輪耗時會是 7 個資產的
             # 總和，很容易吃掉大半個 POLL_INTERVAL，導致晚抓到的資產報價明顯落後。
             await asyncio.gather(*(_fetch_one_asset_safe(session, asset) for asset in ASSETS))
+            await _measure_clob_ping(ping_session)
 
             try:
                 await retry_pending_settlements(session)  # 每輪都重試還沒結算成功的舊窗口（跨資產一起處理）
@@ -1545,6 +1593,8 @@ def build_full_payload() -> str:
     return json.dumps({
         "type": "full",
         "serverTimeMs": real_now() * 1000,  # 校正過的真實時間，前端拿來顯示時鐘、不用本機系統時間
+        "serverRegion": SERVER_REGION,
+        "clobPingMs":   _ping_state["ms"],
         "assets":       {a["id"]: build_asset_payload(a["id"]) for a in ASSETS},
         "assetList":    [{"id": a["id"], "label": a["label"]} for a in ASSETS],
         "sharedConfig": {

@@ -87,6 +87,7 @@
     <div style="display:flex;gap:10px;align-items:center;">
       <span id="conn-badge" class="badge badge-off"><span class="badge-dot"></span> 連線中...</span>
       <span id="live-badge" class="badge badge-off">下單開關：—</span>
+      <span id="region-badge" class="badge badge-off">地區：—</span>
     </div>
   </div>
 
@@ -214,6 +215,13 @@ function renderTrades(trades){
 function onData(d){
   const connBadge = document.getElementById('conn-badge');
   const liveBadge = document.getElementById('live-badge');
+  const regionBadge = document.getElementById('region-badge');
+
+  if(typeof d.serverRegion === 'string'){
+    const ping = typeof d.clobPingMs === 'number' ? Math.round(d.clobPingMs) + 'ms' : '—';
+    regionBadge.textContent = `地區：${d.serverRegion} · ping ${ping}`;
+    regionBadge.className = 'badge ' + (typeof d.clobPingMs === 'number' && d.clobPingMs < 100 ? 'badge-live' : 'badge-off');
+  }
 
   if(d.connected){
     connBadge.className = 'badge badge-live';

@@ -86,6 +86,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
         <span id="conn-dot" class="live-dot dot-gray"></span>連接中
       </span>
       <span style="font-size:11px;color:#444;">Polymarket 公開 API（Gamma + CLOB）</span>
+      <span id="region-badge" style="font-size:11px;color:#444;">地區：— · ping —</span>
     </div>
     <div style="display:flex;gap:20px;align-items:baseline;font-family:'JetBrains Mono';">
       <span class="gray">交易次數 <span id="tb-trades" style="color:#f0f0f0">0</span></span>
@@ -314,6 +315,11 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     lastPayload=d;
     if(typeof d.serverTimeMs==='number'){
       clockOffsetMs=d.serverTimeMs-Date.now();
+    }
+    if(typeof d.serverRegion==='string'){
+      const ping = typeof d.clobPingMs==='number' ? Math.round(d.clobPingMs)+'ms' : '—';
+      const pingColor = typeof d.clobPingMs==='number' && d.clobPingMs<100 ? '#00ff9d' : '#ffd700';
+      $('region-badge').innerHTML = `地區：${d.serverRegion} · ping <span style="color:${pingColor}">${ping}</span>`;
     }
     renderCurrentAsset();
     addLog('數據',currentAsset.toUpperCase()+' 報價已更新','#e8e8e8');
