@@ -540,30 +540,14 @@ def _token_id(side: str) -> str:
     return up_id if side == "Up" else down_id
 
 
-async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
-    token_id = _token_id(plan["side"])
-    result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
-    if result == "unconfirmed":
-        _set_halt(
-            f"entry_order_unconfirmed side={plan['side']}",
-            {"orderID": response.get("orderID") or response.get("orderId"), "side": plan["side"], "tokenId": token_id},
-        )
-        return result
-    if result != "filled":
-        log.info(f"[LIVE] {plan['side']} FOK 未成交，不建立持倉")
-        return result
-
-    execution = await _resolved_execution(plan, response, dry_run)
-    if not dry_run and abs(execution["shares"] - plan["shares"]) > max(1e-6, plan["shares"] * 0.001):
-        log.warning(
-            f"[LIVE] 進場真實成交股數（{execution['shares']:.6f}）校正了規劃股數"
-            f"（{plan['shares']:.6f}）——部位追蹤改用真實股數。"
-        )
-
-    live_state["position"] = {
+def _build_position_dict(slug: str, plan: dict, response: dict, execution: dict, dry_run: bool) -> dict:
+    """建立單腿部位字典（尚未對沖）。從 _enter_position 抽出來，讓兩腿平行送出時
+    （見 _execute_direct_pair）不管哪一腿成交都能重用同一份邏輯建立部位，不用
+    另外寫一份容易長歪。"""
+    return {
         "windowSlug": slug,
         "side": plan["side"],
-        "tokenId": token_id,
+        "tokenId": _token_id(plan["side"]),
         "shares": execution["shares"],
         "stakeUsd": execution["notional"] + execution["fee"],
         "entryPrice": execution["price"],
@@ -590,6 +574,33 @@ async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
         "hedgeRiskFee": 0.0,
         "dryRun": dry_run,
     }
+
+
+def _warn_if_shares_corrected(label: str, plan: dict, execution: dict, dry_run: bool) -> None:
+    if not dry_run and abs(execution["shares"] - plan["shares"]) > max(1e-6, plan["shares"] * 0.001):
+        log.warning(
+            f"[LIVE] {label}真實成交股數（{execution['shares']:.6f}）校正了規劃股數"
+            f"（{plan['shares']:.6f}）——部位追蹤改用真實股數。"
+        )
+
+
+async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
+    token_id = _token_id(plan["side"])
+    result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
+    if result == "unconfirmed":
+        _set_halt(
+            f"entry_order_unconfirmed side={plan['side']}",
+            {"orderID": response.get("orderID") or response.get("orderId"), "side": plan["side"], "tokenId": token_id},
+        )
+        return result
+    if result != "filled":
+        log.info(f"[LIVE] {plan['side']} FOK 未成交，不建立持倉")
+        return result
+
+    execution = await _resolved_execution(plan, response, dry_run)
+    _warn_if_shares_corrected("進場", plan, execution, dry_run)
+
+    live_state["position"] = _build_position_dict(slug, plan, response, execution, dry_run)
     save_live_state()
     tag = "DRY-RUN" if dry_run else "REAL"
     log.warning(
@@ -599,25 +610,13 @@ async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
     return result
 
 
-async def _hedge_position(plan: dict, dry_run: bool) -> str:
-    pos = live_state["position"]
-    token_id = _token_id(plan["side"])
-    result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
-    if result == "unconfirmed":
-        _set_halt(
-            f"hedge_order_unconfirmed side={plan['side']}",
-            {"orderID": response.get("orderID") or response.get("orderId"), "side": plan["side"], "tokenId": token_id},
-        )
-        return result
-    if result != "filled":
-        log.error(f"[LIVE] 第二腿 {plan['side']} FOK 未成交，依然是單邊曝險")
-        return result
-
-    execution = await _resolved_execution(plan, response, dry_run)
-
+def _apply_hedge_fields(pos: dict, plan: dict, response: dict, execution: dict) -> None:
+    """把補鎖利那一腿的成交結果套進既有部位、計算保守鎖利估計，兩腿真實股數對不上時
+    記錄殘值——依序版 _hedge_position 跟 _execute_direct_pair 平行送出剛好兩腿都成交
+    的情況共用這份邏輯，不用各寫一份容易長歪。"""
     pos["hedged"] = True
     pos["hedgeSide"] = plan["side"]
-    pos["hedgeTokenId"] = token_id
+    pos["hedgeTokenId"] = _token_id(plan["side"])
     pos["hedgeShares"] = execution["shares"]
     pos["hedgePrice"] = execution["price"]
     pos["hedgeObservedVwap"] = plan["observedVwap"]
@@ -649,6 +648,24 @@ async def _hedge_position(plan: dict, dry_run: bool) -> str:
         )
     pos["lockedPnlEstimate"] = min_shares - _position_paid_cost(pos)
     pos["lockedPnlWorstCase"] = min_shares - _position_risk_cost(pos)
+
+
+async def _hedge_position(plan: dict, dry_run: bool) -> str:
+    pos = live_state["position"]
+    token_id = _token_id(plan["side"])
+    result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
+    if result == "unconfirmed":
+        _set_halt(
+            f"hedge_order_unconfirmed side={plan['side']}",
+            {"orderID": response.get("orderID") or response.get("orderId"), "side": plan["side"], "tokenId": token_id},
+        )
+        return result
+    if result != "filled":
+        log.error(f"[LIVE] 第二腿 {plan['side']} FOK 未成交，依然是單邊曝險")
+        return result
+
+    execution = await _resolved_execution(plan, response, dry_run)
+    _apply_hedge_fields(pos, plan, response, execution)
     save_live_state()
     tag = "DRY-RUN" if dry_run else "REAL"
     log.warning(
@@ -736,21 +753,77 @@ async def _execute_direct_pair(
     fair: dict | None,
     dry_run: bool,
 ) -> None:
-    # 先買即使第二腿失敗仍較有模型優勢的一邊；真實 CLOB 並沒有兩腿原子成交保證。
-    plans = [up, down]
     if fair:
-        for plan in plans:
+        for plan in (up, down):
             fair_side = fair["fairUp"] if plan["side"] == "Up" else fair["fairDown"]
             plan["fair"] = fair_side
             plan["edge"] = fair_side - (plan["riskNotional"] + plan["fee"]) / plan["shares"]
-        plans.sort(key=lambda p: p.get("edge", float("-inf")), reverse=True)
 
-    first, second = plans
-    if await _enter_position(slug, first, dry_run) != "filled":
+    # 2026-09：兩腿改成平行送出，不再依序等第一腿確認才送第二腿——兩腿的價格/股數在
+    # 送出之前就已經算好了（_direct_pair_plans 一次算出兩腿的計畫），不需要先知道
+    # 第一腿真實成交結果才能決定第二腿要下多少。實測依序送出時，光是「等第一腿的
+    # 網路來回＋撮合處理」這段就佔掉 100~180ms（見對話紀錄），這段時間市場可能已經
+    # 變動、深度被搶走。平行送出讓兩腿幾乎同時抵達交易所，省掉這段等待時間。
+    #
+    # 代價：舊版「先確認一腿成交才送第二腿」保證不會出現「只有原本沒打算優先的
+    # 那一腿獨自成交」這種組合；平行送出後這種組合變得可能，用跟舊版一樣的緊急平倉
+    # 邏輯救援，不管哪一腿獨自成交都當成單邊曝險處理。
+    up_token = _token_id("Up")
+    down_token = _token_id("Down")
+    (up_result, up_response), (down_result, down_response) = await asyncio.gather(
+        _submit_fok(up_token, "BUY", up, dry_run),
+        _submit_fok(down_token, "BUY", down, dry_run),
+    )
+
+    for side, result, response, token_id in (
+        ("Up", up_result, up_response, up_token),
+        ("Down", down_result, down_response, down_token),
+    ):
+        if result == "unconfirmed":
+            _set_halt(
+                f"direct_pair_leg_unconfirmed side={side}",
+                {"orderID": response.get("orderID") or response.get("orderId"), "side": side, "tokenId": token_id},
+            )
+            return
+
+    up_filled = up_result == "filled"
+    down_filled = down_result == "filled"
+
+    if not up_filled and not down_filled:
+        log.info("[LIVE] 兩腿平行送出皆未成交，不建立持倉")
         return
-    result = await _hedge_position(second, dry_run)
-    if result == "not_filled":
-        await _emergency_unwind(session, "direct_pair_second_leg_failed")
+
+    if up_filled and down_filled:
+        up_execution = await _resolved_execution(up, up_response, dry_run)
+        down_execution = await _resolved_execution(down, down_response, dry_run)
+        _warn_if_shares_corrected("進場", up, up_execution, dry_run)
+        _warn_if_shares_corrected("補鎖利", down, down_execution, dry_run)
+
+        pos = _build_position_dict(slug, up, up_response, up_execution, dry_run)
+        live_state["position"] = pos
+        _apply_hedge_fields(pos, down, down_response, down_execution)
+        save_live_state()
+        tag = "DRY-RUN" if dry_run else "REAL"
+        log.warning(
+            f"[LIVE][{tag}] 平行鎖利 {up['side']}+{down['side']} "
+            f"保守淨鎖利估計=${pos['lockedPnlEstimate']:+.2f}"
+        )
+        return
+
+    filled_side, filled_plan, filled_response = (
+        ("Up", up, up_response) if up_filled else ("Down", down, down_response)
+    )
+    execution = await _resolved_execution(filled_plan, filled_response, dry_run)
+    _warn_if_shares_corrected("進場", filled_plan, execution, dry_run)
+
+    live_state["position"] = _build_position_dict(slug, filled_plan, filled_response, execution, dry_run)
+    save_live_state()
+    tag = "DRY-RUN" if dry_run else "REAL"
+    log.warning(
+        f"[LIVE][{tag}] 平行送出只有 {filled_side} 成交，依然是單邊曝險 "
+        f"limit=${filled_plan['limitPrice']:.3f} shares={execution['shares']:.2f}"
+    )
+    await _emergency_unwind(session, "direct_pair_parallel_single_leg_filled")
 
 
 async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:

@@ -227,19 +227,66 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         pnl_down_wins = strategy._settle_pnl_estimate(pos, "Down")
         self.assertAlmostEqual(pnl_down_wins, 13.565216 - (3.12 + 0.05 + 7.93 + 0.2))
 
-    async def test_second_leg_failure_triggers_emergency_unwind(self):
-        first = {"side": "Up", "edge": 0.1}
-        second = {"side": "Down", "edge": 0.05}
+    # 2026-09：兩腿改成平行送出（見 _execute_direct_pair），不再依序呼叫
+    # _enter_position/_hedge_position，改成直接呼叫 _submit_fok，所以下面這幾個測試
+    # 改成 mock _submit_fok 本身，涵蓋兩腿都成交／只有一腿成交／兩腿都沒成交三種情況。
+    def _fair_and_legs(self):
+        strategy.sim.state["market"] = {
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        up = {"side": "Up", "riskNotional": 2.0, "fee": 0.1, "shares": 5.0,
+              "observedVwap": 0.40, "limitPrice": 0.42}
+        down = {"side": "Down", "riskNotional": 2.0, "fee": 0.1, "shares": 5.0,
+                "observedVwap": 0.50, "limitPrice": 0.52}
         fair = {"fairUp": 0.6, "fairDown": 0.4}
-        first.update({"riskNotional": 2.0, "fee": 0.1, "shares": 5})
-        second.update({"riskNotional": 2.0, "fee": 0.1, "shares": 5})
+        return up, down, fair
+
+    async def test_parallel_legs_both_filled_creates_locked_position(self):
+        up, down, fair = self._fair_and_legs()
+
+        async def fake_submit_fok(token_id, side, plan, dry_run):
+            return "filled", {"orderID": f"order-{plan['side']}"}
+
+        with patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok):
+            await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
+
+        pos = strategy.live_state["position"]
+        self.assertIsNotNone(pos)
+        self.assertTrue(pos["hedged"])
+        self.assertEqual(pos["side"], "Up")
+        self.assertEqual(pos["hedgeSide"], "Down")
+
+    async def test_parallel_legs_only_one_filled_triggers_emergency_unwind(self):
+        up, down, fair = self._fair_and_legs()
+
+        async def fake_submit_fok(token_id, side, plan, dry_run):
+            if plan["side"] == "Up":
+                return "filled", {"orderID": "order-up"}
+            return "not_filled", {}
+
         with (
-            patch.object(strategy, "_enter_position", AsyncMock(return_value="filled")),
-            patch.object(strategy, "_hedge_position", AsyncMock(return_value="not_filled")),
+            patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok),
             patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
         ):
-            await strategy._execute_direct_pair(None, "btc-window", first, second, fair, True)
+            await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
+
+        pos = strategy.live_state["position"]
+        self.assertIsNotNone(pos)
+        self.assertFalse(pos["hedged"])
+        self.assertEqual(pos["side"], "Up")
         unwind.assert_awaited_once()
+
+    async def test_parallel_legs_neither_filled_creates_no_position(self):
+        up, down, _fair = self._fair_and_legs()
+
+        async def fake_submit_fok(token_id, side, plan, dry_run):
+            return "not_filled", {}
+
+        with patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok):
+            await strategy._execute_direct_pair(None, "btc-window", up, down, None, True)
+
+        self.assertIsNone(strategy.live_state["position"])
 
     async def test_emergency_unwind_retries_once_on_transient_settlement_lag(self):
         # 2026-09 真實交易案例：第一腿剛成交，緊急平倉的 SELL 第一次被 CLOB 拒絕
