@@ -114,6 +114,12 @@ SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025}
 # 但代價是每次能買的股數變少、賺得也變少，使用者要求先調回 0.5 試試看效果如何——
 # 這個常數也是 polymarket_live_strategy.py 實盤股數封頂的來源，調整會同時影響兩邊。
 SIM_DEPTH_CAP_FRACTION      = 0.5
+# 送單價格在「已經對齊到最差 tick」之上，再多讓一格 tick（買方加價/賣方降價），
+# 換取更高的一次成交機率。2026-09：實盤好幾次因為只差一個 tick 就搶輸真人、變成
+# 單邊曝險再緊急平倉倒賠——多讓一格 tick 的代價是鎖利空間變小，但換來的是更少
+# 需要緊急平倉的情況。這個常數也是模擬盤 decision_fill 的判斷價來源，調整會同時
+# 影響模擬跟實盤，讓兩邊的「進場門檻」保持一致。
+SIM_PRICE_BUFFER_TICKS     = 1
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # 對齊公開資料裡「T-10 秒、window delta」那套做法：不是在窗口一開始就靠模型優勢
@@ -297,8 +303,10 @@ def marketable_limit_price(book: dict, fill: dict, side: str) -> float:
         tick_value = 0.01
     tick = Decimal(str(tick_value))
     raw = Decimal(str(fill["worstPrice"]))
-    rounding = ROUND_UP if side.upper() == "BUY" else ROUND_DOWN
+    is_buy = side.upper() == "BUY"
+    rounding = ROUND_UP if is_buy else ROUND_DOWN
     units = (raw / tick).to_integral_value(rounding=rounding)
+    units += SIM_PRICE_BUFFER_TICKS if is_buy else -SIM_PRICE_BUFFER_TICKS
     price = float(units * tick)
     return max(tick_value, min(1.0 - tick_value, price))
 

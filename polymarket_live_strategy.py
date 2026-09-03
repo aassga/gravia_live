@@ -745,6 +745,42 @@ async def _emergency_unwind(session: aiohttp.ClientSession, reason: str) -> None
     )
 
 
+async def _retry_failed_leg_once(session: aiohttp.ClientSession, failed_side: str, dry_run: bool) -> str:
+    """平行送出兩腿、其中一腿沒成交時，先用最新訂單簿重試一次這一腿，成功就直接
+    變成完整鎖利，不用退而求其次緊急平倉。2026-09：實測那一瞬間的失敗常常只是被
+    搶走那一口深度，市場一兩秒內多半就恢復了，值得立刻補一次而不是馬上放棄。
+    跟正常補鎖利路徑（evaluate_and_act／_on_ws_tick_sync）用同一套鎖利門檻判斷，
+    避免為了搶救單邊曝險而硬鎖一個實際上不划算的價位。
+
+    回傳 "filled"／"not_filled"／"unconfirmed"：unconfirmed 代表 _hedge_position
+    內部已經觸發 halt（下單結果不明，可能已經成交也可能沒有），呼叫端不該接著再對
+    第一腿送緊急平倉——那樣萬一重試那腿其實有成交，就會變成三邊曝險，比不動作更糟。"""
+    pos = live_state["position"]
+    try:
+        latest_book = await sim._get_book_ws_or_rest(session, _token_id(failed_side))
+    except Exception as exc:
+        log.warning(f"[LIVE] 補鎖利重試前無法取得 {failed_side} 訂單簿：{exc}")
+        return "not_filled"
+    hedge = _buy_plan(failed_side, latest_book, pos["shares"])
+    if not hedge:
+        log.info(f"[LIVE] 補鎖利重試：{failed_side} 目前沒有足夠深度，放棄重試")
+        return "not_filled"
+    projected_cost = _position_risk_cost(pos) + hedge["riskNotional"] + hedge["fee"]
+    net_per_share = (pos["shares"] - projected_cost) / pos["shares"]
+    cash = await _strategy_cash(dry_run)
+    if not (
+        float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= LOCK_MAX_SUM
+        and net_per_share >= sim.SIM_MIN_NET_LOCK_PER_SHARE
+        and hedge["riskNotional"] + hedge["fee"] <= cash
+    ):
+        log.info(
+            f"[LIVE] 補鎖利重試：{failed_side} 新報價 limit=${hedge['limitPrice']:.3f} "
+            "已經不划算，放棄重試"
+        )
+        return "not_filled"
+    return await _hedge_position(hedge, dry_run)
+
+
 async def _execute_direct_pair(
     session: aiohttp.ClientSession,
     slug: str,
@@ -813,6 +849,7 @@ async def _execute_direct_pair(
     filled_side, filled_plan, filled_response = (
         ("Up", up, up_response) if up_filled else ("Down", down, down_response)
     )
+    failed_side = "Down" if filled_side == "Up" else "Up"
     execution = await _resolved_execution(filled_plan, filled_response, dry_run)
     _warn_if_shares_corrected("進場", filled_plan, execution, dry_run)
 
@@ -820,9 +857,18 @@ async def _execute_direct_pair(
     save_live_state()
     tag = "DRY-RUN" if dry_run else "REAL"
     log.warning(
-        f"[LIVE][{tag}] 平行送出只有 {filled_side} 成交，依然是單邊曝險 "
+        f"[LIVE][{tag}] 平行送出只有 {filled_side} 成交，先重試 {failed_side} 一次 "
         f"limit=${filled_plan['limitPrice']:.3f} shares={execution['shares']:.2f}"
     )
+
+    retry_result = await _retry_failed_leg_once(session, failed_side, dry_run)
+    if retry_result == "filled":
+        log.warning(f"[LIVE][{tag}] 補鎖利重試成功，{failed_side} 補上鎖利")
+        return
+    if retry_result == "unconfirmed":
+        # _hedge_position 內部已經觸發 halt；重試結果不明，不能再對第一腿送緊急平倉。
+        return
+
     await _emergency_unwind(session, "direct_pair_parallel_single_leg_filled")
 
 

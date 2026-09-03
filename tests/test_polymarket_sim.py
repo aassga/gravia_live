@@ -42,8 +42,9 @@ class PolymarketSimulationTests(unittest.TestCase):
         expected_vwap = 0.41 * (1 + sim.SIM_SLIPPAGE_BPS / 10_000)
         self.assertAlmostEqual(fill["vwap"], expected_vwap)
         self.assertAlmostEqual(fill["fee"], sim.taker_fee(10.0, expected_vwap))
-        self.assertEqual(fill["decisionPrice"], 0.43)
-        self.assertAlmostEqual(fill["decisionFee"], sim.taker_fee(10.0, 0.43))
+        # 對齊最差 tick（0.42）之後，再多讓一格 tick 提高成交機率，變成 0.44。
+        self.assertEqual(fill["decisionPrice"], 0.44)
+        self.assertAlmostEqual(fill["decisionFee"], sim.taker_fee(10.0, 0.44))
         self.assertGreater(fill["fee"], 0)
 
     def test_fill_rejects_insufficient_depth(self):
@@ -91,7 +92,8 @@ class PolymarketSimulationTests(unittest.TestCase):
         up_fill = sim.simulate_buy_fill(up_book, 10.0)
         down_fill = sim.simulate_buy_fill(down_book, 10.0)
         self.assertLess(up_fill["vwap"] + down_fill["vwap"], 0.95)
-        self.assertEqual(up_fill["decisionPrice"] + down_fill["decisionPrice"], 0.96)
+        # 每腿再多讓一格 tick 的緩衝，兩腿加總比只對齊到最差 tick 多 0.02。
+        self.assertEqual(up_fill["decisionPrice"] + down_fill["decisionPrice"], 0.98)
         self.assertFalse(sim._try_direct_pair("btc-main", "btc-window", up_book, down_book))
 
     def test_window_roll_does_not_clear_other_variant_position(self):

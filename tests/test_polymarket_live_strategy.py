@@ -44,12 +44,13 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response["dry_run"])
         self.assertEqual(response["status"], "matched")
 
-    def test_limit_price_rounds_in_adverse_direction(self):
+    def test_limit_price_rounds_in_adverse_direction_plus_one_tick_buffer(self):
         book = {"tickSize": 0.01}
         buy_fill = {"worstPrice": 0.40012}
         sell_fill = {"worstPrice": 0.39988}
-        self.assertEqual(strategy.marketable_limit_price(book, buy_fill, "BUY"), 0.41)
-        self.assertEqual(strategy.marketable_limit_price(book, sell_fill, "SELL"), 0.39)
+        # 對齊到最差 tick（0.41／0.39）之後，再多讓一格 tick 提高成交機率。
+        self.assertEqual(strategy.marketable_limit_price(book, buy_fill, "BUY"), 0.42)
+        self.assertEqual(strategy.marketable_limit_price(book, sell_fill, "SELL"), 0.38)
 
     def test_live_and_simulation_share_decision_price(self):
         book = {"tickSize": 0.01}
@@ -257,7 +258,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pos["side"], "Up")
         self.assertEqual(pos["hedgeSide"], "Down")
 
-    async def test_parallel_legs_only_one_filled_triggers_emergency_unwind(self):
+    async def test_parallel_legs_only_one_filled_retries_failed_leg_then_unwinds(self):
         up, down, fair = self._fair_and_legs()
 
         async def fake_submit_fok(token_id, side, plan, dry_run):
@@ -267,6 +268,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok),
+            patch.object(strategy, "_retry_failed_leg_once", AsyncMock(return_value="not_filled")) as retry,
             patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
         ):
             await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
@@ -275,7 +277,91 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(pos)
         self.assertFalse(pos["hedged"])
         self.assertEqual(pos["side"], "Up")
+        retry.assert_awaited_once_with(None, "Down", True)
         unwind.assert_awaited_once()
+
+    async def test_parallel_legs_retry_success_skips_emergency_unwind(self):
+        up, down, fair = self._fair_and_legs()
+
+        async def fake_submit_fok(token_id, side, plan, dry_run):
+            if plan["side"] == "Up":
+                return "filled", {"orderID": "order-up"}
+            return "not_filled", {}
+
+        with (
+            patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok),
+            patch.object(strategy, "_retry_failed_leg_once", AsyncMock(return_value="filled")) as retry,
+            patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
+        ):
+            await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
+
+        retry.assert_awaited_once_with(None, "Down", True)
+        unwind.assert_not_awaited()
+
+    async def test_parallel_legs_retry_unconfirmed_skips_emergency_unwind(self):
+        # _retry_failed_leg_once 內部（透過 _hedge_position）已經觸發 halt，結果不明——
+        # 這種情況不該再對第一腿送緊急平倉，避免萬一重試那腿其實有成交、變成三邊曝險。
+        up, down, fair = self._fair_and_legs()
+
+        async def fake_submit_fok(token_id, side, plan, dry_run):
+            if plan["side"] == "Up":
+                return "filled", {"orderID": "order-up"}
+            return "not_filled", {}
+
+        with (
+            patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok),
+            patch.object(strategy, "_retry_failed_leg_once", AsyncMock(return_value="unconfirmed")) as retry,
+            patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
+        ):
+            await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
+
+        retry.assert_awaited_once_with(None, "Down", True)
+        unwind.assert_not_awaited()
+
+    async def test_retry_failed_leg_once_hedges_when_fresh_quote_still_locks_profit(self):
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window", "side": "Up", "tokenId": "up-token",
+            "shares": 5.0, "entryPrice": 0.40, "entryLimitPrice": 0.42,
+            "entryRiskNotional": 2.1, "entryRiskFee": 0.1, "entryNotional": 2.0, "entryFee": 0.1,
+            "hedged": False, "dryRun": True,
+        }
+        fresh_book = {"tickSize": 0.01, "minOrderSize": 1,
+                      "asks": [{"price": 0.50, "size": 10}], "bids": []}
+
+        async def fake_submit_fok(token_id, side, plan, dry_run):
+            return "filled", {"orderID": "order-down"}
+
+        with (
+            patch.object(strategy.sim, "_get_book_ws_or_rest", AsyncMock(return_value=fresh_book)),
+            patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok),
+        ):
+            result = await strategy._retry_failed_leg_once(None, "Down", True)
+
+        self.assertEqual(result, "filled")
+        pos = strategy.live_state["position"]
+        self.assertTrue(pos["hedged"])
+        self.assertEqual(pos["hedgeSide"], "Down")
+
+    async def test_retry_failed_leg_once_gives_up_when_fresh_quote_no_longer_locks_profit(self):
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window", "side": "Up", "tokenId": "up-token",
+            "shares": 5.0, "entryPrice": 0.40, "entryLimitPrice": 0.42,
+            "entryRiskNotional": 2.1, "entryRiskFee": 0.1, "entryNotional": 2.0, "entryFee": 0.1,
+            "hedged": False, "dryRun": True,
+        }
+        # 價格已經惡化到跟進場價加總會超過 LOCK_MAX_SUM，重試不該硬鎖這個不划算的價位。
+        expensive_book = {"tickSize": 0.01, "minOrderSize": 1,
+                           "asks": [{"price": 0.95, "size": 10}], "bids": []}
+
+        with (
+            patch.object(strategy.sim, "_get_book_ws_or_rest", AsyncMock(return_value=expensive_book)),
+            patch.object(strategy, "_submit_fok", AsyncMock()) as submit,
+        ):
+            result = await strategy._retry_failed_leg_once(None, "Down", True)
+
+        self.assertEqual(result, "not_filled")
+        submit.assert_not_awaited()
+        self.assertFalse(strategy.live_state["position"]["hedged"])
 
     async def test_parallel_legs_neither_filled_creates_no_position(self):
         up, down, _fair = self._fair_and_legs()
