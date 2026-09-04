@@ -228,6 +228,23 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         pnl_down_wins = strategy._settle_pnl_estimate(pos, "Down")
         self.assertAlmostEqual(pnl_down_wins, 13.565216 - (3.12 + 0.05 + 7.93 + 0.2))
 
+    def test_aggressive_sell_plan_widens_price_beyond_conservative_limit(self):
+        book = {"tickSize": 0.01, "minOrderSize": 1, "bids": [{"price": 0.50, "size": 10}], "asks": []}
+        normal = strategy._sell_plan("Up", book, 5.0)
+        aggressive = strategy._aggressive_sell_plan("Up", book, 5.0)
+        self.assertIsNotNone(normal)
+        self.assertIsNotNone(aggressive)
+        expected = round(normal["limitPrice"] - strategy.EMERGENCY_UNWIND_EXTRA_TICKS * 0.01, 6)
+        self.assertAlmostEqual(aggressive["limitPrice"], expected)
+        self.assertLess(aggressive["limitPrice"], normal["limitPrice"])
+        self.assertAlmostEqual(aggressive["riskNotional"], aggressive["shares"] * aggressive["limitPrice"])
+
+    def test_aggressive_sell_plan_clips_at_tick_floor(self):
+        book = {"tickSize": 0.01, "minOrderSize": 1, "bids": [{"price": 0.05, "size": 1000}], "asks": []}
+        aggressive = strategy._aggressive_sell_plan("Up", book, 1000.0)
+        self.assertIsNotNone(aggressive)
+        self.assertGreaterEqual(aggressive["limitPrice"], 0.01)
+
     # 2026-09：兩腿改成平行送出（見 _execute_direct_pair），不再依序呼叫
     # _enter_position/_hedge_position，改成直接呼叫 _submit_fok，所以下面這幾個測試
     # 改成 mock _submit_fok 本身，涵蓋兩腿都成交／只有一腿成交／兩腿都沒成交三種情況。

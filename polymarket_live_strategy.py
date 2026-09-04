@@ -63,6 +63,11 @@ ORDER_CONFIRM_INTERVAL = max(0.5, float(os.environ.get("POLY_ORDER_CONFIRM_INTER
 # 抓少一點，是刻意在「給結算延遲一次機會」跟「不要卡住正常補鎖利路徑太久」之間取平衡。
 EMERGENCY_UNWIND_RETRY_ATTEMPTS = max(1, int(os.environ.get("POLY_EMERGENCY_UNWIND_RETRY_ATTEMPTS", "2")))
 EMERGENCY_UNWIND_RETRY_INTERVAL = max(0.5, float(os.environ.get("POLY_EMERGENCY_UNWIND_RETRY_INTERVAL", "2.0")))
+# 2026-09：緊急平倉連續兩次都失敗、部位被迫抱到自然結算、整筆本金虧光的真實案例
+# （-$3.28 那筆）——正常補鎖利跟緊急平倉共用同一套「保守限價多讓一格 tick」的定價，
+# 但緊急平倉的目標是「不計代價盡快出場」，不是「盡量拿到好價格」，值得比平常更激進：
+# 在正常保守限價之上，再多讓這麼多格 tick，犧牲一點價格換取更高的立即成交機率。
+EMERGENCY_UNWIND_EXTRA_TICKS = max(0, int(os.environ.get("POLY_EMERGENCY_UNWIND_EXTRA_TICKS", "3")))
 
 # 真實版跟隨模擬版 ASSETS 清單裡的哪一個市場，預設是 BTC 5 分鐘窗口（"btc"）。
 # 2026-09：模擬盤驗證出 15 分鐘／4 小時窗口的訂單簿深度比 5 分鐘深很多（少踩到「兩腿
@@ -330,6 +335,23 @@ def _sell_plan(side: str, book: dict, shares: float) -> dict | None:
     if shares < float(book.get("minOrderSize", 1) or 1) or risk["riskNotional"] < sim.SIM_MIN_ORDER_NOTIONAL_USD:
         return None
     return {"side": side, "book": book, **risk}
+
+
+def _aggressive_sell_plan(side: str, book: dict, shares: float) -> dict | None:
+    """緊急平倉專用：比 _sell_plan 的保守限價再多讓 EMERGENCY_UNWIND_EXTRA_TICKS 格
+    tick，目標是「不計代價盡快出場」，換取更高的立即成交機率。"""
+    plan = _sell_plan(side, book, shares)
+    if not plan or EMERGENCY_UNWIND_EXTRA_TICKS <= 0:
+        return plan
+    tick_value = float(book.get("tickSize", 0.01) or 0.01)
+    tick = Decimal(str(tick_value))
+    price = Decimal(str(plan["limitPrice"])) - tick * EMERGENCY_UNWIND_EXTRA_TICKS
+    price = float(max(tick, min(Decimal("1") - tick, price)))
+    plan = dict(plan)
+    plan["limitPrice"] = price
+    plan["riskNotional"] = plan["shares"] * price
+    plan["fee"] = sim.taker_fee(plan["shares"], price)
+    return plan
 
 
 def _late_direction_plan(
@@ -746,7 +768,7 @@ async def _emergency_unwind(session: aiohttp.ClientSession, reason: str) -> None
         except Exception as exc:
             log.error(f"[LIVE] 緊急退出前無法取得訂單簿：{exc}")
             continue
-        plan = _sell_plan(pos["side"], latest_book, pos["shares"])
+        plan = _aggressive_sell_plan(pos["side"], latest_book, pos["shares"])
         if not plan:
             log.error("[LIVE] 第二腿失敗，且第一腿目前沒有足夠 Bid 可緊急退出")
             continue
