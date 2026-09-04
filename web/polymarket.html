@@ -246,9 +246,11 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
 
   // 跟後端 polymarket_server.py 的 ASSETS 對齊，這裡直接列出來畫分頁籤，不用等第一筆
   // WS 資料回來才有分頁可以按。2026-09 起模擬盤只保留 BTC（樣本數/勝率明顯領先其餘
-  // 資產，見對話紀錄），其餘之後有需要再加回來。
+  // 資產，見對話紀錄），其餘之後有需要再加回來；同時加入 BTC 15m／4h 兩種窗口長度觀察。
   const ASSET_LIST=[
-    {id:'btc',  label:'BTC'},
+    {id:'btc',     label:'BTC'},
+    {id:'btc-15m', label:'BTC 15m'},
+    {id:'btc-4h',  label:'BTC 4h'},
   ];
   const _urlAsset=new URLSearchParams(location.search).get('asset');
   let currentAsset=ASSET_LIST.some(a=>a.id===_urlAsset)?_urlAsset:'btc';

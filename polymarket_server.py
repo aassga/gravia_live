@@ -106,7 +106,7 @@ SIM_MIN_NET_LOCK_PER_SHARE  = 0.01  # 完成配對後至少淨賺 1¢/股
 SIM_MIN_ORDER_NOTIONAL_USD  = 1.0   # 跟實盤一致：單腿成交金額低於這個門檻就不下單（Polymarket 最小下注是 $1，不是 $5）
 SIM_EXIT_EDGE               = 0.02  # 市場可賣價高於模型持有價值 2¢/股時提早退出
 SIM_FAIR_MODEL_WEIGHT       = 0.65  # Binance 波動模型權重；其餘使用市場隱含機率校準
-SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025}
+SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025, "btc-15m": 0.000025, "btc-4h": 0.000025}
 # 股數封頂在「當下看得到的深度」的這個比例。2026-09：實盤好幾次撞到「模擬盤跟實盤在
 # 同一秒看到同一個機會，模擬盤保證吃得到、實盤卻因為深度不夠被拒」——這不是 bug，是
 # 紙上模擬（吃剛看到的快照，保證成交）跟真實下單（要跟其他真人搶同一份流動性，中間
@@ -137,8 +137,15 @@ SIM_DB_PATH = os.path.join(BASE_DIR, "polymarket_sim.sqlite3")
 #    逐一探測 slug 驗證過，其餘主流幣如 ADA/AVAX/LINK/DOT 都沒有對應市場，不是列表不全），
 #    但 2026-09 起模擬盤只保留 BTC——BTC 是唯一累積夠樣本數的（37 筆、97.3% 勝率），
 #    其餘幾個樣本太少（1~6 筆）沒有參考價值，先專注在 BTC，其餘之後有需要再加回來。
+#    同一個資產也可以同時追蹤不同窗口長度——探測過 BTC 除了 5m 之外還有 15m／4h
+#    的漲跌市場（1m/1h/1d 沒有），且訂單簿深度明顯比 5m 深很多（15m ~55k 股、
+#    4h ~23k 股，5m 通常只有幾十到幾百股），值得先加進模擬盤觀察是否值得接進實盤。
+#    id 要唯一（拿來當 markets_state／AB_VARIANTS 的 key），windowSeconds 沒填的話
+#    預設是 WINDOW_SECONDS（5 分鐘）。
 ASSETS = [
-    {"id": "btc",  "label": "BTC",  "slugPrefix": "btc-updown-5m-",  "binanceSymbol": "BTCUSDT"},
+    {"id": "btc",     "label": "BTC",      "slugPrefix": "btc-updown-5m-",  "binanceSymbol": "BTCUSDT", "windowSeconds": 300},
+    {"id": "btc-15m", "label": "BTC 15m",  "slugPrefix": "btc-updown-15m-", "binanceSymbol": "BTCUSDT", "windowSeconds": 900},
+    {"id": "btc-4h",  "label": "BTC 4h",   "slugPrefix": "btc-updown-4h-",  "binanceSymbol": "BTCUSDT", "windowSeconds": 14400},
 ]
 
 # ── A/B 門檻測試：每個資產各自跑同一套四組門檻設定，彼此獨立記帳，方便直接比較
@@ -579,20 +586,23 @@ def persist_quote(asset_id: str, fair: dict | None) -> None:
 
 # ── Polymarket API ─────────────────────────────────────────────────────────
 
-WINDOW_SECONDS = 300  # 5 分鐘一個窗口
+WINDOW_SECONDS = 300  # 預設窗口長度（5 分鐘），沒在 asset 設定裡指定 windowSeconds 時使用
 
-async def fetch_active_market(session: aiohttp.ClientSession, slug_prefix: str) -> dict | None:
-    """直接用真實時間算出目前這個 5 分鐘窗口的 slug 去查，不掃描 Gamma 的市場列表。
+async def fetch_active_market(
+    session: aiohttp.ClientSession, slug_prefix: str, window_seconds: int = WINDOW_SECONDS
+) -> dict | None:
+    """直接用真實時間算出目前這個窗口的 slug 去查，不掃描 Gamma 的市場列表。
 
     原本用 active=true&closed=false 篩選、依 startDate 排序去找，結果發現不可靠：
     Polymarket 會把未來一整天的窗口都預先建好（全部也是 active=true），
     也有很多從很久以前就從沒被正確標記 closed 的舊窗口卡在列表裡，
     不管排序方向，抓到的都不是「現在正在進行」的那一個。
     直接用時間算 slug（格式：<slug_prefix><窗口開始時間的 unix 秒>）最準，
-    這套邏輯跟資產無關，只是帶入的 slug_prefix 不同。
+    這套邏輯跟資產無關，只是帶入的 slug_prefix／window_seconds 不同
+    （2026-09 起同一個資產也可能同時追蹤好幾種窗口長度，例如 BTC 的 5m/15m/4h）。
     """
-    window_start = int(real_now() // WINDOW_SECONDS) * WINDOW_SECONDS
-    for start in (window_start, window_start - WINDOW_SECONDS):  # 抓不到當前窗口就退回上一個（剛好在交界處時的備援）
+    window_start = int(real_now() // window_seconds) * window_seconds
+    for start in (window_start, window_start - window_seconds):  # 抓不到當前窗口就退回上一個（剛好在交界處時的備援）
         slug = f"{slug_prefix}{start}"
         m = await fetch_market_by_slug(session, slug)
         if m and not m.get("closed", True):
@@ -1422,7 +1432,9 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     # 不要用本機時鐘去推算「是不是該換下一輪」——本機時鐘不見得準，
     # 但 Polymarket 自己回傳的 active/closed 狀態一定是對的，直接拿來當真相來源。
     cur = ms["market"]
-    new_market = await fetch_active_market(session, asset["slugPrefix"])
+    new_market = await fetch_active_market(
+        session, asset["slugPrefix"], asset.get("windowSeconds", WINDOW_SECONDS)
+    )
 
     if new_market and (cur is None or new_market["slug"] != cur["slug"]):
         if cur is not None:
