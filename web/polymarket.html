@@ -244,16 +244,11 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     return m+'m'+String(s).padStart(2,'0')+'s';
   };
 
-  // 7 個資產都跑同一套邏輯（見 polymarket_server.py 的 ASSETS），這裡直接列出來畫分頁籤，
-  // 不用等第一筆 WS 資料回來才有分頁可以按。
+  // 跟後端 polymarket_server.py 的 ASSETS 對齊，這裡直接列出來畫分頁籤，不用等第一筆
+  // WS 資料回來才有分頁可以按。2026-09 起模擬盤只保留 BTC（樣本數/勝率明顯領先其餘
+  // 資產，見對話紀錄），其餘之後有需要再加回來。
   const ASSET_LIST=[
     {id:'btc',  label:'BTC'},
-    {id:'eth',  label:'ETH'},
-    {id:'sol',  label:'SOL'},
-    {id:'xrp',  label:'XRP'},
-    {id:'doge', label:'DOGE'},
-    {id:'bnb',  label:'BNB'},
-    {id:'hype', label:'HYPE'},
   ];
   const _urlAsset=new URLSearchParams(location.search).get('asset');
   let currentAsset=ASSET_LIST.some(a=>a.id===_urlAsset)?_urlAsset:'btc';

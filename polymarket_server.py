@@ -133,16 +133,12 @@ LATE_DIRECTION_MIN_DELTA_PCT       = 0.02  # 現價相對開盤價至少要偏�
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SIM_DB_PATH = os.path.join(BASE_DIR, "polymarket_sim.sqlite3")
 
-# ── 追蹤的資產：Polymarket 目前總共只有這 7 個「5 分鐘漲跌」市場（直接對 Gamma API
-#    逐一探測 slug 驗證過，其餘主流幣如 ADA/AVAX/LINK/DOT 都沒有對應市場，不是列表不全）。
+# ── 追蹤的資產：Polymarket 目前總共有 7 個「5 分鐘漲跌」市場（直接對 Gamma API
+#    逐一探測 slug 驗證過，其餘主流幣如 ADA/AVAX/LINK/DOT 都沒有對應市場，不是列表不全），
+#    但 2026-09 起模擬盤只保留 BTC——BTC 是唯一累積夠樣本數的（37 筆、97.3% 勝率），
+#    其餘幾個樣本太少（1~6 筆）沒有參考價值，先專注在 BTC，其餘之後有需要再加回來。
 ASSETS = [
     {"id": "btc",  "label": "BTC",  "slugPrefix": "btc-updown-5m-",  "binanceSymbol": "BTCUSDT"},
-    {"id": "eth",  "label": "ETH",  "slugPrefix": "eth-updown-5m-",  "binanceSymbol": "ETHUSDT"},
-    {"id": "sol",  "label": "SOL",  "slugPrefix": "sol-updown-5m-",  "binanceSymbol": "SOLUSDT"},
-    {"id": "xrp",  "label": "XRP",  "slugPrefix": "xrp-updown-5m-",  "binanceSymbol": "XRPUSDT"},
-    {"id": "doge", "label": "DOGE", "slugPrefix": "doge-updown-5m-", "binanceSymbol": "DOGEUSDT"},
-    {"id": "bnb",  "label": "BNB",  "slugPrefix": "bnb-updown-5m-",  "binanceSymbol": "BNBUSDT"},
-    {"id": "hype", "label": "HYPE", "slugPrefix": "hype-updown-5m-", "binanceSymbol": "HYPEUSDT"},
 ]
 
 # ── A/B 門檻測試：每個資產各自跑同一套四組門檻設定，彼此獨立記帳，方便直接比較
