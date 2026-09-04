@@ -1,8 +1,6 @@
 import os
 import tempfile
-import time
 import unittest
-from collections import deque
 
 import polymarket_server as sim
 
@@ -24,9 +22,6 @@ class PolymarketSimulationTests(unittest.TestCase):
             market["downBook"] = {"bids": [], "asks": []}
             market["windowOpenSpotPrice"] = None
             market["spotPrice"] = None
-        # 波動速度防護的歷史紀錄是模組層級的全域狀態，不清掉的話，不同測試案例的報價
-        # 快照會被誤判成「同一段時間內的劇烈波動」，互相污染。
-        sim._ask_price_history.clear()
 
     def tearDown(self):
         if sim._sim_db is not None:
@@ -81,30 +76,6 @@ class PolymarketSimulationTests(unittest.TestCase):
         cash, portfolio = sim.compute_cash_and_portfolio("btc-main")
         self.assertGreater(cash, 0)
         self.assertAlmostEqual(portfolio, 100.0 + position["lockedPnl"])
-
-    def test_velocity_guard_blocks_entry_after_sudden_price_jump(self):
-        # 真實案例：兩腿平行送出，一腿意外成交、另一腿沒接到；重試時發現對邊價格在
-        # 不到 1 秒內從 $0.68 衝到 $0.97，緊急平倉又剛好碰到瞬間流動性真空、連兩次都
-        # 失敗，部位被迫抱到結算虧光。與其冒險進場，偵測到報價正在劇烈波動時應該
-        # 直接跳過這次鎖利機會。
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
-        self.assertFalse(sim.velocity_guard_tripped("btc", up_book, down_book))
-
-        jumped_down_book = {"tickSize": 0.01, "asks": [{"price": 0.68, "size": 1_000.0}], "bids": []}
-        self.assertTrue(sim.velocity_guard_tripped("btc", up_book, jumped_down_book))
-        self.assertFalse(sim._try_direct_pair("btc-main", "btc-window", up_book, jumped_down_book))
-        self.assertIsNone(sim.ab_states["btc-main"]["position"])
-
-    def test_velocity_guard_stale_history_does_not_block_entry(self):
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.68, "size": 1_000.0}], "bids": []}
-        # 手動塞一筆很久以前（超過偵測窗口）的舊報價，不該影響現在的判斷。
-        old_ts = time.monotonic() - sim.PRICE_VELOCITY_WINDOW_SECONDS - 10
-        sim._ask_price_history["btc"] = {
-            "up": deque([(old_ts, 0.10)]), "down": deque([(old_ts, 0.10)]),
-        }
-        self.assertFalse(sim.velocity_guard_tripped("btc", up_book, down_book))
 
     def test_direct_pair_rejects_when_below_real_min_order_shares(self):
         # Polymarket 真正的下限是股數（查證過真實 API 是 5 股），不是金額——就算金額、

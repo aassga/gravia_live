@@ -880,42 +880,6 @@ def log_price_sum_diagnostic(tag: str, up_book: dict, down_book: dict, lock_max_
     )
 
 
-# ── 波動速度防護（volatility guard，2026-09）──────────────────────────────
-# 真實案例：兩腿平行送出，一腿意外用好價格成交（15.6 股 @ $0.10），另一腿沒接到；
-# 重試時發現對邊價格在不到 1 秒內從 $0.68 衝到 $0.97，代表行情正在劇烈翻轉；緊急
-# 平倉連兩次都因為完全沒有 Bid 可賣而失敗（不是價格不夠好，是那個瞬間根本沒有對手
-# 盤），部位被迫抱到結算，虧光整筆本金。重試/緊急平倉的讓價、重試機制都無法解決
-# 「瞬間流動性真空」這種情況——與其冒險進場、賭運氣不會撞上這種瞬間，不如在偵測到
-# 最近報價正在劇烈波動時，直接跳過這次鎖利進場機會。
-PRICE_VELOCITY_WINDOW_SECONDS = 2.0  # 抓最近這麼多秒的報價變化來判斷是不是在劇烈波動
-PRICE_VELOCITY_MAX_MOVE       = 0.05  # 這段時間內任一邊最佳賣價變動超過這個值，視為劇烈波動
-_ask_price_history: dict = {}  # asset_id -> {"up": deque[(monotonic_ts, price)], "down": deque[...]}
-
-
-def velocity_guard_tripped(asset_id: str, up_book: dict, down_book: dict) -> bool:
-    """回傳 True 代表最近 PRICE_VELOCITY_WINDOW_SECONDS 秒內，Up 或 Down 任一邊的
-    最佳賣價變動超過 PRICE_VELOCITY_MAX_MOVE——這種時候先跳過鎖利進場，不要冒險。
-    這裡只記錄／檢查，不會影響已經持有的部位（緊急平倉／補鎖利邏輯不受這個防護
-    限制，那些是已經在場上要盡快處理，不是要不要新進場的問題）。"""
-    now = time.monotonic()
-    hist = _ask_price_history.setdefault(asset_id, {"up": deque(), "down": deque()})
-    tripped = False
-    for label, book in (("up", up_book), ("down", down_book)):
-        asks = book.get("asks") or []
-        ask = float(asks[0]["price"]) if asks else None
-        dq = hist[label]
-        if ask is not None:
-            dq.append((now, ask))
-        cutoff = now - PRICE_VELOCITY_WINDOW_SECONDS
-        while dq and dq[0][0] < cutoff:
-            dq.popleft()
-        if len(dq) >= 2:
-            prices = [p for _, p in dq]
-            if max(prices) - min(prices) > PRICE_VELOCITY_MAX_MOVE:
-                tripped = True
-    return tripped
-
-
 def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
     """先檢查兩腿此刻是否可直接成交並鎖住淨利，這才是進場即無方向曝險的套利。
 
@@ -924,8 +888,6 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     真實下單時因為深度已經被搶走而被拒。封頂之後如果連目標股數都吃不滿，才照原本
     邏輯整筆視為不可行（simulate_buy_fill 深度不足回傳 None）。"""
     variant = AB_VARIANT_BY_ID[variant_id]
-    if velocity_guard_tripped(variant["assetId"], up_book, down_book):
-        return False
     shares, budget = _target_order_size(variant_id)
     if shares <= 0:
         return False

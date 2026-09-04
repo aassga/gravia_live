@@ -416,8 +416,6 @@ def _target_pair_order(cash: float) -> tuple[float, float]:
 
 
 def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: float) -> tuple[dict, dict] | None:
-    if sim.velocity_guard_tripped(LIVE_ASSET_ID, up_book, down_book):
-        return None
     up = _buy_plan("Up", up_book, shares)
     down = _buy_plan("Down", down_book, shares)
     if not up or not down:

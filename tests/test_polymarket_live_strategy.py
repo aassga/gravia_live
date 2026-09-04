@@ -24,10 +24,6 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         strategy.STRATEGY_ARMED = False
         strategy.REAL_EXECUTION_ENABLED = False
 
-        # 波動速度防護的歷史紀錄是模組層級的全域狀態，不清掉的話，不同測試案例的報價
-        # 快照會被誤判成「同一段時間內的劇烈波動」，互相污染。
-        strategy.sim._ask_price_history.clear()
-
     def tearDown(self):
         strategy.STATE_FILE = self._old_state_file
         self._tmpdir.cleanup()
