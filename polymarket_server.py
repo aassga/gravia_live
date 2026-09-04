@@ -653,6 +653,93 @@ async def fetch_klines(session: aiohttp.ClientSession, symbol: str, limit: int =
             for k in raw
         ]
 
+# ── Binance 期貨即時報價（WS，2026-09）─────────────────────────────────────
+# 原本 spotPrice 只靠 REST 每 3 秒 poll 一次 Binance，理論價（theo）最多可能落後
+# 真實行情快 3 秒——這段時間 Polymarket 訂單簿可能已經先反應了，我們卻還在用
+# 舊的現貨價算公平機率，容易被抓到「報價沒跟上」的逆選擇機會（做市原型觀察到
+# 的虧損就是這個模式）。額外開一條 Binance WS 連線，用 bookTicker（每次最佳
+# 買賣價變動就推播，通常是秒等級以下）即時更新，theo 計算時永遠讀最新報價，
+# 不用等下一輪 3 秒 poll 才看得到。斷線時退回 REST poll 到的價格（見
+# get_binance_ws_price 的 max_age 判斷），不會整段沒有報價可用。
+_binance_ws_price: dict = {}  # symbol -> {"price": float, "at": monotonic 時間}
+
+
+async def binance_ws_loop() -> None:
+    symbols = sorted({a["binanceSymbol"] for a in ASSETS})
+    if not symbols:
+        return
+    stream = "/".join(f"{s.lower()}@bookTicker" for s in symbols)
+    url = f"wss://fstream.binance.com/stream?streams={stream}"
+    backoff_idx = 0
+    while True:
+        try:
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                log.info(f"[Binance-WS] 已連線，訂閱 {len(symbols)} 個商品即時報價")
+                backoff_idx = 0
+                async for raw in ws:
+                    try:
+                        msg = json.loads(raw)
+                        data = msg.get("data") or msg
+                        symbol, bid, ask = data.get("s"), data.get("b"), data.get("a")
+                        if symbol and bid and ask:
+                            _binance_ws_price[symbol] = {
+                                "price": (float(bid) + float(ask)) / 2,
+                                "at": time.monotonic(),
+                            }
+                            _on_binance_price_tick(symbol)
+                    except Exception:
+                        continue
+        except Exception as exc:
+            log.warning(f"[Binance-WS] 連線失敗，稍後重試（期間退回 REST 報價）：{exc}")
+        backoff_idx = min(backoff_idx + 1, len(WS_RECONNECT_BACKOFF) - 1)
+        await asyncio.sleep(WS_RECONNECT_BACKOFF[backoff_idx])
+
+
+def get_binance_ws_price(symbol: str, max_age_seconds: float = 5.0) -> float | None:
+    """回傳 WS 即時報價；太舊（連線斷過還沒重連上）就不採用，讓呼叫端退回 REST 報價。"""
+    entry = _binance_ws_price.get(symbol)
+    if not entry or time.monotonic() - entry["at"] > max_age_seconds:
+        return None
+    return entry["price"]
+
+
+def _on_binance_price_tick(symbol: str) -> None:
+    """Binance 現貨價一有變動就立刻重算 theo、重跑鎖利判斷與做市原型（純記憶體運算，
+    沒有 I/O，很便宜，可以跑得比 3 秒輪詢頻繁很多）。跟 _on_ws_price_tick（Polymarket
+    訂單簿一有變動就重跑）是同一個精神，差別是這裡的觸發源是 Binance 報價本身有變化
+    ——舊版即使訂閱了 Binance WS，也只在 3 秒 poll 週期重算 theo，等於報價早就是新的、
+    theo 卻還是舊的；這裡改成報價一變就重算，theo 不再是整段窗口內最多落後 3 秒的
+    舊資料。"""
+    price = get_binance_ws_price(symbol)
+    if price is None:
+        return
+    for asset in ASSETS:
+        if asset["binanceSymbol"] != symbol:
+            continue
+        aid = asset["id"]
+        ms = markets_state[aid]
+        if not ms.get("market"):
+            continue
+        ms["spotPrice"] = price
+        fair = estimate_fair_up(aid)
+        if not fair:
+            continue
+        ms["fair"] = fair
+        slug = ms["market"]["slug"]
+        remaining_seconds = (
+            None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
+        )
+        up_book, down_book = ms.get("upBook"), ms.get("downBook")
+        if up_book and down_book:
+            for variant_id, variant in AB_VARIANT_BY_ID.items():
+                if variant["assetId"] == aid:
+                    simulate_trading(
+                        variant_id, slug, up_book, down_book, remaining_seconds, fair,
+                        allow_early_exit=False,
+                    )
+        _mm_step(aid, ms, remaining_seconds, fair)
+
+
 async def fetch_outcome(session: aiohttp.ClientSession, slug: str) -> str | None:
     """查這個窗口的結算結果，還沒結算完成回傳 None"""
     m = await fetch_market_by_slug(session, slug)
@@ -1693,7 +1780,11 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     ms["upBook"] = up_book
     ms["downBook"] = down_book
     if not isinstance(spot, Exception):
-        ms["spotPrice"] = spot["price"]
+        # 現貨價優先採用 WS 即時報價（比 REST poll 新鮮很多），24h 漲跌%沒有 WS 來源，
+        # 一律用 REST 這份——WS 斷線或還沒收到報價時，get_binance_ws_price 回傳 None，
+        # 自動退回這輪 REST poll 到的價格。
+        ws_price = get_binance_ws_price(asset["binanceSymbol"])
+        ms["spotPrice"] = ws_price if ws_price is not None else spot["price"]
         ms["spotChangePct"] = spot["changePct"]
         if ms["windowOpenSpotPrice"] is None:
             ms["windowOpenSpotPrice"] = spot["price"]
@@ -1899,7 +1990,7 @@ async def main():
         log.info("  ⚠ --with-live 已啟用：會在這個進程裡跑真實下單邏輯（仍受 .env 雙開關控制）")
     log.info("=" * 50)
 
-    tasks = [data_fetcher(), broadcast_loop(), market_ws_loop()]
+    tasks = [data_fetcher(), broadcast_loop(), market_ws_loop(), binance_ws_loop()]
     if WITH_LIVE:
         import polymarket_live_strategy as live_strategy
         tasks.append(live_strategy.run_embedded())
