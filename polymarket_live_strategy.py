@@ -64,15 +64,24 @@ ORDER_CONFIRM_INTERVAL = max(0.5, float(os.environ.get("POLY_ORDER_CONFIRM_INTER
 EMERGENCY_UNWIND_RETRY_ATTEMPTS = max(1, int(os.environ.get("POLY_EMERGENCY_UNWIND_RETRY_ATTEMPTS", "2")))
 EMERGENCY_UNWIND_RETRY_INTERVAL = max(0.5, float(os.environ.get("POLY_EMERGENCY_UNWIND_RETRY_INTERVAL", "2.0")))
 
-# 真實版套用模擬版 A/B 測試裡的「BTC 晚進場方向性」這組（sim.AB_VARIANT_BY_ID["btc-late-direction"]）。
-# 這裡引用 AB_VARIANT_BY_ID 而不是直接寫死數字，是為了跟模擬版共用同一個真實來源，模擬版調整
-# 這組門檻時真實版會自動跟著同步。
+# 真實版跟隨模擬版 ASSETS 清單裡的哪一個市場，預設是 BTC 5 分鐘窗口（"btc"）。
+# 2026-09：模擬盤驗證出 15 分鐘／4 小時窗口的訂單簿深度比 5 分鐘深很多（少踩到「兩腿
+# 平行送出、一腿沒接到」這個結構性風險），先讓真實版可以指到 sim.ASSETS 裡任何一個
+# id（例如 "btc-15m"），評估其他窗口在真實下單時表不表現得更好，不用另外複製一份程式。
+LIVE_ASSET_ID = os.environ.get("POLY_LIVE_ASSET_ID", "btc")
+if LIVE_ASSET_ID != "btc":
+    sim.state = sim.markets_state[LIVE_ASSET_ID]  # 重新指向對應資產的市場狀態（見 sim.state 的定義）
+
+# 真實版套用模擬版 A/B 測試裡「LIVE_ASSET_ID 晚進場方向性」這組
+# （sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-late-direction"]）。這裡引用 AB_VARIANT_BY_ID
+# 而不是直接寫死數字，是為了跟模擬版共用同一個真實來源，模擬版調整這組門檻時真實版會
+# 自動跟著同步。
 # 2026-09：從「btc-main」（鎖利優先，找不到就靠公平價模型賭單邊）改成「btc-late-direction」
 # （鎖利優先＋找不到鎖利時改成只在窗口剩不到 10 秒、現價已明顯偏離開盤價時才賭方向）——
 # 模擬盤驗證下來後者的方向性單邊勝率遠高於前者（91% vs 0%），詳見對話紀錄。
 # 鎖利（_direct_pair_plans／_execute_direct_pair）邏輯完全沒變，只換掉找不到鎖利時的備案。
-_LIVE_VARIANT = sim.AB_VARIANT_BY_ID["btc-late-direction"]
-# 鎖利門檻改回跟 btc-late-direction 這組自己的 lockMaxSum 一致（0.95），不再借用
+_LIVE_VARIANT = sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-late-direction"]
+# 鎖利門檻改回跟 <資產>-late-direction 這組自己的 lockMaxSum 一致（0.95），不再借用
 # btc-loose 的 0.98——這樣實盤才是單一模擬變體的精確複製，不會變成混用兩組門檻、
 # 模擬盤沒有對應組合可驗證的組合。
 LOCK_MAX_SUM = _LIVE_VARIANT["lockMaxSum"]
@@ -1068,7 +1077,7 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
         sim.state["downPrice"] = (down_book["bids"][0]["price"] + down_book["asks"][0]["price"]) / 2
     slug = market["slug"]
     remaining = max(0.0, sim.state["windowEndsAt"] / 1000 - sim.real_now())
-    fair = sim.estimate_fair_up("btc")
+    fair = sim.estimate_fair_up(LIVE_ASSET_ID)
     _set_quote_status(source_for_status)
 
     if decision_lock.locked() or _ws_action_in_flight["v"]:
@@ -1188,7 +1197,7 @@ def _log_startup_banner(mode: str) -> None:
     )
     log.info(f"  pair budget={STAKE_PCT:.1f}% · hard cap=${MAX_PAIR_BUDGET_USD:.2f}")
     log.info(f"  cash reserve=${MIN_CASH_RESERVE_USD:.2f} · action cooldown={ACTION_COOLDOWN_SECONDS:.0f}s")
-    log.info(f"  lock sum <= ${LOCK_MAX_SUM}（跟隨 btc-late-direction）　net lock/share>={sim.SIM_MIN_NET_LOCK_PER_SHARE:.3f}")
+    log.info(f"  lock sum <= ${LOCK_MAX_SUM}（跟隨 {LIVE_ASSET_ID}-late-direction）　net lock/share>={sim.SIM_MIN_NET_LOCK_PER_SHARE:.3f}")
     log.info(
         f"  找不到鎖利時備案＝晚進場方向性：剩餘 {sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
         f"{sim.LATE_DIRECTION_WINDOW_SECONDS:.0f}s、偏移開盤價>={sim.LATE_DIRECTION_MIN_DELTA_PCT:.2f}%、"
@@ -1220,7 +1229,10 @@ async def strategy_loop() -> None:
         while True:
             try:
                 cur = sim.state["market"]
-                new_market = await sim.fetch_active_market(session, "btc-updown-5m-")
+                _asset_cfg = next(a for a in sim.ASSETS if a["id"] == LIVE_ASSET_ID)
+                new_market = await sim.fetch_active_market(
+                    session, _asset_cfg["slugPrefix"], _asset_cfg.get("windowSeconds", sim.WINDOW_SECONDS)
+                )
                 if new_market and (cur is None or new_market["slug"] != cur["slug"]):
                     if cur is not None:
                         queue_settlement(cur["slug"])
@@ -1240,7 +1252,7 @@ async def strategy_loop() -> None:
                     if up_id and down_id:
                         sim.state["upTokenId"] = up_id
                         sim.state["downTokenId"] = down_id
-                        await sim._ws_set_wanted_tokens("btc", {up_id, down_id})
+                        await sim._ws_set_wanted_tokens(LIVE_ASSET_ID, {up_id, down_id})
                         await asyncio.gather(
                             sim._ws_ensure_meta(session, up_id),
                             sim._ws_ensure_meta(session, down_id),
@@ -1273,7 +1285,7 @@ async def strategy_loop() -> None:
                             sim.state["klines"] = klines
 
                         remaining = max(0.0, sim.state["windowEndsAt"] / 1000 - sim.real_now())
-                        fair = sim.estimate_fair_up("btc")
+                        fair = sim.estimate_fair_up(LIVE_ASSET_ID)
                         if not isinstance(up_book, Exception) and not isinstance(down_book, Exception):
                             source = (
                                 "websocket"
