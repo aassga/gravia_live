@@ -1102,10 +1102,17 @@ def queue_settlement(slug: str) -> None:
 # 驗證「方向與風控合不合理」，不是精確的獲利預測。
 # 也刻意只在記憶體裡跑（不進 SQLite），重啟就歸零——先驗證想法，之後真的要留存
 # 再加持久化。
-SIM_MM_HALF_SPREAD            = 0.015  # 掛單價距離 theo 的半價差
+SIM_MM_HALF_SPREAD            = 0.02   # 掛單價距離 theo 的半價差
 SIM_MM_QUOTE_SIZE             = 5.0    # 每次判定「被吃到」時模擬成交的股數（固定量，不做隊列/深度建模）
 SIM_MM_MAX_INVENTORY_SHARES   = 50.0   # 單一窗口內，單邊庫存超過這個上限就不再往同方向加碼
-SIM_MM_SKEW_FACTOR            = 0.02   # 庫存失衡時，價格往回拉的力道（每 1 股淨庫存差拉多少價）
+SIM_MM_MAX_NET_INVENTORY_SHARES = 15.0 # 淨曝險（|Up庫存-Down庫存|）超過這個上限，往同方向加碼的
+                                        # 那一邊直接停止掛單——2026-09：v1 只限制單邊各自的上限，
+                                        # 結果一個窗口內來回被吃 149 次、淨累積出 25 股方向性缺口，
+                                        # 剛好遇到真實行情往那個方向走，單筆虧了 $64.3。單邊上限
+                                        # 沒辦法擋住這種「來回小額累積出大缺口」，要另外管淨曝險。
+SIM_MM_SKEW_FACTOR            = 0.004  # 庫存失衡時，價格往回拉的力道（每 1 股淨庫存差拉多少價）。
+                                        # 原本 0.02——25 股差就等於拉動 0.5 元、整個機率範圍的一半，
+                                        # 報價還沒發揮修正作用就先被上下限夾住，形同沒用，調小 5 倍。
 SIM_MM_STOP_QUOTING_REMAINING = 15.0   # 窗口剩不到這個秒數就停止掛新單（逆選擇風險最高的時候，
                                         # 跟之前幾筆真實虧損發生的時間點對齊）
 
@@ -1141,6 +1148,18 @@ def _mm_clip_and_round(price: float, tick_value: float, rounding) -> float:
 
 def _mm_try_fill(mm: dict, side: str, direction: str, quote_price: float, book: dict, size: float) -> None:
     inv_key, cost_key = ("inventoryUp", "costUp") if side == "Up" else ("inventoryDown", "costDown")
+
+    # 買進 Up／賣出 Down 會讓淨曝險（Up庫存-Down庫存）變大；賣出 Up／買進 Down 讓它變小。
+    # 2026-09：v1 只限制單邊各自的庫存上限，結果一個窗口內來回被吃 149 次、淨累積出
+    # 25 股方向性缺口，剛好遇到真實行情往那個方向走，單筆虧了 $64.3——單邊上限擋不住
+    # 「來回小額累積出大淨缺口」，這裡改成直接管淨曝險：往同方向繼續加碼會超過上限就
+    # 不成交；往回拉近淨曝險（風險在降低）的方向永遠放行。
+    net_delta_sign = 1 if (direction == "bid") == (side == "Up") else -1
+    net = mm["inventoryUp"] - mm["inventoryDown"]
+    room = SIM_MM_MAX_NET_INVENTORY_SHARES - net_delta_sign * net
+    if room <= 0:
+        return
+
     if direction == "bid":
         asks = book.get("asks") or []
         if not asks:
@@ -1148,7 +1167,9 @@ def _mm_try_fill(mm: dict, side: str, direction: str, quote_price: float, book: 
         best_ask = min(float(a["price"]) for a in asks)
         if best_ask > quote_price or mm[inv_key] >= SIM_MM_MAX_INVENTORY_SHARES:
             return
-        fill_size = min(size, SIM_MM_MAX_INVENTORY_SHARES - mm[inv_key])
+        fill_size = min(size, SIM_MM_MAX_INVENTORY_SHARES - mm[inv_key], room)
+        if fill_size <= 0:
+            return
         mm[inv_key] += fill_size
         mm[cost_key] += fill_size * quote_price
         mm["fillsCount"] += 1
@@ -1159,7 +1180,7 @@ def _mm_try_fill(mm: dict, side: str, direction: str, quote_price: float, book: 
         best_bid = max(float(b["price"]) for b in bids)
         if best_bid < quote_price:
             return
-        fill_size = min(size, mm[inv_key])  # v1 只賣手上真的有的庫存，不做放空
+        fill_size = min(size, mm[inv_key], room)  # v1 只賣手上真的有的庫存，不做放空
         if fill_size <= 0:
             return
         avg_cost = mm[cost_key] / mm[inv_key] if mm[inv_key] > 0 else 0.0
