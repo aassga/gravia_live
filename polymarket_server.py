@@ -704,10 +704,10 @@ def get_binance_ws_price(symbol: str, max_age_seconds: float = 5.0) -> float | N
 
 
 def _on_binance_price_tick(symbol: str) -> None:
-    """Binance 現貨價一有變動就立刻重算 theo、重跑鎖利判斷與做市原型（純記憶體運算，
-    沒有 I/O，很便宜，可以跑得比 3 秒輪詢頻繁很多）。跟 _on_ws_price_tick（Polymarket
-    訂單簿一有變動就重跑）是同一個精神，差別是這裡的觸發源是 Binance 報價本身有變化
-    ——舊版即使訂閱了 Binance WS，也只在 3 秒 poll 週期重算 theo，等於報價早就是新的、
+    """Binance 現貨價一有變動就立刻重算 theo、重跑鎖利判斷（純記憶體運算，沒有 I/O，
+    很便宜，可以跑得比 3 秒輪詢頻繁很多）。跟 _on_ws_price_tick（Polymarket 訂單簿
+    一有變動就重跑）是同一個精神，差別是這裡的觸發源是 Binance 報價本身有變化——
+    舊版即使訂閱了 Binance WS，也只在 3 秒 poll 週期重算 theo，等於報價早就是新的、
     theo 卻還是舊的；這裡改成報價一變就重算，theo 不再是整段窗口內最多落後 3 秒的
     舊資料。"""
     price = get_binance_ws_price(symbol)
@@ -737,7 +737,6 @@ def _on_binance_price_tick(symbol: str) -> None:
                         variant_id, slug, up_book, down_book, remaining_seconds, fair,
                         allow_early_exit=False,
                     )
-        _mm_step(aid, ms, remaining_seconds, fair)
 
 
 async def fetch_outcome(session: aiohttp.ClientSession, slug: str) -> str | None:
@@ -1176,220 +1175,6 @@ def queue_settlement(slug: str) -> None:
             st["position"] = None
     save_sim_state()
 
-# ── 做市原型（market making prototype，2026-09）─────────────────────────────
-# 現有的鎖利／晚進場邏輯全部是 taker：兩腿都要主動送單去吃別人掛的量，先天要跟真人
-# 搶時間。這裡改試反過來——自己在 Up/Down 兩邊掛雙邊報價（圍繞理論價 theo 留一點
-# 價差），等別人主動來吃，不用跟任何人搶快，代價是要承擔「報價沒跟上行情就被巴」
-# 的逆選擇風險。
-#
-# 只跑在模擬盤，不接真實下單。沒有真的把單掛到 Polymarket 上，是用「真實訂單簿的
-# 最佳買/賣價有沒有穿過我們的報價」去逆推「假設掛在那裡，這一輪會不會被吃到」——
-# 這個近似會高估成交率：忽略了隊列優先權（真實情況同一個價位，我們前面可能已經
-# 排了別人的量，不一定真的排得到我們），所以這裡量到的獲利要打折看待，比較適合
-# 驗證「方向與風控合不合理」，不是精確的獲利預測。
-# 也刻意只在記憶體裡跑（不進 SQLite），重啟就歸零——先驗證想法，之後真的要留存
-# 再加持久化。
-SIM_MM_HALF_SPREAD            = 0.02   # 掛單價距離 theo 的半價差
-SIM_MM_QUOTE_SIZE             = 5.0    # 每次判定「被吃到」時模擬成交的股數（固定量，不做隊列/深度建模）
-SIM_MM_MAX_INVENTORY_SHARES   = 50.0   # 單一窗口內，單邊庫存超過這個上限就不再往同方向加碼
-SIM_MM_MAX_NET_INVENTORY_SHARES = 15.0 # 淨曝險（|Up庫存-Down庫存|）超過這個上限，往同方向加碼的
-                                        # 那一邊直接停止掛單——2026-09：v1 只限制單邊各自的上限，
-                                        # 結果一個窗口內來回被吃 149 次、淨累積出 25 股方向性缺口，
-                                        # 剛好遇到真實行情往那個方向走，單筆虧了 $64.3。單邊上限
-                                        # 沒辦法擋住這種「來回小額累積出大缺口」，要另外管淨曝險。
-SIM_MM_SKEW_FACTOR            = 0.004  # 庫存失衡時，價格往回拉的力道（每 1 股淨庫存差拉多少價）。
-                                        # 原本 0.02——25 股差就等於拉動 0.5 元、整個機率範圍的一半，
-                                        # 報價還沒發揮修正作用就先被上下限夾住，形同沒用，調小 5 倍。
-SIM_MM_STOP_QUOTING_REMAINING = 15.0   # 窗口剩不到這個秒數就停止掛新單（逆選擇風險最高的時候，
-                                        # 跟之前幾筆真實虧損發生的時間點對齊）
-
-
-def _new_mm_state() -> dict:
-    return {
-        "windowSlug":         None,
-        "inventoryUp":        0.0,
-        "inventoryDown":      0.0,
-        "costUp":             0.0,   # Up 庫存累積成本（$）
-        "costDown":           0.0,   # Down 庫存累積成本（$）
-        "realizedPnl":        0.0,   # 窗口內庫存被回補（賣掉）已實現的損益
-        "quoteBidUp":         None,
-        "quoteAskUp":         None,
-        "quoteBidDown":       None,
-        "quoteAskDown":       None,
-        "fillsCount":         0,
-        "pendingSettlements": [],    # 換窗口但結果還沒查到的舊庫存快照
-        "totalPnl":           0.0,
-        "totalTrades":        0,
-        "wins":               0,
-        "trades":             [],    # 已結算紀錄，最新在前，最多留 50 筆
-    }
-
-mm_states = {a["id"]: _new_mm_state() for a in ASSETS}
-
-
-def _mm_clip_and_round(price: float, tick_value: float, rounding) -> float:
-    tick = Decimal(str(tick_value))
-    price = max(tick_value, min(1.0 - tick_value, price))
-    return float((Decimal(str(price)) / tick).to_integral_value(rounding=rounding) * tick)
-
-
-def _mm_try_fill(mm: dict, side: str, direction: str, quote_price: float, book: dict, size: float) -> None:
-    inv_key, cost_key = ("inventoryUp", "costUp") if side == "Up" else ("inventoryDown", "costDown")
-
-    # 買進 Up／賣出 Down 會讓淨曝險（Up庫存-Down庫存）變大；賣出 Up／買進 Down 讓它變小。
-    # 2026-09：v1 只限制單邊各自的庫存上限，結果一個窗口內來回被吃 149 次、淨累積出
-    # 25 股方向性缺口，剛好遇到真實行情往那個方向走，單筆虧了 $64.3——單邊上限擋不住
-    # 「來回小額累積出大淨缺口」，這裡改成直接管淨曝險：往同方向繼續加碼會超過上限就
-    # 不成交；往回拉近淨曝險（風險在降低）的方向永遠放行。
-    net_delta_sign = 1 if (direction == "bid") == (side == "Up") else -1
-    net = mm["inventoryUp"] - mm["inventoryDown"]
-    room = SIM_MM_MAX_NET_INVENTORY_SHARES - net_delta_sign * net
-    if room <= 0:
-        return
-
-    if direction == "bid":
-        asks = book.get("asks") or []
-        if not asks:
-            return
-        best_ask = min(float(a["price"]) for a in asks)
-        if best_ask > quote_price or mm[inv_key] >= SIM_MM_MAX_INVENTORY_SHARES:
-            return
-        fill_size = min(size, SIM_MM_MAX_INVENTORY_SHARES - mm[inv_key], room)
-        if fill_size <= 0:
-            return
-        mm[inv_key] += fill_size
-        mm[cost_key] += fill_size * quote_price
-        mm["fillsCount"] += 1
-    else:
-        bids = book.get("bids") or []
-        if not bids:
-            return
-        best_bid = max(float(b["price"]) for b in bids)
-        if best_bid < quote_price:
-            return
-        fill_size = min(size, mm[inv_key], room)  # v1 只賣手上真的有的庫存，不做放空
-        if fill_size <= 0:
-            return
-        avg_cost = mm[cost_key] / mm[inv_key] if mm[inv_key] > 0 else 0.0
-        mm[inv_key] -= fill_size
-        mm[cost_key] -= fill_size * avg_cost
-        mm["realizedPnl"] += fill_size * (quote_price - avg_cost)
-        mm["fillsCount"] += 1
-
-
-def _mm_step(asset_id: str, ms: dict, remaining_seconds: float | None, fair: dict | None) -> None:
-    """每輪輪詢跑一次：算雙邊報價、比對真實訂單簿判斷有沒有被吃到、更新庫存。"""
-    mm = mm_states[asset_id]
-    slug = ms["market"]["slug"] if ms.get("market") else None
-    if mm["windowSlug"] is None:
-        mm["windowSlug"] = slug  # 進程剛啟動／換窗口後第一次呼叫，直接認領目前窗口
-
-    if not fair or remaining_seconds is None or remaining_seconds < SIM_MM_STOP_QUOTING_REMAINING:
-        mm["quoteBidUp"] = mm["quoteAskUp"] = mm["quoteBidDown"] = mm["quoteAskDown"] = None
-        return
-
-    up_book, down_book = ms.get("upBook"), ms.get("downBook")
-    if not up_book or not down_book:
-        return
-    tick = float(up_book.get("tickSize", 0.01) or 0.01)
-
-    fair_up = fair["fairUp"]
-    fair_down = 1.0 - fair_up
-    skew = SIM_MM_SKEW_FACTOR * (mm["inventoryUp"] - mm["inventoryDown"])
-
-    bid_up = _mm_clip_and_round(fair_up - SIM_MM_HALF_SPREAD - skew, tick, ROUND_DOWN)
-    ask_up = _mm_clip_and_round(fair_up + SIM_MM_HALF_SPREAD - skew, tick, ROUND_UP)
-    bid_down = _mm_clip_and_round(fair_down - SIM_MM_HALF_SPREAD + skew, tick, ROUND_DOWN)
-    ask_down = _mm_clip_and_round(fair_down + SIM_MM_HALF_SPREAD + skew, tick, ROUND_UP)
-
-    mm["quoteBidUp"], mm["quoteAskUp"] = bid_up, ask_up
-    mm["quoteBidDown"], mm["quoteAskDown"] = bid_down, ask_down
-
-    _mm_try_fill(mm, "Up", "bid", bid_up, up_book, SIM_MM_QUOTE_SIZE)
-    _mm_try_fill(mm, "Up", "ask", ask_up, up_book, SIM_MM_QUOTE_SIZE)
-    _mm_try_fill(mm, "Down", "bid", bid_down, down_book, SIM_MM_QUOTE_SIZE)
-    _mm_try_fill(mm, "Down", "ask", ask_down, down_book, SIM_MM_QUOTE_SIZE)
-
-
-def _mm_queue_settlement(asset_id: str, slug: str) -> None:
-    """窗口換了：把上一個窗口累積的庫存快照放進待結算佇列，重置成乾淨狀態追蹤新窗口。
-    跟 queue_settlement() 對 ab_states 做的事是同一套邏輯，只是 mm 自己另外一份帳本。"""
-    mm = mm_states[asset_id]
-    if mm["windowSlug"] != slug:
-        return
-    if mm["inventoryUp"] > 0 or mm["inventoryDown"] > 0 or mm["fillsCount"] > 0:
-        mm["pendingSettlements"].append({
-            "windowSlug":    slug,
-            "inventoryUp":   mm["inventoryUp"],
-            "inventoryDown": mm["inventoryDown"],
-            "costUp":        mm["costUp"],
-            "costDown":      mm["costDown"],
-            "realizedPnl":   mm["realizedPnl"],
-            "fillsCount":    mm["fillsCount"],
-        })
-    mm["windowSlug"] = None
-    mm["inventoryUp"] = mm["inventoryDown"] = 0.0
-    mm["costUp"] = mm["costDown"] = 0.0
-    mm["realizedPnl"] = 0.0
-    mm["fillsCount"] = 0
-    mm["quoteBidUp"] = mm["quoteAskUp"] = mm["quoteBidDown"] = mm["quoteAskDown"] = None
-
-
-async def _mm_retry_pending_settlements(session: aiohttp.ClientSession, asset_id: str) -> None:
-    mm = mm_states[asset_id]
-    if not mm["pendingSettlements"]:
-        return
-    still_pending = []
-    for snap in mm["pendingSettlements"]:
-        outcome = await fetch_outcome(session, snap["windowSlug"])
-        if outcome is None:
-            still_pending.append(snap)
-            continue
-        payout = (snap["inventoryUp"] if outcome == "Up" else 0.0) + \
-                 (snap["inventoryDown"] if outcome == "Down" else 0.0)
-        cost = snap["costUp"] + snap["costDown"]
-        pnl = snap["realizedPnl"] + payout - cost
-        mm["totalPnl"] += pnl
-        mm["totalTrades"] += 1
-        if pnl > 0:
-            mm["wins"] += 1
-        mm["trades"].insert(0, {
-            "windowSlug":    snap["windowSlug"],
-            "outcome":       outcome,
-            "inventoryUp":   snap["inventoryUp"],
-            "inventoryDown": snap["inventoryDown"],
-            "fillsCount":    snap["fillsCount"],
-            "pnl":           pnl,
-            "settledAt":     time.time(),
-        })
-        mm["trades"] = mm["trades"][:50]
-        log.info(
-            f"[MM:{asset_id}] 結算 {snap['windowSlug']} 結果={outcome} "
-            f"庫存 Up={snap['inventoryUp']:.1f} Down={snap['inventoryDown']:.1f} "
-            f"成交{snap['fillsCount']}次 PnL=${pnl:+.2f}"
-        )
-    mm["pendingSettlements"] = still_pending
-
-
-def build_mm_payload(asset_id: str) -> dict:
-    mm = mm_states[asset_id]
-    win_rate = (mm["wins"] / mm["totalTrades"] * 100) if mm["totalTrades"] else None
-    return {
-        "windowSlug":         mm["windowSlug"],
-        "inventoryUp":        mm["inventoryUp"],
-        "inventoryDown":      mm["inventoryDown"],
-        "quoteBidUp":         mm["quoteBidUp"],
-        "quoteAskUp":         mm["quoteAskUp"],
-        "quoteBidDown":       mm["quoteBidDown"],
-        "quoteAskDown":       mm["quoteAskDown"],
-        "fillsCount":         mm["fillsCount"],
-        "pendingSettlements": len(mm["pendingSettlements"]),
-        "totalPnl":           mm["totalPnl"],
-        "totalTrades":        mm["totalTrades"],
-        "winRate":            win_rate,
-        "trades":             mm["trades"],
-    }
-
 # ── Polymarket 市場資料 WebSocket（只用在模擬版）───────────────────────────
 # 只是把「兩邊訂單簿報價」這件事從 3 秒輪詢一次的 REST，換成即時推播，
 # 讓 _try_direct_pair 那種「當下兩邊剛好都夠便宜」的真無風險套利機會更容易被抓到
@@ -1740,7 +1525,6 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     if new_market and (cur is None or new_market["slug"] != cur["slug"]):
         if cur is not None:
             queue_settlement(cur["slug"])
-            _mm_queue_settlement(aid, cur["slug"])
         ms["market"] = new_market
         ms["windowEndsAt"] = _iso_to_ms(new_market["endDate"])
         ms["windowOpenSpotPrice"] = None  # 換窗口了，開盤價重新觀察
@@ -1800,9 +1584,6 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     for variant_id, variant in AB_VARIANT_BY_ID.items():
         if variant["assetId"] == aid:
             simulate_trading(variant_id, slug, ms["upBook"], ms["downBook"], remaining_seconds, fair)
-
-    _mm_step(aid, ms, remaining_seconds, fair)
-    await _mm_retry_pending_settlements(session, aid)
 
     ms["connected"] = True
     persist_quote(aid, fair)
@@ -1911,7 +1692,6 @@ def build_asset_payload(asset_id: str) -> dict:
         "klines":       ms.get("klines", []),
         "connected":    ms["connected"],
         "fair":         ms.get("fair"),
-        "mm":           build_mm_payload(asset_id),
     }
 
 def build_full_payload() -> str:
