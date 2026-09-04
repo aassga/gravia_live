@@ -170,6 +170,17 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       </div>
     </div>
 
+    <!-- 做市原型：掛雙邊報價等人來吃，跟上面 taker 邏輯完全獨立記帳 -->
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+        <span class="lbl">◦ 做市原型 · 掛雙邊報價（近似模擬，成交率高估）</span>
+        <span id="mm-summary" class="gray">—</span>
+      </div>
+      <div id="mm-panel" style="font-size:10.5px;">
+        <div style="color:#444;padding:4px 0;">尚無資料</div>
+      </div>
+    </div>
+
     <!-- ASSETS -->
     <div class="panel">
       <div class="lbl" style="margin-bottom:6px;">◦ 模擬資產</div>
@@ -377,6 +388,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     const variants=(d.abVariants||[]).filter(v=>v.assetId===currentAsset);
     renderAbLeaderboard(variants);
     renderSummary(variants,d.sharedConfig||{});
+    renderMmPanel(a.mm);
 
     const totalTrades=variants.reduce((s,v)=>s+v.totalTrades,0);
     const totalWins=variants.reduce((s,v)=>s+v.wins,0);
@@ -533,6 +545,49 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
         <div style="flex:1;min-height:0;overflow-y:auto;border-top:1px solid #ffffff0c;padding-top:2px;">${list}</div>
       </div>`;
     }).join('');
+  }
+
+  function renderMmPanel(mm){
+    if(!mm){
+      $('mm-summary').textContent='—';
+      $('mm-panel').innerHTML='<div style="color:#444;padding:4px 0;">尚無資料</div>';
+      return;
+    }
+    const pnlColor=mm.totalPnl>0?'#00ff9d':(mm.totalPnl<0?'#ff3a5c':'#888');
+    $('mm-summary').innerHTML=`<span style="color:${pnlColor};font-weight:700;">${fmtMoney(mm.totalPnl)}</span>
+      <span style="color:#888;margin-left:6px;">${mm.totalTrades} 窗口 · 勝率 ${mm.winRate!=null?Math.round(mm.winRate)+'%':'—'}</span>`;
+
+    const fmtQuote=v=>typeof v==='number'?'$'+v.toFixed(3):'—';
+    const quoteHtml=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px;">
+      <div style="background:#00000055;border-radius:2px;padding:4px 6px;">
+        <div style="color:#00ff9d;font-size:9px;">UP 掛單</div>
+        <div style="color:#ccc;">買 ${fmtQuote(mm.quoteBidUp)} / 賣 ${fmtQuote(mm.quoteAskUp)}</div>
+        <div style="color:#444;">庫存 ${mm.inventoryUp.toFixed(1)} 股</div>
+      </div>
+      <div style="background:#00000055;border-radius:2px;padding:4px 6px;">
+        <div style="color:#ff3a5c;font-size:9px;">DOWN 掛單</div>
+        <div style="color:#ccc;">買 ${fmtQuote(mm.quoteBidDown)} / 賣 ${fmtQuote(mm.quoteAskDown)}</div>
+        <div style="color:#444;">庫存 ${mm.inventoryDown.toFixed(1)} 股</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:nowrap;font-size:9px;color:#888;margin-bottom:6px;">
+      <span>本輪成交 ${mm.fillsCount} 次</span>
+      <span class="yellow">結算中 ${mm.pendingSettlements||0}</span>
+    </div>`;
+
+    const trades=mm.trades||[];
+    const list=trades.length?trades.map(t=>{
+      const win=t.pnl>=0;
+      const dt=new Date(t.settledAt*1000).toTimeString().slice(0,8);
+      return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #ffffff08;font-size:9.5px;gap:4px;">
+        <span style="color:#444;">${dt}</span>
+        <span style="color:#888;">結果 ${t.outcome}</span>
+        <span style="color:#888;">庫存 Up ${t.inventoryUp.toFixed(1)}/Down ${t.inventoryDown.toFixed(1)}</span>
+        <span style="color:${win?'#00ff9d':'#ff3a5c'};font-weight:600;">${fmtMoney(t.pnl)}</span>
+      </div>`;
+    }).join(''):'<div style="color:#444;padding:4px 0;font-size:9.5px;">尚無結算紀錄</div>';
+
+    $('mm-panel').innerHTML=quoteHtml+`<div style="max-height:160px;overflow-y:auto;border-top:1px solid #ffffff0c;padding-top:2px;">${list}</div>`;
   }
 
   $('cfg-stake-apply').addEventListener('click',()=>{
