@@ -34,6 +34,7 @@ import logging
 import os
 import sys
 import threading
+import time
 
 if sys.platform == "win32":
     # Windows 終端機預設編碼常是 cp950/cp936，中文 log 會變亂碼，強制改 UTF-8
@@ -60,6 +61,7 @@ FUNDER_ADDRESS = os.environ.get("POLY_FUNDER_ADDRESS", "") or None
 CLOB_HOST = os.environ.get("POLY_CLOB_HOST", "https://clob.polymarket.com")
 CHAIN_ID = int(os.environ.get("POLY_CHAIN_ID", "137"))
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").strip().lower() == "true"
+VALIDATE_ORDER_PATH = os.environ.get("POLY_VALIDATE_ORDER_PATH", "false").strip().lower() == "true"
 
 # 0=EOA 直接持有資金, 1=POLY_PROXY（舊版 Email/Magic 帳號）, 2=POLY_GNOSIS_SAFE（連接外部錢包帳號）,
 # 3=POLY_1271（V2 新式 deposit wallet，2026-04 後新建的帳號多半是這個，已實測驗證正確）
@@ -69,6 +71,8 @@ _client = None  # lazy-initialized singleton
 _client_lock = threading.Lock()  # get_client() 會透過 asyncio.to_thread 從不同背景執行緒呼叫
                                   # （策略主迴圈 vs 背景餘額刷新任務都可能同時是第一個呼叫者），
                                   # 用鎖避免兩邊都通過「還沒初始化」的檢查、各自重複建立一次 client。
+_order_warmup_lock = threading.Lock()
+_warmed_order_tokens: set[str] = set()
 
 
 def _require_private_key() -> None:
@@ -235,6 +239,172 @@ def build_order(token_id: str, side: str, price: float, size: float):
     return client.create_order(order_args)
 
 
+def prewarm_order_tokens(token_ids: list[str]) -> None:
+    """預先填好 SDK 的 tick-size／neg-risk／CLOB version 快取。
+
+    py_clob_client_v2 第一次為新 token 建單時會同步查這些 API。每個 5 分鐘窗口的 token
+    都不同，如果等到看見套利機會才查，真正的 POST 會平白晚數個網路往返。這裡只建立、
+    簽署一筆不會送出的測試訂單；不會動用資金，也不會呼叫 POST /order(s)。
+    """
+    pending = [str(token_id) for token_id in token_ids if token_id]
+    if not pending:
+        return
+
+    with _order_warmup_lock:
+        pending = [token_id for token_id in pending if token_id not in _warmed_order_tokens]
+        if not pending:
+            return
+        started = time.perf_counter()
+        for token_id in pending:
+            # 0.50 對目前支援的 tick size 都是合法價；size 不送出，因此不受最低下單量影響。
+            build_order(token_id, "BUY", 0.50, 1.0)
+            _warmed_order_tokens.add(token_id)
+        log.info(
+            "[ORDER-WARMUP] 已預熱 %d 個 token 的建單快取，耗時 %.1fms",
+            len(pending),
+            (time.perf_counter() - started) * 1000,
+        )
+
+
+def order_tokens_are_warm(token_ids: list[str]) -> bool:
+    """回報這個進程內的 SDK 建單快取是否已為所有 token 預熱。"""
+    wanted = {str(token_id) for token_id in token_ids if token_id}
+    with _order_warmup_lock:
+        return bool(wanted) and wanted.issubset(_warmed_order_tokens)
+
+
+def validate_batch_order_path(token_ids: list[str]) -> dict:
+    """Prewarm and sign a two-leg FOK batch without any network POST."""
+    if LIVE_TRADING:
+        raise RuntimeError(
+            "POLY_VALIDATE_ORDER_PATH requires LIVE_TRADING=false; "
+            "validation mode never sends orders"
+        )
+
+    tokens = list(dict.fromkeys(str(token_id) for token_id in token_ids if token_id))
+    if len(tokens) != 2:
+        raise ValueError("validation requires exactly two distinct token ids")
+
+    prewarm_order_tokens(tokens)
+
+    from py_clob_client_v2.clob_types import OrderType, PostOrdersV2Args
+
+    sign_started = time.perf_counter()
+    signed_orders = [build_order(token_id, "BUY", 0.50, 1.0) for token_id in tokens]
+    sign_ms = (time.perf_counter() - sign_started) * 1000
+    payload = [
+        PostOrdersV2Args(order=signed, orderType=OrderType.FOK)
+        for signed in signed_orders
+    ]
+    if len(payload) != 2:
+        raise RuntimeError("validation batch payload must contain two orders")
+
+    result = {
+        "validated": True,
+        "posted": False,
+        "orderCount": len(payload),
+        "orderType": "FOK",
+        "signMs": round(sign_ms, 3),
+        "tokenIds": tokens,
+    }
+    log.warning(
+        "[ORDER-VALIDATION] SAFE NO-POST: built and signed %d FOK orders in %.1fms",
+        len(payload),
+        sign_ms,
+    )
+    return result
+
+
+def place_limit_orders_batch(
+    orders: list[dict],
+    dry_run: bool | None = None,
+    order_type: str = "FOK",
+    validate_signature: bool = True,
+) -> list[dict]:
+    """把多筆已決定好的限價單放進同一次 POST /orders。
+
+    Polymarket 會平行處理 batch 裡的訂單，但每一筆仍獨立成功或失敗；呼叫端必須逐筆
+    檢查回應，不能把 batch 當成原子交易。
+    """
+    if not 1 <= len(orders) <= 15:
+        raise ValueError("POST /orders 每次必須包含 1 到 15 筆訂單")
+
+    normalized = [
+        {
+            "token_id": str(order["token_id"]),
+            "side": str(order["side"]).upper(),
+            "price": float(order["price"]),
+            "size": float(order["size"]),
+        }
+        for order in orders
+    ]
+    effective_dry_run = (not LIVE_TRADING) if dry_run is None else dry_run
+    if VALIDATE_ORDER_PATH and not effective_dry_run:
+        raise RuntimeError("POLY_VALIDATE_ORDER_PATH=true hard-disables POST /orders")
+
+    if effective_dry_run:
+        if validate_signature:
+            for order in normalized:
+                build_order(order["token_id"], order["side"], order["price"], order["size"])
+        log.info(
+            "[DRY-RUN] 不會送出 batch —— %d 筆 %s 訂單（LIVE_TRADING=%s）",
+            len(normalized),
+            order_type,
+            LIVE_TRADING,
+        )
+        return [
+            {
+                "dry_run": True,
+                "success": True,
+                "status": "matched",
+                "would_submit": {**order, "order_type": order_type},
+            }
+            for order in normalized
+        ]
+
+    if not LIVE_TRADING:
+        raise RuntimeError(
+            "dry_run=False 但 .env 的 LIVE_TRADING 不是 true。"
+            "請先確認你真的要送出真實訂單，再把 .env 的 LIVE_TRADING 改成 true。"
+        )
+
+    from py_clob_client_v2.clob_types import OrderType, PostOrdersV2Args
+
+    client = get_client()
+    order_type_value = getattr(OrderType, order_type.upper())
+    sign_started = time.perf_counter()
+    signed_orders = [
+        build_order(order["token_id"], order["side"], order["price"], order["size"])
+        for order in normalized
+    ]
+    sign_ms = (time.perf_counter() - sign_started) * 1000
+    payload = [PostOrdersV2Args(order=signed, orderType=order_type_value) for signed in signed_orders]
+
+    log.warning(
+        "[LIVE] 單次 batch 送出 %d 筆 %s 訂單（建單＋簽名 %.1fms）：%s",
+        len(normalized),
+        order_type.upper(),
+        sign_ms,
+        [
+            {
+                "side": order["side"],
+                "token_id": order["token_id"],
+                "price": order["price"],
+                "size": order["size"],
+            }
+            for order in normalized
+        ],
+    )
+    post_started = time.perf_counter()
+    responses = client.post_orders(payload)
+    post_ms = (time.perf_counter() - post_started) * 1000
+    if not isinstance(responses, (list, tuple)) or len(responses) != len(normalized):
+        raise RuntimeError(f"POST /orders 回應筆數異常：{responses!r}")
+    responses = list(responses)
+    log.warning("[LIVE] batch 訂單回應（SDK return %.1fms）：%s", post_ms, responses)
+    return responses
+
+
 def place_limit_order(
     token_id: str,
     side: str,
@@ -257,6 +427,8 @@ def place_limit_order(
         False -> 強制送單（仍要求 LIVE_TRADING=true 才會真的執行，否則拋錯，避免誤觸）
     """
     effective_dry_run = (not LIVE_TRADING) if dry_run is None else dry_run
+    if VALIDATE_ORDER_PATH and not effective_dry_run:
+        raise RuntimeError("POLY_VALIDATE_ORDER_PATH=true hard-disables POST /order")
 
     if effective_dry_run:
         # CLI preview 預設仍會建立並簽署訂單；自動策略的 dry-run 可關閉此驗證，

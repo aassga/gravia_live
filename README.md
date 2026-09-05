@@ -82,12 +82,13 @@ Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計�
 
 ## 真實自動下單
 
-`polymarket_live_strategy.py` 已同步紙上模擬的深度 VWAP、最差限價判斷、taker fee、滑點、公平價進場、資金預留、淨鎖利與動態退出規則。成交後會優先從成交紀錄回填真實均價；暫時查不到時則以送出的保守限價記帳。真實執行仍有一個無法消除的差異：兩腿無法保證原子成交，因此第二腿失敗時會嘗試緊急賣回第一腿。
+`polymarket_live_strategy.py` 已同步紙上模擬的深度 VWAP、最差限價判斷、taker fee、滑點、公平價進場、資金預留、淨鎖利與動態退出規則。直接配對進場會先預熱新市場 token 的建單 metadata，再把 Up／Down 兩筆 FOK 放進同一次 `POST /orders` batch，減少兩個獨立 request 的到達時間差。成交後會優先從成交紀錄回填真實均價；暫時查不到時則以送出的保守限價記帳。Batch 仍不保證兩筆原子成交，因此其中一腿失敗時仍會先補該腿，最後才嘗試緊急賣回已成交腿。
 
 安全預設：
 
 - `LIVE_TRADING=false`：只跑 dry-run，不簽名、不送單。
 - `POLY_STRATEGY_ARMED=false`：新增的第二道武裝開關。只有它與 `LIVE_TRADING` 同時為 `true` 才會送出真實策略訂單。
+- `POLY_VALIDATE_ORDER_PATH=true`：安全驗證模式。每個新市場預熱並簽署兩筆 FOK，但硬性禁止 `POST /orders`；即使另外兩個開關誤設為 `true` 也不會真實執行。
 - `POLY_MAX_PAIR_BUDGET_USD=25`：每組兩腿最多 25 USDC。
 - `POLY_MIN_CASH_RESERVE_USD=5`：至少保留 5 USDC 現金。
 - `POLY_STAKE_PCT=15`：每組兩腿預算為可用現金的 15%。

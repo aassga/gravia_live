@@ -48,7 +48,8 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarke
 
 STAKE_PCT = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
 STRATEGY_ARMED = os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
-REAL_EXECUTION_ENABLED = live.LIVE_TRADING and STRATEGY_ARMED
+# Validation mode is a hard safety interlock: it can never submit real orders.
+REAL_EXECUTION_ENABLED = live.LIVE_TRADING and STRATEGY_ARMED and not live.VALIDATE_ORDER_PATH
 MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
 DRY_RUN_BALANCE_USD = max(1.0, float(os.environ.get("POLY_DRY_RUN_BALANCE_USD", "100.0")))
@@ -68,10 +69,11 @@ EMERGENCY_UNWIND_RETRY_INTERVAL = max(0.5, float(os.environ.get("POLY_EMERGENCY_
 # 但緊急平倉的目標是「不計代價盡快出場」，不是「盡量拿到好價格」，值得比平常更激進：
 # 在正常保守限價之上，再多讓這麼多格 tick，犧牲一點價格換取更高的立即成交機率。
 EMERGENCY_UNWIND_EXTRA_TICKS = max(0, int(os.environ.get("POLY_EMERGENCY_UNWIND_EXTRA_TICKS", "3")))
+_validated_order_path_slug: str | None = None
 
 # 真實版跟隨模擬版 ASSETS 清單裡的哪一個市場，預設是 BTC 5 分鐘窗口（"btc"）。
 # 2026-09：模擬盤驗證出 15 分鐘／4 小時窗口的訂單簿深度比 5 分鐘深很多（少踩到「兩腿
-# 平行送出、一腿沒接到」這個結構性風險），先讓真實版可以指到 sim.ASSETS 裡任何一個
+# batch 送出、一腿沒接到」這個結構性風險），先讓真實版可以指到 sim.ASSETS 裡任何一個
 # id（例如 "btc-15m"），評估其他窗口在真實下單時表不表現得更好，不用另外複製一份程式。
 LIVE_ASSET_ID = os.environ.get("POLY_LIVE_ASSET_ID", "btc")
 if LIVE_ASSET_ID != "btc":
@@ -109,6 +111,8 @@ def _new_live_state() -> dict:
         "haltReason": None,
         "unconfirmedOrder": None,
         "preflightSlug": None,
+        "validationSlug": None,
+        "validationResult": None,
         "quoteSource": "not_started",
         "wsConnected": False,
         "updatedAt": time.time(),
@@ -153,6 +157,8 @@ def save_live_state() -> None:
 
 def reset_live_state_for_tests() -> None:
     """只供單元測試在記憶體中清狀態；不會刪除實際狀態檔。"""
+    global _validated_order_path_slug
+    _validated_order_path_slug = None
     live_state.clear()
     live_state.update(_new_live_state())
 
@@ -522,37 +528,52 @@ async def _ensure_no_unmanaged_current_position() -> bool:
             f"unmanaged_current_market_position up={up_balance:.6f} down={down_balance:.6f}"
         )
         return False
+    try:
+        # 每個 5 分鐘窗口都換新 token。先在 preflight（非搶單臨界路徑）填好 SDK 的
+        # tick-size／neg-risk／version 快取，避免真正要送單時才多等數個 GET 往返。
+        await asyncio.to_thread(live.prewarm_order_tokens, [up_id, down_id])
+    except Exception as exc:
+        _set_halt(f"preflight_order_warmup_failed: {exc}")
+        return False
     return True
 
 
-async def _submit_fok(token_id: str, side: str, plan: dict, dry_run: bool) -> tuple[str, dict]:
+async def _validate_order_path_once(slug: str) -> bool:
+    """Safely prewarm and sign the current market pair once, without POST."""
+    global _validated_order_path_slug
+    if not live.VALIDATE_ORDER_PATH or _validated_order_path_slug == slug:
+        return True
+
+    up_id, down_id = sim._market_tokens(sim.state["market"])
+    try:
+        result = await asyncio.to_thread(
+            live.validate_batch_order_path,
+            [up_id, down_id],
+        )
+    except Exception as exc:
+        _set_halt(f"order_path_validation_failed: {exc}")
+        return False
+
+    _validated_order_path_slug = slug
+    live_state["validationSlug"] = slug
+    live_state["validationResult"] = result
+    save_live_state()
+    return True
+
+
+def _record_order_action_started() -> None:
     live_state["lastActionAt"] = time.time()
     save_live_state()
-    if not dry_run:
-        _invalidate_cash_cache()
-    from py_clob_client_v2.exceptions import PolyApiException
 
-    try:
-        response = await asyncio.to_thread(
-            live.place_limit_order,
-            token_id,
-            side,
-            plan["limitPrice"],
-            plan["shares"],
-            dry_run,
-            "FOK",
-            not dry_run,
-        )
-    except PolyApiException as exc:
-        # FOK 沒吃滿（訂單簿在下單瞬間跟決策當下的快照之間變薄了）是正常會發生的情況，
-        # 不是程式錯誤——CLOB 直接回 400 而不是回一個帶 status 的訂單物件，用例外表達。
-        # 當成跟 status=unmatched 一樣的「這次沒成交」處理，不要整包當未預期例外往外拋。
-        log.info(f"[LIVE] FOK 未成交（下單瞬間深度不夠）：{exc}")
-        return "not_filled", {"error": str(exc)}
+
+async def _resolve_fok_response(response: dict, dry_run: bool) -> tuple[str, dict]:
+    """把單筆 FOK 回應歸類；single /order 與 batch /orders 共用同一套確認規則。"""
+    if not isinstance(response, dict):
+        return "unconfirmed", {"error": f"unexpected_order_response: {response!r}"}
     if live.order_response_filled(response):
         return "filled", response
 
-    status = str(response.get("status", "")).lower() if isinstance(response, dict) else ""
+    status = str(response.get("status", "")).lower()
     if status in {"unmatched", "cancelled", "canceled", "rejected", ""}:
         return "not_filled", response
     if status != "delayed":
@@ -577,13 +598,100 @@ async def _submit_fok(token_id: str, side: str, plan: dict, dry_run: bool) -> tu
     return "unconfirmed", latest
 
 
+async def _submit_fok(token_id: str, side: str, plan: dict, dry_run: bool) -> tuple[str, dict]:
+    _record_order_action_started()
+    if not dry_run:
+        _invalidate_cash_cache()
+
+    try:
+        response = await asyncio.to_thread(
+            live.place_limit_order,
+            token_id,
+            side,
+            plan["limitPrice"],
+            plan["shares"],
+            dry_run,
+            "FOK",
+            not dry_run,
+        )
+    except Exception as exc:
+        # 把 py_clob_client_v2 的 import 留到真的發生例外時；正常搶單路徑不應為了
+        # exception type 做一次可能很慢的首次套件 import。
+        from py_clob_client_v2.exceptions import PolyApiException
+
+        if not isinstance(exc, PolyApiException):
+            raise
+        # FOK 沒吃滿（訂單簿在下單瞬間跟決策當下的快照之間變薄了）是正常會發生的情況，
+        # 不是程式錯誤——CLOB 直接回 400 而不是回一個帶 status 的訂單物件，用例外表達。
+        # 當成跟 status=unmatched 一樣的「這次沒成交」處理，不要整包當未預期例外往外拋。
+        log.info(f"[LIVE] FOK 未成交（下單瞬間深度不夠）：{exc}")
+        return "not_filled", {"error": str(exc)}
+    return await _resolve_fok_response(response, dry_run)
+
+
+async def _submit_fok_pair(
+    up_token: str,
+    up: dict,
+    down_token: str,
+    down: dict,
+    dry_run: bool,
+) -> tuple[tuple[str, dict], tuple[str, dict]]:
+    """兩腿先簽名，再以同一次 POST /orders 送達 CLOB。
+
+    Batch 只縮小兩腿的客戶端／網路到達差，不提供跨訂單原子性，因此仍逐腿分類結果，
+    讓既有的補鎖利與緊急平倉邏輯接手單腿成交情況。
+    """
+    _record_order_action_started()
+    if not dry_run:
+        _invalidate_cash_cache()
+
+    orders = [
+        {
+            "token_id": up_token,
+            "side": "BUY",
+            "price": up["limitPrice"],
+            "size": up["shares"],
+        },
+        {
+            "token_id": down_token,
+            "side": "BUY",
+            "price": down["limitPrice"],
+            "size": down["shares"],
+        },
+    ]
+    try:
+        responses = await asyncio.to_thread(
+            live.place_limit_orders_batch,
+            orders,
+            dry_run,
+            "FOK",
+            not dry_run,
+        )
+    except Exception as exc:
+        # 整個 batch 沒有逐腿回應時，不能假設兩腿都沒成交；網路斷線、5xx 或 SDK
+        # 例外都可能發生在伺服器已收單之後。標成 unconfirmed 會讓上層 halt，避免重送。
+        error = {"error": str(exc), "batch": True}
+        log.error(f"[LIVE] FOK batch 結果不明：{exc}", exc_info=True)
+        return ("unconfirmed", error), ("unconfirmed", error)
+
+    if len(responses) != 2:
+        error = {"error": f"unexpected_batch_response_count={len(responses)}", "batch": True}
+        return ("unconfirmed", error), ("unconfirmed", error)
+
+    up_result, down_result = await asyncio.gather(
+        _resolve_fok_response(responses[0], dry_run),
+        _resolve_fok_response(responses[1], dry_run),
+    )
+    return up_result, down_result
+
+
 def _token_id(side: str) -> str:
     up_id, down_id = sim._market_tokens(sim.state["market"])
     return up_id if side == "Up" else down_id
 
 
 def _build_position_dict(slug: str, plan: dict, response: dict, execution: dict, dry_run: bool) -> dict:
-    """建立單腿部位字典（尚未對沖）。從 _enter_position 抽出來，讓兩腿平行送出時
+    """建立單腿部位字典（尚未對沖）。從 _enter_position 抽出來，讓兩腿 batch 送出時
     （見 _execute_direct_pair）不管哪一腿成交都能重用同一份邏輯建立部位，不用
     另外寫一份容易長歪。"""
     return {
@@ -654,7 +762,7 @@ async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
 
 def _apply_hedge_fields(pos: dict, plan: dict, response: dict, execution: dict) -> None:
     """把補鎖利那一腿的成交結果套進既有部位、計算保守鎖利估計，兩腿真實股數對不上時
-    記錄殘值——依序版 _hedge_position 跟 _execute_direct_pair 平行送出剛好兩腿都成交
+    記錄殘值——依序版 _hedge_position 跟 _execute_direct_pair batch 送出剛好兩腿都成交
     的情況共用這份邏輯，不用各寫一份容易長歪。"""
     pos["hedged"] = True
     pos["hedgeSide"] = plan["side"]
@@ -788,7 +896,7 @@ async def _emergency_unwind(session: aiohttp.ClientSession, reason: str) -> None
 
 
 async def _retry_failed_leg_once(session: aiohttp.ClientSession, failed_side: str, dry_run: bool) -> str:
-    """平行送出兩腿、其中一腿沒成交時，先用最新訂單簿重試一次這一腿，成功就直接
+    """Batch 送出兩腿、其中一腿沒成交時，先用最新訂單簿重試一次這一腿，成功就直接
     變成完整鎖利，不用退而求其次緊急平倉。2026-09：實測那一瞬間的失敗常常只是被
     搶走那一口深度，市場一兩秒內多半就恢復了，值得立刻補一次而不是馬上放棄。
     跟正常補鎖利路徑（evaluate_and_act／_on_ws_tick_sync）用同一套鎖利門檻判斷，
@@ -837,20 +945,18 @@ async def _execute_direct_pair(
             plan["fair"] = fair_side
             plan["edge"] = fair_side - (plan["riskNotional"] + plan["fee"]) / plan["shares"]
 
-    # 2026-09：兩腿改成平行送出，不再依序等第一腿確認才送第二腿——兩腿的價格/股數在
-    # 送出之前就已經算好了（_direct_pair_plans 一次算出兩腿的計畫），不需要先知道
-    # 第一腿真實成交結果才能決定第二腿要下多少。實測依序送出時，光是「等第一腿的
-    # 網路來回＋撮合處理」這段就佔掉 100~180ms（見對話紀錄），這段時間市場可能已經
-    # 變動、深度被搶走。平行送出讓兩腿幾乎同時抵達交易所，省掉這段等待時間。
-    #
-    # 代價：舊版「先確認一腿成交才送第二腿」保證不會出現「只有原本沒打算優先的
-    # 那一腿獨自成交」這種組合；平行送出後這種組合變得可能，用跟舊版一樣的緊急平倉
-    # 邏輯救援，不管哪一腿獨自成交都當成單邊曝險處理。
+    # 2026-09：兩腿使用官方 POST /orders 放在同一個 HTTP request；CLOB 會平行處理
+    # batch 內容。這比兩個 thread 各送 POST /order 少掉執行緒排程、兩條 HTTP/2 stream
+    # 與 request 到達時間差。Batch 仍不是原子交易，兩筆回應要分開判斷；單腿成交時
+    # 繼續沿用下方的補鎖利／緊急平倉救援。
     up_token = _token_id("Up")
     down_token = _token_id("Down")
-    (up_result, up_response), (down_result, down_response) = await asyncio.gather(
-        _submit_fok(up_token, "BUY", up, dry_run),
-        _submit_fok(down_token, "BUY", down, dry_run),
+    (up_result, up_response), (down_result, down_response) = await _submit_fok_pair(
+        up_token,
+        up,
+        down_token,
+        down,
+        dry_run,
     )
 
     for side, result, response, token_id in (
@@ -868,7 +974,7 @@ async def _execute_direct_pair(
     down_filled = down_result == "filled"
 
     if not up_filled and not down_filled:
-        log.info("[LIVE] 兩腿平行送出皆未成交，不建立持倉")
+        log.info("[LIVE] 兩腿 batch 皆未成交，不建立持倉")
         return
 
     if up_filled and down_filled:
@@ -883,7 +989,7 @@ async def _execute_direct_pair(
         save_live_state()
         tag = "DRY-RUN" if dry_run else "REAL"
         log.warning(
-            f"[LIVE][{tag}] 平行鎖利 {up['side']}+{down['side']} "
+            f"[LIVE][{tag}] batch 鎖利 {up['side']}+{down['side']} "
             f"保守淨鎖利估計=${pos['lockedPnlEstimate']:+.2f}"
         )
         return
@@ -899,7 +1005,7 @@ async def _execute_direct_pair(
     save_live_state()
     tag = "DRY-RUN" if dry_run else "REAL"
     log.warning(
-        f"[LIVE][{tag}] 平行送出只有 {filled_side} 成交，先重試 {failed_side} 一次 "
+        f"[LIVE][{tag}] batch 只有 {filled_side} 成交，先重試 {failed_side} 一次 "
         f"limit=${filled_plan['limitPrice']:.3f} shares={execution['shares']:.2f}"
     )
 
@@ -911,7 +1017,7 @@ async def _execute_direct_pair(
         # _hedge_position 內部已經觸發 halt；重試結果不明，不能再對第一腿送緊急平倉。
         return
 
-    await _emergency_unwind(session, "direct_pair_parallel_single_leg_filled")
+    await _emergency_unwind(session, "direct_pair_batch_single_leg_filled")
 
 
 async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:
@@ -958,6 +1064,9 @@ async def evaluate_and_act(
     pos = live_state.get("position")
 
     if pos is None:
+        if live.VALIDATE_ORDER_PATH and not await _validate_order_path_once(slug):
+            return
+
         if time.time() - float(live_state.get("lastActionAt", 0)) < ACTION_COOLDOWN_SECONDS:
             return
         # 90 秒門檻已經拿掉：鎖利（下面的 direct pair）本身是即時原子成交，不需要
@@ -971,6 +1080,16 @@ async def evaluate_and_act(
                 return
             live_state["preflightSlug"] = slug
             save_live_state()
+        if not dry_run:
+            up_id, down_id = sim._market_tokens(sim.state["market"])
+            if not live.order_tokens_are_warm([up_id, down_id]):
+                try:
+                    # preflightSlug 會寫入磁碟；若程式在同一窗口重啟，它可能已經是目前 slug，
+                    # 但 SDK 的記憶體快取已清空，所以仍要獨立確認這個進程真的完成預熱。
+                    await asyncio.to_thread(live.prewarm_order_tokens, [up_id, down_id])
+                except Exception as exc:
+                    _set_halt(f"order_warmup_failed: {exc}")
+                    return
         cash = await _strategy_cash(dry_run)
         shares, budget = _target_pair_order(cash)
         if budget < 1.0 or shares < 1.0:
@@ -1117,6 +1236,10 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
             # 真實模式每個窗口第一次要做的 preflight 檢查需要真的等網路 I/O，不屬於這條
             # 零延遲路徑該做的事，留給 3 秒輪詢那條路（原本的 evaluate_and_act）處理。
             return
+        if not dry_run and not live.order_tokens_are_warm([up_id, down_id]):
+            # 程式重啟會清空 SDK 的記憶體快取；預熱完成前不從 WS 快速路徑搶單，改由
+            # 3 秒輪詢路徑在背景完成預熱後再開放。
+            return
         cash = _strategy_cash_sync(dry_run)
         if cash is None:
             return
@@ -1215,8 +1338,11 @@ def _log_startup_banner(mode: str) -> None:
     log.info(f"  Polymarket BTC Up/Down · 真實自動下單策略（{mode}）")
     log.info(
         f"  LIVE_TRADING={live.LIVE_TRADING} · POLY_STRATEGY_ARMED={STRATEGY_ARMED} "
+        f"· POLY_VALIDATE_ORDER_PATH={live.VALIDATE_ORDER_PATH} "
         f"· REAL_EXECUTION={REAL_EXECUTION_ENABLED}"
     )
+    if live.VALIDATE_ORDER_PATH:
+        log.warning("  ORDER PATH VALIDATION: signing enabled, POST /orders hard-disabled")
     log.info(f"  pair budget={STAKE_PCT:.1f}% · hard cap=${MAX_PAIR_BUDGET_USD:.2f}")
     log.info(f"  cash reserve=${MIN_CASH_RESERVE_USD:.2f} · action cooldown={ACTION_COOLDOWN_SECONDS:.0f}s")
     log.info(f"  lock sum <= ${LOCK_MAX_SUM}（跟隨 {LIVE_ASSET_ID}-late-direction）　net lock/share>={sim.SIM_MIN_NET_LOCK_PER_SHARE:.3f}")

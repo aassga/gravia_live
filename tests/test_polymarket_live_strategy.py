@@ -4,7 +4,7 @@ import json
 import tempfile
 import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import polymarket_live_strategy as strategy
 import polymarket_live_trader as trader
@@ -21,14 +21,17 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         # 避免哪天忘記，測試意外打到真實 API。
         self._old_strategy_armed = strategy.STRATEGY_ARMED
         self._old_real_execution = strategy.REAL_EXECUTION_ENABLED
+        self._old_validate_order_path = trader.VALIDATE_ORDER_PATH
         strategy.STRATEGY_ARMED = False
         strategy.REAL_EXECUTION_ENABLED = False
+        trader.VALIDATE_ORDER_PATH = False
 
     def tearDown(self):
         strategy.STATE_FILE = self._old_state_file
         self._tmpdir.cleanup()
         strategy.STRATEGY_ARMED = self._old_strategy_armed
         strategy.REAL_EXECUTION_ENABLED = self._old_real_execution
+        trader.VALIDATE_ORDER_PATH = self._old_validate_order_path
 
     def test_only_matched_order_is_treated_as_filled(self):
         self.assertTrue(trader.order_response_filled({"success": True, "status": "matched"}))
@@ -43,6 +46,100 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(response["dry_run"])
         self.assertEqual(response["status"], "matched")
+
+    def test_batch_dry_run_does_not_require_signature(self):
+        responses = trader.place_limit_orders_batch(
+            [
+                {"token_id": "up", "side": "BUY", "price": 0.40, "size": 5.0},
+                {"token_id": "down", "side": "BUY", "price": 0.50, "size": 5.0},
+            ],
+            dry_run=True,
+            order_type="FOK",
+            validate_signature=False,
+        )
+        self.assertEqual(len(responses), 2)
+        self.assertTrue(all(response["dry_run"] for response in responses))
+        self.assertTrue(all(response["status"] == "matched" for response in responses))
+
+    def test_validation_path_builds_two_signed_fok_orders_without_post(self):
+        with (
+            patch.object(trader, "LIVE_TRADING", False),
+            patch.object(trader, "prewarm_order_tokens") as warmup,
+            patch.object(trader, "build_order", side_effect=["signed-up", "signed-down"]) as build,
+            patch.object(
+                trader,
+                "place_limit_orders_batch",
+                side_effect=AssertionError("validation must never post"),
+            ),
+        ):
+            result = trader.validate_batch_order_path(["up", "down"])
+
+        warmup.assert_called_once_with(["up", "down"])
+        self.assertEqual(build.call_count, 2)
+        self.assertEqual(result["orderCount"], 2)
+        self.assertEqual(result["orderType"], "FOK")
+        self.assertFalse(result["posted"])
+
+    def test_validation_path_refuses_when_live_trading_is_enabled(self):
+        with (
+            patch.object(trader, "LIVE_TRADING", True),
+            patch.object(trader, "build_order") as build,
+        ):
+            with self.assertRaises(RuntimeError):
+                trader.validate_batch_order_path(["up", "down"])
+        build.assert_not_called()
+
+    def test_validation_interlock_blocks_batch_post(self):
+        with (
+            patch.object(trader, "LIVE_TRADING", True),
+            patch.object(trader, "VALIDATE_ORDER_PATH", True),
+        ):
+            with self.assertRaises(RuntimeError):
+                trader.place_limit_orders_batch(
+                    [{"token_id": "up", "side": "BUY", "price": 0.4, "size": 1}],
+                    dry_run=False,
+                )
+
+    async def test_validation_path_runs_once_per_market(self):
+        strategy.sim.state["market"] = {
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        result = {"validated": True, "posted": False, "orderCount": 2}
+        with (
+            patch.object(trader, "VALIDATE_ORDER_PATH", True),
+            patch.object(trader, "validate_batch_order_path", return_value=result) as validate,
+        ):
+            self.assertTrue(await strategy._validate_order_path_once("window-a"))
+            self.assertTrue(await strategy._validate_order_path_once("window-a"))
+            self.assertTrue(await strategy._validate_order_path_once("window-b"))
+
+        self.assertEqual(validate.call_count, 2)
+        self.assertEqual(strategy.live_state["validationSlug"], "window-b")
+
+    def test_live_batch_builds_both_orders_and_posts_once(self):
+        client = MagicMock()
+        client.post_orders.return_value = [
+            {"success": True, "status": "matched", "orderID": "up-order"},
+            {"success": False, "status": "", "errorMsg": "FOK not filled"},
+        ]
+        orders = [
+            {"token_id": "up", "side": "BUY", "price": 0.40, "size": 5.0},
+            {"token_id": "down", "side": "BUY", "price": 0.50, "size": 5.0},
+        ]
+        with (
+            patch.object(trader, "LIVE_TRADING", True),
+            patch.object(trader, "get_client", return_value=client),
+            patch.object(trader, "build_order", side_effect=["signed-up", "signed-down"]) as build,
+        ):
+            responses = trader.place_limit_orders_batch(orders, dry_run=False, order_type="FOK")
+
+        self.assertEqual([response["status"] for response in responses], ["matched", ""])
+        self.assertEqual(build.call_count, 2)
+        client.post_orders.assert_called_once()
+        posted = client.post_orders.call_args.args[0]
+        self.assertEqual([item.order for item in posted], ["signed-up", "signed-down"])
+        self.assertEqual([item.orderType for item in posted], ["FOK", "FOK"])
 
     def test_limit_price_rounds_in_adverse_direction_plus_one_tick_buffer(self):
         book = {"tickSize": 0.01}
@@ -146,6 +243,32 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             result, _ = await strategy._submit_fok("token", "BUY", plan, True)
         self.assertEqual(result, "not_filled")
 
+    async def test_submit_fok_pair_uses_one_batch_and_classifies_each_leg(self):
+        up = {"limitPrice": 0.40, "shares": 5.0}
+        down = {"limitPrice": 0.50, "shares": 5.0}
+        batch_response = [
+            {"success": True, "status": "matched", "orderID": "up-order"},
+            {"success": False, "status": "", "errorMsg": "FOK not filled"},
+        ]
+        with patch.object(
+            trader, "place_limit_orders_batch", return_value=batch_response
+        ) as place_batch:
+            up_result, down_result = await strategy._submit_fok_pair(
+                "up-token", up, "down-token", down, True
+            )
+
+        self.assertEqual(up_result[0], "filled")
+        self.assertEqual(down_result[0], "not_filled")
+        place_batch.assert_called_once_with(
+            [
+                {"token_id": "up-token", "side": "BUY", "price": 0.40, "size": 5.0},
+                {"token_id": "down-token", "side": "BUY", "price": 0.50, "size": 5.0},
+            ],
+            True,
+            "FOK",
+            False,
+        )
+
     async def test_real_execution_prefers_matched_trade_price(self):
         plan = {"observedVwap": 0.40, "limitPrice": 0.42, "shares": 10.0}
         summary = {"shares": 10.0, "price": 0.405, "notional": 4.05, "fee": None}
@@ -245,9 +368,8 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(aggressive)
         self.assertGreaterEqual(aggressive["limitPrice"], 0.01)
 
-    # 2026-09：兩腿改成平行送出（見 _execute_direct_pair），不再依序呼叫
-    # _enter_position/_hedge_position，改成直接呼叫 _submit_fok，所以下面這幾個測試
-    # 改成 mock _submit_fok 本身，涵蓋兩腿都成交／只有一腿成交／兩腿都沒成交三種情況。
+    # 2026-09：兩腿改成單次 POST /orders batch（見 _execute_direct_pair）。下面幾個測試
+    # mock _submit_fok_pair，涵蓋兩腿都成交／只有一腿成交／兩腿都沒成交三種情況。
     def _fair_and_legs(self):
         strategy.sim.state["market"] = {
             "outcomes": json.dumps(["Up", "Down"]),
@@ -260,13 +382,14 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         fair = {"fairUp": 0.6, "fairDown": 0.4}
         return up, down, fair
 
-    async def test_parallel_legs_both_filled_creates_locked_position(self):
+    async def test_batch_legs_both_filled_creates_locked_position(self):
         up, down, fair = self._fair_and_legs()
 
-        async def fake_submit_fok(token_id, side, plan, dry_run):
-            return "filled", {"orderID": f"order-{plan['side']}"}
-
-        with patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok):
+        batch_result = (
+            ("filled", {"orderID": "order-Up"}),
+            ("filled", {"orderID": "order-Down"}),
+        )
+        with patch.object(strategy, "_submit_fok_pair", AsyncMock(return_value=batch_result)):
             await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
 
         pos = strategy.live_state["position"]
@@ -275,16 +398,15 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pos["side"], "Up")
         self.assertEqual(pos["hedgeSide"], "Down")
 
-    async def test_parallel_legs_only_one_filled_retries_failed_leg_then_unwinds(self):
+    async def test_batch_legs_only_one_filled_retries_failed_leg_then_unwinds(self):
         up, down, fair = self._fair_and_legs()
 
-        async def fake_submit_fok(token_id, side, plan, dry_run):
-            if plan["side"] == "Up":
-                return "filled", {"orderID": "order-up"}
-            return "not_filled", {}
-
         with (
-            patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok),
+            patch.object(
+                strategy,
+                "_submit_fok_pair",
+                AsyncMock(return_value=(("filled", {"orderID": "order-up"}), ("not_filled", {}))),
+            ),
             patch.object(strategy, "_retry_failed_leg_once", AsyncMock(return_value="not_filled")) as retry,
             patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
         ):
@@ -297,16 +419,15 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         retry.assert_awaited_once_with(None, "Down", True)
         unwind.assert_awaited_once()
 
-    async def test_parallel_legs_retry_success_skips_emergency_unwind(self):
+    async def test_batch_legs_retry_success_skips_emergency_unwind(self):
         up, down, fair = self._fair_and_legs()
 
-        async def fake_submit_fok(token_id, side, plan, dry_run):
-            if plan["side"] == "Up":
-                return "filled", {"orderID": "order-up"}
-            return "not_filled", {}
-
         with (
-            patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok),
+            patch.object(
+                strategy,
+                "_submit_fok_pair",
+                AsyncMock(return_value=(("filled", {"orderID": "order-up"}), ("not_filled", {}))),
+            ),
             patch.object(strategy, "_retry_failed_leg_once", AsyncMock(return_value="filled")) as retry,
             patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
         ):
@@ -315,18 +436,17 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         retry.assert_awaited_once_with(None, "Down", True)
         unwind.assert_not_awaited()
 
-    async def test_parallel_legs_retry_unconfirmed_skips_emergency_unwind(self):
+    async def test_batch_legs_retry_unconfirmed_skips_emergency_unwind(self):
         # _retry_failed_leg_once 內部（透過 _hedge_position）已經觸發 halt，結果不明——
         # 這種情況不該再對第一腿送緊急平倉，避免萬一重試那腿其實有成交、變成三邊曝險。
         up, down, fair = self._fair_and_legs()
 
-        async def fake_submit_fok(token_id, side, plan, dry_run):
-            if plan["side"] == "Up":
-                return "filled", {"orderID": "order-up"}
-            return "not_filled", {}
-
         with (
-            patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok),
+            patch.object(
+                strategy,
+                "_submit_fok_pair",
+                AsyncMock(return_value=(("filled", {"orderID": "order-up"}), ("not_filled", {}))),
+            ),
             patch.object(strategy, "_retry_failed_leg_once", AsyncMock(return_value="unconfirmed")) as retry,
             patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
         ):
@@ -380,16 +500,55 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         submit.assert_not_awaited()
         self.assertFalse(strategy.live_state["position"]["hedged"])
 
-    async def test_parallel_legs_neither_filled_creates_no_position(self):
+    async def test_batch_legs_neither_filled_creates_no_position(self):
         up, down, _fair = self._fair_and_legs()
 
-        async def fake_submit_fok(token_id, side, plan, dry_run):
-            return "not_filled", {}
-
-        with patch.object(strategy, "_submit_fok", side_effect=fake_submit_fok):
+        with patch.object(
+            strategy,
+            "_submit_fok_pair",
+            AsyncMock(return_value=(("not_filled", {}), ("not_filled", {}))),
+        ):
             await strategy._execute_direct_pair(None, "btc-window", up, down, None, True)
 
         self.assertIsNone(strategy.live_state["position"])
+
+    async def test_batch_transport_error_halts_without_retry_or_unwind(self):
+        up, down, fair = self._fair_and_legs()
+
+        with (
+            patch.object(
+                trader,
+                "place_limit_orders_batch",
+                side_effect=TimeoutError("response lost after send"),
+            ),
+            patch.object(strategy, "_retry_failed_leg_once", AsyncMock()) as retry,
+            patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
+        ):
+            await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
+
+        self.assertTrue(strategy.live_state["halted"])
+        self.assertIn("direct_pair_leg_unconfirmed", strategy.live_state["haltReason"])
+        retry.assert_not_awaited()
+        unwind.assert_not_awaited()
+
+    async def test_batch_wrong_response_count_halts_without_retry_or_unwind(self):
+        up, down, fair = self._fair_and_legs()
+
+        with (
+            patch.object(
+                trader,
+                "place_limit_orders_batch",
+                return_value=[{"success": True, "status": "matched", "orderID": "only-one"}],
+            ),
+            patch.object(strategy, "_retry_failed_leg_once", AsyncMock()) as retry,
+            patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
+        ):
+            await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
+
+        self.assertTrue(strategy.live_state["halted"])
+        self.assertIn("direct_pair_leg_unconfirmed", strategy.live_state["haltReason"])
+        retry.assert_not_awaited()
+        unwind.assert_not_awaited()
 
     async def test_emergency_unwind_retries_once_on_transient_settlement_lag(self):
         # 2026-09 真實交易案例：第一腿剛成交，緊急平倉的 SELL 第一次被 CLOB 拒絕
@@ -561,8 +720,14 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             strategy._on_ws_tick_sync("up-token", None, decision_lock)
             self.assertTrue(strategy._ws_action_in_flight["v"], "opportunity was not detected synchronously")
             # 讓事件迴圈跑一輪，把 create_task 排出去的送單 task 執行完。
-            for _ in range(5):
-                await asyncio.sleep(0)
+            # On a small VPS, yielding a fixed number of event-loop turns is not
+            # enough to guarantee that the scheduled order task has completed.
+            # Wait for the observable completion state with a bounded timeout.
+            async def wait_for_pair_entry():
+                while strategy._ws_action_in_flight["v"] or strategy.live_state["position"] is None:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_pair_entry(), timeout=2.0)
         self.assertTrue(strategy.live_state["position"]["hedged"])
         self.assertTrue(strategy.live_state["position"]["dryRun"])
         self.assertFalse(strategy._ws_action_in_flight["v"])
@@ -618,11 +783,15 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             in_flight.remove(token_id)
             return 0.0
 
-        with patch.object(strategy.live, "get_conditional_balance", side_effect=fake_get_balance):
+        with (
+            patch.object(strategy.live, "get_conditional_balance", side_effect=fake_get_balance),
+            patch.object(strategy.live, "prewarm_order_tokens") as warmup,
+        ):
             result = await strategy._ensure_no_unmanaged_current_position()
 
         self.assertTrue(result)
         self.assertEqual(max_concurrent, 1)
+        warmup.assert_called_once_with(["up-token", "down-token"])
 
     async def test_preflight_check_retries_once_on_transient_error(self):
         self._set_market_for_preflight()
@@ -636,6 +805,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(strategy.live, "get_conditional_balance", side_effect=flaky_get_balance),
+            patch.object(strategy.live, "prewarm_order_tokens"),
             patch.object(strategy.asyncio, "sleep", AsyncMock()),
         ):
             result = await strategy._ensure_no_unmanaged_current_position()
