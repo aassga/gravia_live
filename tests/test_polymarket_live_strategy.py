@@ -22,9 +22,11 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self._old_strategy_armed = strategy.STRATEGY_ARMED
         self._old_real_execution = strategy.REAL_EXECUTION_ENABLED
         self._old_validate_order_path = trader.VALIDATE_ORDER_PATH
+        self._old_trader_armed = trader.STRATEGY_ARMED
         strategy.STRATEGY_ARMED = False
         strategy.REAL_EXECUTION_ENABLED = False
         trader.VALIDATE_ORDER_PATH = False
+        trader.STRATEGY_ARMED = False
 
     def tearDown(self):
         strategy.STATE_FILE = self._old_state_file
@@ -32,6 +34,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         strategy.STRATEGY_ARMED = self._old_strategy_armed
         strategy.REAL_EXECUTION_ENABLED = self._old_real_execution
         trader.VALIDATE_ORDER_PATH = self._old_validate_order_path
+        trader.STRATEGY_ARMED = self._old_trader_armed
 
     def test_only_matched_order_is_treated_as_filled(self):
         self.assertTrue(trader.order_response_filled({"success": True, "status": "matched"}))
@@ -39,6 +42,47 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(trader.order_response_filled({"success": True, "status": "unmatched"}))
         self.assertFalse(trader.order_response_filled({"status": "matched"}))
         self.assertTrue(trader.order_response_filled({"id": "order-1", "status": "ORDER_STATUS_MATCHED"}))
+
+    async def test_official_canceled_status_is_terminal_not_filled(self):
+        result, _ = await strategy._resolve_fok_response(
+            {"id": "order-1", "status": "ORDER_STATUS_CANCELED"},
+            False,
+        )
+        self.assertEqual(result, "not_filled")
+
+    def test_real_post_requires_both_live_switches(self):
+        with (
+            patch.object(trader, "LIVE_TRADING", True),
+            patch.object(trader, "STRATEGY_ARMED", False),
+        ):
+            with self.assertRaises(RuntimeError):
+                trader.place_limit_orders_batch(
+                    [{"token_id": "up", "side": "BUY", "price": 0.4, "size": 1}],
+                    dry_run=False,
+                )
+
+    def test_live_book_guard_rejects_stale_or_mixed_snapshots(self):
+        now = time.monotonic()
+        fresh = {"quoteSource": "websocket", "receivedAtMonotonic": now}
+        stale = {"quoteSource": "websocket", "receivedAtMonotonic": now - 10}
+        rest = {"quoteSource": "rest_fallback", "receivedAtMonotonic": now}
+        self.assertIsNone(strategy._live_book_guard_reason(fresh, dict(fresh)))
+        self.assertIsNotNone(strategy._live_book_guard_reason(fresh, stale))
+        self.assertIsNotNone(strategy._live_book_guard_reason(fresh, rest))
+
+    def test_live_fee_uses_cached_v2_market_configuration(self):
+        strategy.sim.state["market"] = {
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        with (
+            patch.object(strategy, "REAL_EXECUTION_ENABLED", True),
+            patch.object(trader, "get_cached_market_fee", return_value={"rate": 0.08, "exponent": 2.0}),
+        ):
+            fee, rate, exponent = strategy._fee_for_side("Up", 10, 0.5)
+        self.assertEqual(rate, 0.08)
+        self.assertEqual(exponent, 2.0)
+        self.assertAlmostEqual(fee, 10 * 0.08 * (0.5 * 0.5) ** 2)
 
     def test_strategy_dry_run_does_not_require_signature(self):
         response = trader.place_limit_order(
@@ -83,6 +127,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
     def test_validation_path_refuses_when_live_trading_is_enabled(self):
         with (
             patch.object(trader, "LIVE_TRADING", True),
+            patch.object(trader, "STRATEGY_ARMED", True),
             patch.object(trader, "build_order") as build,
         ):
             with self.assertRaises(RuntimeError):
@@ -129,6 +174,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         ]
         with (
             patch.object(trader, "LIVE_TRADING", True),
+            patch.object(trader, "STRATEGY_ARMED", True),
             patch.object(trader, "get_client", return_value=client),
             patch.object(trader, "build_order", side_effect=["signed-up", "signed-down"]) as build,
         ):
@@ -168,6 +214,13 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["shares"], 10)
         self.assertAlmostEqual(summary["price"], 0.43)
         self.assertAlmostEqual(summary["notional"], 4.3)
+
+    def test_trade_fill_summary_deduplicates_trade_ids(self):
+        response = {"orderID": "order-1", "tradeIDs": ["trade-1"]}
+        trade = {"id": "trade-1", "taker_order_id": "order-1", "size": "4", "price": "0.40"}
+        summary = trader.summarize_order_fills(response, [trade, dict(trade)])
+        self.assertEqual(summary["shares"], 4)
+        self.assertEqual(summary["notional"], 1.6)
 
     async def test_late_direction_skips_outside_window(self):
         strategy.sim.state["windowOpenSpotPrice"] = 100.0
@@ -527,9 +580,23 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
 
         self.assertTrue(strategy.live_state["halted"])
-        self.assertIn("direct_pair_leg_unconfirmed", strategy.live_state["haltReason"])
+        self.assertEqual("direct_pair_batch_unconfirmed", strategy.live_state["haltReason"])
         retry.assert_not_awaited()
         unwind.assert_not_awaited()
+
+    async def test_known_filled_leg_is_saved_before_unconfirmed_batch_halt(self):
+        up, down, fair = self._fair_and_legs()
+        with patch.object(
+            strategy,
+            "_submit_fok_pair",
+            AsyncMock(return_value=(("filled", {"orderID": "up-order"}), ("unconfirmed", {"error": "lost"}))),
+        ):
+            await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
+
+        self.assertTrue(strategy.live_state["halted"])
+        self.assertEqual(strategy.live_state["position"]["side"], "Up")
+        self.assertTrue(strategy.live_state["position"]["reconciliationRequired"])
+        self.assertEqual(strategy.live_state["position"]["unknownLegs"], ["Down"])
 
     async def test_batch_wrong_response_count_halts_without_retry_or_unwind(self):
         up, down, fair = self._fair_and_legs()
@@ -546,7 +613,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             await strategy._execute_direct_pair(None, "btc-window", up, down, fair, True)
 
         self.assertTrue(strategy.live_state["halted"])
-        self.assertIn("direct_pair_leg_unconfirmed", strategy.live_state["haltReason"])
+        self.assertEqual("direct_pair_batch_unconfirmed", strategy.live_state["haltReason"])
         retry.assert_not_awaited()
         unwind.assert_not_awaited()
 
@@ -611,6 +678,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_dry_run_pair_never_signs_or_sends(self):
         strategy.live_state["lastActionAt"] = 0
         strategy.sim.state["market"] = {
+            "conditionId": "condition-1",
             "outcomes": json.dumps(["Up", "Down"]),
             "clobTokenIds": json.dumps(["up-token", "down-token"]),
         }
@@ -762,6 +830,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
 
     def _set_market_for_preflight(self):
         strategy.sim.state["market"] = {
+            "conditionId": "condition-1",
             "outcomes": json.dumps(["Up", "Down"]),
             "clobTokenIds": json.dumps(["up-token", "down-token"]),
         }
@@ -785,13 +854,14 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(strategy.live, "get_conditional_balance", side_effect=fake_get_balance),
+            patch.object(strategy.live, "get_open_orders", return_value=[]),
             patch.object(strategy.live, "prewarm_order_tokens") as warmup,
         ):
             result = await strategy._ensure_no_unmanaged_current_position()
 
         self.assertTrue(result)
         self.assertEqual(max_concurrent, 1)
-        warmup.assert_called_once_with(["up-token", "down-token"])
+        warmup.assert_called_once_with(["up-token", "down-token"], "condition-1")
 
     async def test_preflight_check_retries_once_on_transient_error(self):
         self._set_market_for_preflight()
@@ -805,6 +875,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(strategy.live, "get_conditional_balance", side_effect=flaky_get_balance),
+            patch.object(strategy.live, "get_open_orders", return_value=[]),
             patch.object(strategy.live, "prewarm_order_tokens"),
             patch.object(strategy.asyncio, "sleep", AsyncMock()),
         ):

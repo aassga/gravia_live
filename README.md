@@ -6,10 +6,10 @@
 （`wss://ws-subscriptions-clob.polymarket.com/ws/market`）接收 Up/Down 即時完整訂單簿與增量更新。
 每次簿價變動都會立即重新檢查進場、第二腿與提早退出條件；原本的 3 秒循環只保留市場換期、
 Binance 模型資料更新與結算工作。WebSocket 尚未取得當前連線的完整快照、連線不健康或斷線時，
-才會暫時改用 CLOB REST 訂單簿，連線恢復後自動切回 WebSocket。
+REST 訂單簿仍可供畫面與風險退出參考，但禁止用來建立新的真實持倉。
 
 啟動紀錄中的 `[QUOTE] source=websocket` 代表兩邊都來自目前連線的 WebSocket 快照；
-`source=rest_fallback` 代表正在使用安全備援。這項變更不會略過
+`source=rest_fallback` 代表畫面正在使用備援，並不代表允許實盤進場。這項變更不會略過
 `LIVE_TRADING` 與 `POLY_STRATEGY_ARMED` 兩道真實送單開關。
 
 使用 Polymarket 真實市場資料執行 BTC/ETH 5 分鐘 Up/Down 紙上交易模擬，
@@ -87,18 +87,21 @@ Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計�
 
 ## 真實自動下單
 
-`polymarket_live_strategy.py` 已同步紙上模擬的深度 VWAP、最差限價判斷、taker fee、滑點、公平價進場、資金預留、淨鎖利與動態退出規則。直接配對進場會先預熱新市場 token 的建單 metadata，再把 Up／Down 兩筆 FOK 放進同一次 `POST /orders` batch，減少兩個獨立 request 的到達時間差。成交後會優先從成交紀錄回填真實均價；暫時查不到時則以送出的保守限價記帳。Batch 仍不保證兩筆原子成交，因此其中一腿失敗時仍會先補該腿，最後才嘗試緊急賣回已成交腿。
+`polymarket_live_strategy.py` 已同步紙上模擬的深度 VWAP、最差限價判斷、滑點、資金預留與淨鎖利規則。直接配對進場會先預熱新市場 token 的建單 metadata 與 V2 動態費率，再把 Up／Down 兩筆 FOK 放進同一次 `POST /orders` batch，減少兩個獨立 request 的到達時間差。成交後會優先從成交紀錄回填真實均價；暫時查不到時則以送出的保守限價記帳。Batch 仍不保證兩筆原子成交，因此其中一腿失敗時仍會先補該腿，最後才嘗試緊急賣回已成交腿。
 
 安全預設：
 
 - `LIVE_TRADING=false`：只跑 dry-run，不簽名、不送單。
 - `POLY_STRATEGY_ARMED=false`：新增的第二道武裝開關。只有它與 `LIVE_TRADING` 同時為 `true` 才會送出真實策略訂單。
 - `POLY_VALIDATE_ORDER_PATH=true`：安全驗證模式。每個新市場預熱並簽署兩筆 FOK，但硬性禁止 `POST /orders`；即使另外兩個開關誤設為 `true` 也不會真實執行。
+- `POLY_ENABLE_LATE_DIRECTION=false`：預設禁止窗口末端的單腿方向性下注；只有明確改成 `true` 才會啟用。
 - `POLY_MAX_PAIR_BUDGET_USD=25`：每組兩腿最多 25 USDC。
 - `POLY_MIN_CASH_RESERVE_USD=5`：至少保留 5 USDC 現金。
 - `POLY_STAKE_PCT=15`：每組兩腿預算為可用現金的 15%。
 - `POLY_ACTION_COOLDOWN_SECONDS=10`：下單嘗試間隔至少 10 秒。
 - 只有 FOK 訂單回覆 `matched` 才當作成交；`delayed` 長時間無法確認時會自動停止下單。
+- 新進場要求 Up／Down 都是完整 WebSocket 快照、各自不超過 2 秒且時間差不超過 0.5 秒；REST fallback 不能觸發真單。
+- 結果不明時先停止所有新單，再保存已知成交腿並擷取 token 餘額、掛單與近期成交快照，避免狀態頁錯誤顯示空倉。
 - 真實策略狀態儲存在 `polymarket_live_strategy_state.json`，重啟後不會忘記持倉與停止原因。
 
 ### 建議做法：嵌入模擬盤進程（`--with-live`），共用同一條 WS 連線

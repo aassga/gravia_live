@@ -61,6 +61,7 @@ FUNDER_ADDRESS = os.environ.get("POLY_FUNDER_ADDRESS", "") or None
 CLOB_HOST = os.environ.get("POLY_CLOB_HOST", "https://clob.polymarket.com")
 CHAIN_ID = int(os.environ.get("POLY_CHAIN_ID", "137"))
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "false").strip().lower() == "true"
+STRATEGY_ARMED = os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
 VALIDATE_ORDER_PATH = os.environ.get("POLY_VALIDATE_ORDER_PATH", "false").strip().lower() == "true"
 
 # 0=EOA 直接持有資金, 1=POLY_PROXY（舊版 Email/Magic 帳號）, 2=POLY_GNOSIS_SAFE（連接外部錢包帳號）,
@@ -73,6 +74,18 @@ _client_lock = threading.Lock()  # get_client() 會透過 asyncio.to_thread 從�
                                   # 用鎖避免兩邊都通過「還沒初始化」的檢查、各自重複建立一次 client。
 _order_warmup_lock = threading.Lock()
 _warmed_order_tokens: set[str] = set()
+_market_fee_by_token: dict[str, dict[str, float]] = {}
+
+
+def _assert_real_order_enabled(endpoint: str) -> None:
+    """最後一道送單閘門；所有真實 POST 都必須同時通過三個安全條件。"""
+    if VALIDATE_ORDER_PATH:
+        raise RuntimeError(f"POLY_VALIDATE_ORDER_PATH=true hard-disables {endpoint}")
+    if not LIVE_TRADING or not STRATEGY_ARMED:
+        raise RuntimeError(
+            f"拒絕真實送單到 {endpoint}：必須同時設定 "
+            "LIVE_TRADING=true 與 POLY_STRATEGY_ARMED=true"
+        )
 
 
 def _require_private_key() -> None:
@@ -170,6 +183,7 @@ def summarize_order_fills(order_response: dict, trades: list) -> dict | None:
         if value
     }
     matched = []
+    seen_trade_keys: set[str] = set()
     for trade in trades or []:
         if not isinstance(trade, dict):
             continue
@@ -181,6 +195,14 @@ def summarize_order_fills(order_response: dict, trades: list) -> dict | None:
             if isinstance(item, dict)
         }
         if (trade_ids and trade_id in trade_ids) or (order_id and (taker_order_id == order_id or order_id in maker_order_ids)):
+            # API 分頁／索引更新期間可能重複回傳同一筆 trade；重複加總會製造
+            # 「FOK 成交量大於下單量」的假象。沒有 id 時才退回內容組合鍵。
+            trade_key = trade_id or repr(
+                (taker_order_id, trade.get("match_time"), trade.get("timestamp"), trade.get("size"), trade.get("price"))
+            )
+            if trade_key in seen_trade_keys:
+                continue
+            seen_trade_keys.add(trade_key)
             matched.append(trade)
     if not matched:
         return None
@@ -239,26 +261,48 @@ def build_order(token_id: str, side: str, price: float, size: float):
     return client.create_order(order_args)
 
 
-def prewarm_order_tokens(token_ids: list[str]) -> None:
+def prewarm_order_tokens(token_ids: list[str], condition_id: str | None = None) -> None:
     """預先填好 SDK 的 tick-size／neg-risk／CLOB version 快取。
 
     py_clob_client_v2 第一次為新 token 建單時會同步查這些 API。每個 5 分鐘窗口的 token
     都不同，如果等到看見套利機會才查，真正的 POST 會平白晚數個網路往返。這裡只建立、
     簽署一筆不會送出的測試訂單；不會動用資金，也不會呼叫 POST /order(s)。
     """
-    pending = [str(token_id) for token_id in token_ids if token_id]
-    if not pending:
+    wanted = [str(token_id) for token_id in token_ids if token_id]
+    if not wanted:
         return
 
     with _order_warmup_lock:
-        pending = [token_id for token_id in pending if token_id not in _warmed_order_tokens]
-        if not pending:
+        pending = [token_id for token_id in wanted if token_id not in _warmed_order_tokens]
+        fee_pending = condition_id and any(token_id not in _market_fee_by_token for token_id in wanted)
+        if not pending and not fee_pending:
             return
         started = time.perf_counter()
         for token_id in pending:
             # 0.50 對目前支援的 tick size 都是合法價；size 不送出，因此不受最低下單量影響。
             build_order(token_id, "BUY", 0.50, 1.0)
             _warmed_order_tokens.add(token_id)
+        if condition_id:
+            # V2 的平台費率與 exponent 是市場設定，不可再用固定 Crypto 舊公式猜測。
+            # 在非搶單路徑一次抓完並快取，真正做鎖利判斷時只讀記憶體。
+            market_info = get_client().get_clob_market_info(str(condition_id))
+            fee_data = market_info.get("fd") or {}
+            if "r" not in fee_data or "e" not in fee_data:
+                raise RuntimeError(f"V2 市場費率資料不完整：{fee_data!r}")
+            rate = float(fee_data["r"])
+            exponent = float(fee_data["e"])
+            returned_tokens = {
+                str(item.get("t"))
+                for item in (market_info.get("t") or [])
+                if isinstance(item, dict) and item.get("t")
+            }
+            if not returned_tokens:
+                returned_tokens = set(wanted)
+            for token_id in returned_tokens:
+                _market_fee_by_token[token_id] = {"rate": rate, "exponent": exponent}
+            missing_fee_tokens = set(wanted) - set(_market_fee_by_token)
+            if missing_fee_tokens:
+                raise RuntimeError(f"V2 市場費率沒有涵蓋 token：{sorted(missing_fee_tokens)}")
         log.info(
             "[ORDER-WARMUP] 已預熱 %d 個 token 的建單快取，耗時 %.1fms",
             len(pending),
@@ -266,11 +310,24 @@ def prewarm_order_tokens(token_ids: list[str]) -> None:
         )
 
 
+def get_cached_market_fee(token_id: str) -> dict[str, float] | None:
+    """讀取預熱期間取得的 V2 市場費率；不在下單臨界路徑打網路。"""
+    value = _market_fee_by_token.get(str(token_id))
+    return dict(value) if value is not None else None
+
+
 def order_tokens_are_warm(token_ids: list[str]) -> bool:
     """回報這個進程內的 SDK 建單快取是否已為所有 token 預熱。"""
     wanted = {str(token_id) for token_id in token_ids if token_id}
     with _order_warmup_lock:
         return bool(wanted) and wanted.issubset(_warmed_order_tokens)
+
+
+def order_tokens_and_fees_are_warm(token_ids: list[str]) -> bool:
+    """實盤快速路徑要求建單資訊與 V2 動態費率都已存在記憶體。"""
+    wanted = {str(token_id) for token_id in token_ids if token_id}
+    with _order_warmup_lock:
+        return bool(wanted) and wanted.issubset(_warmed_order_tokens) and wanted.issubset(_market_fee_by_token)
 
 
 def validate_batch_order_path(token_ids: list[str]) -> dict:
@@ -339,9 +396,6 @@ def place_limit_orders_batch(
         for order in orders
     ]
     effective_dry_run = (not LIVE_TRADING) if dry_run is None else dry_run
-    if VALIDATE_ORDER_PATH and not effective_dry_run:
-        raise RuntimeError("POLY_VALIDATE_ORDER_PATH=true hard-disables POST /orders")
-
     if effective_dry_run:
         if validate_signature:
             for order in normalized:
@@ -362,11 +416,7 @@ def place_limit_orders_batch(
             for order in normalized
         ]
 
-    if not LIVE_TRADING:
-        raise RuntimeError(
-            "dry_run=False 但 .env 的 LIVE_TRADING 不是 true。"
-            "請先確認你真的要送出真實訂單，再把 .env 的 LIVE_TRADING 改成 true。"
-        )
+    _assert_real_order_enabled("POST /orders")
 
     from py_clob_client_v2.clob_types import OrderType, PostOrdersV2Args
 
@@ -427,9 +477,6 @@ def place_limit_order(
         False -> 強制送單（仍要求 LIVE_TRADING=true 才會真的執行，否則拋錯，避免誤觸）
     """
     effective_dry_run = (not LIVE_TRADING) if dry_run is None else dry_run
-    if VALIDATE_ORDER_PATH and not effective_dry_run:
-        raise RuntimeError("POLY_VALIDATE_ORDER_PATH=true hard-disables POST /order")
-
     if effective_dry_run:
         # CLI preview 預設仍會建立並簽署訂單；自動策略的 dry-run 可關閉此驗證，
         # 方便在沒有私鑰的環境完整測試策略，且絕不會呼叫下單 API。
@@ -446,11 +493,7 @@ def place_limit_order(
             "would_submit": {"token_id": token_id, "side": side, "price": price, "size": size, "order_type": order_type},
         }
 
-    if not LIVE_TRADING:
-        raise RuntimeError(
-            "dry_run=False 但 .env 的 LIVE_TRADING 不是 true。"
-            "請先確認你真的要送出真實訂單，再把 .env 的 LIVE_TRADING 改成 true。"
-        )
+    _assert_real_order_enabled("POST /order")
 
     from py_clob_client_v2.clob_types import OrderType
 

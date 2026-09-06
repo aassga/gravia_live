@@ -5,8 +5,8 @@ Polymarket BTC 5 分鐘 Up/Down · 真實自動下單策略
     - 使用 Ask/Bid 深度計算 VWAP，再以含滑點、向不利 tick 取整的最差限價作決策。
     - 優先鎖利：當下兩邊同時買得到、扣費用後淨賺達門檻才配對進場，這是唯一的
       無方向曝險進場路徑。
-    - 鎖不到時的備案是晚進場方向性：只在窗口剩不到 10 秒、且現價已經明顯偏離
-      這個窗口開盤價時才賭方向，進場後不補鎖利、不提早出場，抱到結算為止。
+    - 單腿晚進場方向性預設停用；只有 POLY_ENABLE_LATE_DIRECTION=true 才會在窗口
+      剩不到 10 秒、且現價明顯偏離開盤價時啟用，這不是鎖利交易。
     - 只有「兩腿配對其中一腿失敗、留下未預期單邊曝險」這種例外情況，才會嘗試
       補鎖利或在市場 Bid 顯著高於模型持有價值時提早退出——不是常態進場路徑。
 
@@ -50,6 +50,7 @@ STAKE_PCT = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
 STRATEGY_ARMED = os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
 # Validation mode is a hard safety interlock: it can never submit real orders.
 REAL_EXECUTION_ENABLED = live.LIVE_TRADING and STRATEGY_ARMED and not live.VALIDATE_ORDER_PATH
+ENABLE_LATE_DIRECTION = os.environ.get("POLY_ENABLE_LATE_DIRECTION", "false").strip().lower() == "true"
 MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
 DRY_RUN_BALANCE_USD = max(1.0, float(os.environ.get("POLY_DRY_RUN_BALANCE_USD", "100.0")))
@@ -70,6 +71,7 @@ EMERGENCY_UNWIND_RETRY_INTERVAL = max(0.5, float(os.environ.get("POLY_EMERGENCY_
 # 在正常保守限價之上，再多讓這麼多格 tick，犧牲一點價格換取更高的立即成交機率。
 EMERGENCY_UNWIND_EXTRA_TICKS = max(0, int(os.environ.get("POLY_EMERGENCY_UNWIND_EXTRA_TICKS", "3")))
 _validated_order_path_slug: str | None = None
+_live_data_guard_log_at = 0.0
 
 # 真實版跟隨模擬版 ASSETS 清單裡的哪一個市場，預設是 BTC 5 分鐘窗口（"btc"）。
 # 2026-09：模擬盤驗證出 15 分鐘／4 小時窗口的訂單簿深度比 5 分鐘深很多（少踩到「兩腿
@@ -255,15 +257,45 @@ def marketable_limit_price(book: dict, fill: dict, side: str) -> float:
     return sim.marketable_limit_price(book, fill, side)
 
 
-def _risk_fill(book: dict, fill: dict, side: str) -> dict:
-    decision = sim.decision_fill(book, fill, side)
+def _market_condition_id() -> str | None:
+    market = sim.state.get("market") or {}
+    value = market.get("conditionId") or market.get("condition_id")
+    return str(value) if value else None
+
+
+def _fee_for_side(side: str, shares: float, price: float) -> tuple[float, float, float]:
+    """回傳 (fee, rate, exponent)；實盤只接受預熱取得的 V2 動態市場費率。"""
+    if not REAL_EXECUTION_ENABLED:
+        return sim.taker_fee(shares, price), sim.SIM_TAKER_FEE_RATE, 1.0
+    token_id = _token_id(side)
+    config = live.get_cached_market_fee(token_id)
+    if config is None:
+        raise RuntimeError(f"missing_v2_market_fee token={token_id}")
+    rate = float(config["rate"])
+    exponent = float(config["exponent"])
+    fee = round(shares * rate * (price * (1 - price)) ** exponent, 5)
+    return (fee if fee >= 0.00001 else 0.0), rate, exponent
+
+
+def _fee_from_plan(plan: dict, shares: float, price: float) -> float:
+    rate = float(plan.get("feeRate", sim.SIM_TAKER_FEE_RATE))
+    exponent = float(plan.get("feeExponent", 1.0))
+    fee = round(shares * rate * (price * (1 - price)) ** exponent, 5)
+    return fee if fee >= 0.00001 else 0.0
+
+
+def _risk_fill(book: dict, fill: dict, order_side: str, market_side: str) -> dict:
+    decision = sim.decision_fill(book, fill, order_side)
     shares = float(fill["shares"])
+    fee, fee_rate, fee_exponent = _fee_for_side(market_side, shares, decision["decisionPrice"])
     return {
         "shares": shares,
         "observedVwap": decision["observedVwap"],
         "limitPrice": decision["decisionPrice"],
         "riskNotional": decision["decisionNotional"],
-        "fee": decision["decisionFee"],
+        "fee": fee,
+        "feeRate": fee_rate,
+        "feeExponent": fee_exponent,
     }
 
 
@@ -283,7 +315,7 @@ async def _resolved_execution(plan: dict, response: dict, dry_run: bool) -> dict
     price = float(plan["observedVwap"] if dry_run else plan["limitPrice"])
     shares = float(plan["shares"])
     notional = shares * price
-    fee = sim.taker_fee(shares, price)
+    fee = _fee_from_plan(plan, shares, price)
 
     if not dry_run:
         try:
@@ -309,7 +341,7 @@ async def _resolved_execution(plan: dict, response: dict, dry_run: bool) -> dict
             price = float(summary["price"])
             notional = float(summary["notional"])
             fee = summary.get("fee")
-            fee = sim.taker_fee(shares, price) if fee is None else float(fee)
+            fee = _fee_from_plan(plan, shares, price) if fee is None else float(fee)
             source = "matched_trades"
 
     return {"price": price, "notional": notional, "fee": fee, "source": source, "shares": shares}
@@ -325,7 +357,7 @@ def _buy_plan(side: str, book: dict, shares: float, fair_probability: float | No
     fill = sim.simulate_buy_fill(book, shares)
     if not fill:
         return None
-    risk = _risk_fill(book, fill, "BUY")
+    risk = _risk_fill(book, fill, "BUY", side)
     if shares < float(book.get("minOrderSize", 1) or 1) or risk["riskNotional"] < sim.SIM_MIN_ORDER_NOTIONAL_USD:
         return None
     all_in_per_share = (risk["riskNotional"] + risk["fee"]) / shares
@@ -337,7 +369,7 @@ def _sell_plan(side: str, book: dict, shares: float) -> dict | None:
     fill = sim.simulate_sell_fill(book, shares)
     if not fill:
         return None
-    risk = _risk_fill(book, fill, "SELL")
+    risk = _risk_fill(book, fill, "SELL", side)
     if shares < float(book.get("minOrderSize", 1) or 1) or risk["riskNotional"] < sim.SIM_MIN_ORDER_NOTIONAL_USD:
         return None
     return {"side": side, "book": book, **risk}
@@ -356,7 +388,7 @@ def _aggressive_sell_plan(side: str, book: dict, shares: float) -> dict | None:
     plan = dict(plan)
     plan["limitPrice"] = price
     plan["riskNotional"] = plan["shares"] * price
-    plan["fee"] = sim.taker_fee(plan["shares"], price)
+    plan["fee"] = _fee_from_plan(plan, plan["shares"], price)
     return plan
 
 
@@ -515,7 +547,7 @@ async def _query_conditional_balance_with_retry(token_id: str) -> float:
 
 
 async def _ensure_no_unmanaged_current_position() -> bool:
-    """真實模式的首筆下單前，確認當前兩個 token 都沒有策略狀態之外的持倉。"""
+    """真實模式首筆下單前，確認當前 token 沒有策略狀態外的持倉或掛單。"""
     up_id, down_id = sim._market_tokens(sim.state["market"])
     try:
         up_balance = await _query_conditional_balance_with_retry(up_id)
@@ -529,13 +561,113 @@ async def _ensure_no_unmanaged_current_position() -> bool:
         )
         return False
     try:
+        open_orders = await asyncio.to_thread(live.get_open_orders)
+    except Exception as exc:
+        _set_halt(f"preflight_open_order_check_failed: {exc}")
+        return False
+    current_tokens = {str(up_id), str(down_id)}
+    current_open_orders = []
+    for order in open_orders or []:
+        if not isinstance(order, dict):
+            continue
+        token_id = str(
+            order.get("asset_id")
+            or order.get("assetId")
+            or order.get("token_id")
+            or order.get("tokenId")
+            or ""
+        )
+        if token_id in current_tokens:
+            current_open_orders.append(order)
+    if current_open_orders:
+        _set_halt(
+            f"unmanaged_current_market_open_orders count={len(current_open_orders)}",
+            {"orders": current_open_orders},
+        )
+        return False
+    try:
         # 每個 5 分鐘窗口都換新 token。先在 preflight（非搶單臨界路徑）填好 SDK 的
         # tick-size／neg-risk／version 快取，避免真正要送單時才多等數個 GET 往返。
-        await asyncio.to_thread(live.prewarm_order_tokens, [up_id, down_id])
+        condition_id = _market_condition_id()
+        if not condition_id:
+            raise RuntimeError("current market is missing conditionId")
+        await asyncio.to_thread(live.prewarm_order_tokens, [up_id, down_id], condition_id)
     except Exception as exc:
         _set_halt(f"preflight_order_warmup_failed: {exc}")
         return False
     return True
+
+
+def _live_book_guard_reason(up_book: dict, down_book: dict) -> str | None:
+    """實盤進場只允許同一時間範圍內的兩份完整 WS 快照。"""
+    return sim._simulation_book_guard_reason(up_book, down_book)
+
+
+def _live_books_are_coherent(up_book: dict, down_book: dict) -> bool:
+    global _live_data_guard_log_at
+    reason = _live_book_guard_reason(up_book, down_book)
+    if reason is None:
+        return True
+    now = time.monotonic()
+    if now - _live_data_guard_log_at >= sim.SIM_DATA_GUARD_LOG_SECONDS:
+        _live_data_guard_log_at = now
+        log.warning(f"[LIVE-DATA-GUARD] 跳過真實下單：{reason}")
+    return False
+
+
+async def _current_account_reconciliation() -> dict:
+    """結果不明時留下唯讀帳戶快照，供人工判斷；絕不據此自動重送訂單。"""
+    snapshot: dict = {"capturedAt": time.time(), "balances": {}, "openOrders": [], "recentTrades": []}
+    try:
+        up_id, down_id = sim._market_tokens(sim.state["market"])
+        for label, token_id in (("Up", up_id), ("Down", down_id)):
+            snapshot["balances"][label] = await _query_conditional_balance_with_retry(token_id)
+    except Exception as exc:
+        snapshot["balanceError"] = str(exc)
+    try:
+        orders = await asyncio.to_thread(live.get_open_orders)
+        snapshot["openOrders"] = [
+            {
+                "id": order.get("id") or order.get("orderID") or order.get("orderId"),
+                "status": order.get("status"),
+                "tokenId": order.get("asset_id") or order.get("assetId") or order.get("token_id") or order.get("tokenId"),
+                "side": order.get("side"),
+                "price": order.get("price"),
+                "size": order.get("size") or order.get("original_size"),
+            }
+            for order in (orders or [])
+            if isinstance(order, dict)
+        ]
+    except Exception as exc:
+        snapshot["openOrdersError"] = str(exc)
+    try:
+        trades = await asyncio.to_thread(live.get_trade_history, 20)
+        snapshot["recentTrades"] = [
+            {
+                "id": trade.get("id") or trade.get("trade_id"),
+                "takerOrderId": trade.get("taker_order_id") or trade.get("takerOrderId"),
+                "tokenId": trade.get("asset_id") or trade.get("assetId"),
+                "side": trade.get("side"),
+                "price": trade.get("price"),
+                "size": trade.get("size"),
+                "status": trade.get("status"),
+            }
+            for trade in (trades or [])
+            if isinstance(trade, dict)
+        ]
+    except Exception as exc:
+        snapshot["tradesError"] = str(exc)
+    return snapshot
+
+
+async def _halt_for_unconfirmed(reason: str, order: dict, reconcile: bool = True) -> None:
+    order = dict(order)
+    # 先停機再查帳，確保唯讀查詢期間不會有其他路徑送出新單。
+    _set_halt(reason, order)
+    if reconcile:
+        order["reconciliation"] = await _current_account_reconciliation()
+    live_state["unconfirmedOrder"] = order
+    save_live_state()
 
 
 async def _validate_order_path_once(slug: str) -> bool:
@@ -574,7 +706,12 @@ async def _resolve_fok_response(response: dict, dry_run: bool) -> tuple[str, dic
         return "filled", response
 
     status = str(response.get("status", "")).lower()
-    if status in {"unmatched", "cancelled", "canceled", "rejected", ""}:
+    terminal_not_filled = {
+        "unmatched", "cancelled", "canceled", "rejected", "",
+        "order_status_invalid", "order_status_canceled", "order_status_cancelled",
+        "order_status_canceled_market_resolved", "order_status_cancelled_market_resolved",
+    }
+    if status in terminal_not_filled:
         return "not_filled", response
     if status != "delayed":
         return "unconfirmed", response
@@ -593,7 +730,7 @@ async def _resolve_fok_response(response: dict, dry_run: bool) -> tuple[str, dic
         if live.order_response_filled(latest):
             return "filled", latest
         latest_status = str(latest.get("status", "")).lower() if isinstance(latest, dict) else ""
-        if latest_status in {"unmatched", "cancelled", "canceled", "rejected"}:
+        if latest_status in terminal_not_filled:
             return "not_filled", latest
     return "unconfirmed", latest
 
@@ -620,12 +757,16 @@ async def _submit_fok(token_id: str, side: str, plan: dict, dry_run: bool) -> tu
         from py_clob_client_v2.exceptions import PolyApiException
 
         if not isinstance(exc, PolyApiException):
-            raise
+            # 連線中斷／timeout 可能發生在伺服器已經收單之後，不能當成沒成交。
+            return "unconfirmed", {"error": str(exc), "exceptionType": type(exc).__name__}
         # FOK 沒吃滿（訂單簿在下單瞬間跟決策當下的快照之間變薄了）是正常會發生的情況，
         # 不是程式錯誤——CLOB 直接回 400 而不是回一個帶 status 的訂單物件，用例外表達。
         # 當成跟 status=unmatched 一樣的「這次沒成交」處理，不要整包當未預期例外往外拋。
-        log.info(f"[LIVE] FOK 未成交（下單瞬間深度不夠）：{exc}")
-        return "not_filled", {"error": str(exc)}
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int) and 400 <= status_code < 500 and status_code != 408:
+            log.info(f"[LIVE] FOK 被 CLOB 明確拒絕、未成交：{exc}")
+            return "not_filled", {"error": str(exc), "statusCode": status_code}
+        return "unconfirmed", {"error": str(exc), "statusCode": status_code}
     return await _resolve_fok_response(response, dry_run)
 
 
@@ -735,12 +876,17 @@ def _warn_if_shares_corrected(label: str, plan: dict, execution: dict, dry_run: 
 
 
 async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
+    if not dry_run:
+        up_book, down_book = sim.state.get("upBook"), sim.state.get("downBook")
+        if not up_book or not down_book or not _live_books_are_coherent(up_book, down_book):
+            return "not_filled"
     token_id = _token_id(plan["side"])
     result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
     if result == "unconfirmed":
-        _set_halt(
+        await _halt_for_unconfirmed(
             f"entry_order_unconfirmed side={plan['side']}",
             {"orderID": response.get("orderID") or response.get("orderId"), "side": plan["side"], "tokenId": token_id},
+            reconcile=not dry_run,
         )
         return result
     if result != "filled":
@@ -805,9 +951,10 @@ async def _hedge_position(plan: dict, dry_run: bool) -> str:
     token_id = _token_id(plan["side"])
     result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
     if result == "unconfirmed":
-        _set_halt(
+        await _halt_for_unconfirmed(
             f"hedge_order_unconfirmed side={plan['side']}",
             {"orderID": response.get("orderID") or response.get("orderId"), "side": plan["side"], "tokenId": token_id},
+            reconcile=not dry_run,
         )
         return result
     if result != "filled":
@@ -829,9 +976,10 @@ async def _close_position(plan: dict, dry_run: bool, reason: str) -> str:
     pos = live_state["position"]
     result, response = await _submit_fok(pos["tokenId"], "SELL", plan, dry_run)
     if result == "unconfirmed":
-        _set_halt(
+        await _halt_for_unconfirmed(
             f"exit_order_unconfirmed reason={reason}",
             {"orderID": response.get("orderID") or response.get("orderId"), "side": "SELL", "tokenId": pos["tokenId"]},
+            reconcile=not dry_run,
         )
         return result
     if result != "filled":
@@ -939,6 +1087,8 @@ async def _execute_direct_pair(
     fair: dict | None,
     dry_run: bool,
 ) -> None:
+    if not dry_run and not _live_books_are_coherent(up["book"], down["book"]):
+        return
     if fair:
         for plan in (up, down):
             fair_side = fair["fairUp"] if plan["side"] == "Up" else fair["fairDown"]
@@ -959,16 +1109,52 @@ async def _execute_direct_pair(
         dry_run,
     )
 
-    for side, result, response, token_id in (
-        ("Up", up_result, up_response, up_token),
-        ("Down", down_result, down_response, down_token),
-    ):
-        if result == "unconfirmed":
-            _set_halt(
-                f"direct_pair_leg_unconfirmed side={side}",
-                {"orderID": response.get("orderID") or response.get("orderId"), "side": side, "tokenId": token_id},
-            )
-            return
+    unconfirmed_legs = [
+        (side, response, token_id)
+        for side, result, response, token_id in (
+            ("Up", up_result, up_response, up_token),
+            ("Down", down_result, down_response, down_token),
+        )
+        if result == "unconfirmed"
+    ]
+    if unconfirmed_legs:
+        # 若另一腿已明確 matched，必須先留下已知持倉，不能讓狀態頁顯示空倉。
+        known_filled = None
+        if up_result == "filled":
+            known_filled = (up, up_response)
+        elif down_result == "filled":
+            known_filled = (down, down_response)
+        if known_filled is not None:
+            filled_plan, filled_response = known_filled
+            execution = await _resolved_execution(filled_plan, filled_response, dry_run)
+            pos = _build_position_dict(slug, filled_plan, filled_response, execution, dry_run)
+            pos["reconciliationRequired"] = True
+            pos["unknownLegs"] = [side for side, _response, _token_id_value in unconfirmed_legs]
+            live_state["position"] = pos
+            save_live_state()
+
+        details = {
+            "batch": True,
+            "legs": [
+                {
+                    "side": side,
+                    "result": result,
+                    "orderID": response.get("orderID") or response.get("orderId"),
+                    "tokenId": token_id,
+                    "error": response.get("error"),
+                }
+                for side, result, response, token_id in (
+                    ("Up", up_result, up_response, up_token),
+                    ("Down", down_result, down_response, down_token),
+                )
+            ],
+        }
+        await _halt_for_unconfirmed(
+            "direct_pair_batch_unconfirmed",
+            details,
+            reconcile=not dry_run,
+        )
+        return
 
     up_filled = up_result == "filled"
     down_filled = down_result == "filled"
@@ -1075,6 +1261,8 @@ async def evaluate_and_act(
         if remaining_seconds is None or remaining_seconds <= 0:
             return
         dry_run = not REAL_EXECUTION_ENABLED
+        if not dry_run and not _live_books_are_coherent(up_book, down_book):
+            return
         if not dry_run and live_state.get("preflightSlug") != slug:
             if not await _ensure_no_unmanaged_current_position():
                 return
@@ -1082,11 +1270,14 @@ async def evaluate_and_act(
             save_live_state()
         if not dry_run:
             up_id, down_id = sim._market_tokens(sim.state["market"])
-            if not live.order_tokens_are_warm([up_id, down_id]):
+            if not live.order_tokens_and_fees_are_warm([up_id, down_id]):
                 try:
                     # preflightSlug 會寫入磁碟；若程式在同一窗口重啟，它可能已經是目前 slug，
                     # 但 SDK 的記憶體快取已清空，所以仍要獨立確認這個進程真的完成預熱。
-                    await asyncio.to_thread(live.prewarm_order_tokens, [up_id, down_id])
+                    condition_id = _market_condition_id()
+                    if not condition_id:
+                        raise RuntimeError("current market is missing conditionId")
+                    await asyncio.to_thread(live.prewarm_order_tokens, [up_id, down_id], condition_id)
                 except Exception as exc:
                     _set_halt(f"order_warmup_failed: {exc}")
                     return
@@ -1105,7 +1296,8 @@ async def evaluate_and_act(
         if direct:
             await _execute_direct_pair(session, slug, direct[0], direct[1], fair, dry_run)
             return
-        await _try_late_direction_entry(slug, up_book, down_book, remaining_seconds, shares, dry_run)
+        if ENABLE_LATE_DIRECTION:
+            await _try_late_direction_entry(slug, up_book, down_book, remaining_seconds, shares, dry_run)
         return
 
     if pos.get("hedged") or pos.get("windowSlug") != slug:
@@ -1232,11 +1424,13 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
         if remaining <= 0:
             return
         dry_run = not REAL_EXECUTION_ENABLED
+        if not dry_run and not _live_books_are_coherent(up_book, down_book):
+            return
         if not dry_run and live_state.get("preflightSlug") != slug:
             # 真實模式每個窗口第一次要做的 preflight 檢查需要真的等網路 I/O，不屬於這條
             # 零延遲路徑該做的事，留給 3 秒輪詢那條路（原本的 evaluate_and_act）處理。
             return
-        if not dry_run and not live.order_tokens_are_warm([up_id, down_id]):
+        if not dry_run and not live.order_tokens_and_fees_are_warm([up_id, down_id]):
             # 程式重啟會清空 SDK 的記憶體快取；預熱完成前不從 WS 快速路徑搶單，改由
             # 3 秒輪詢路徑在背景完成預熱後再開放。
             return
@@ -1257,7 +1451,7 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
             )
             return
 
-        plan = _late_direction_plan(up_book, down_book, remaining, shares)
+        plan = _late_direction_plan(up_book, down_book, remaining, shares) if ENABLE_LATE_DIRECTION else None
         if plan:
             _ws_action_in_flight["v"] = True
             asyncio.get_running_loop().create_task(
@@ -1305,6 +1499,8 @@ async def _run_ws_pair_entry(
     async with decision_lock:
         if live_state.get("position") is not None:
             return
+        if not dry_run and not _live_books_are_coherent(up["book"], down["book"]):
+            return
         await _execute_direct_pair(session, slug, up, down, fair, dry_run)
 
 
@@ -1314,6 +1510,11 @@ async def _run_ws_late_direction_entry(
     _ws_action_in_flight["v"] = False
     async with decision_lock:
         if live_state.get("position") is not None:
+            return
+        if not ENABLE_LATE_DIRECTION:
+            return
+        up_book, down_book = sim.state.get("upBook"), sim.state.get("downBook")
+        if not dry_run and (not up_book or not down_book or not _live_books_are_coherent(up_book, down_book)):
             return
         log.info(
             f"[LIVE] 晚進場方向性 {plan['side']} Δ={plan['_deltaPct']:+.3f}%（WS 即時觸發）"
@@ -1346,11 +1547,14 @@ def _log_startup_banner(mode: str) -> None:
     log.info(f"  pair budget={STAKE_PCT:.1f}% · hard cap=${MAX_PAIR_BUDGET_USD:.2f}")
     log.info(f"  cash reserve=${MIN_CASH_RESERVE_USD:.2f} · action cooldown={ACTION_COOLDOWN_SECONDS:.0f}s")
     log.info(f"  lock sum <= ${LOCK_MAX_SUM}（跟隨 {LIVE_ASSET_ID}-late-direction）　net lock/share>={sim.SIM_MIN_NET_LOCK_PER_SHARE:.3f}")
-    log.info(
-        f"  找不到鎖利時備案＝晚進場方向性：剩餘 {sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
-        f"{sim.LATE_DIRECTION_WINDOW_SECONDS:.0f}s、偏移開盤價>={sim.LATE_DIRECTION_MIN_DELTA_PCT:.2f}%、"
-        f"進場價<=${LATE_DIRECTION_MAX_PRICE} 才進場，進場後不補鎖利／不提早出場"
-    )
+    if ENABLE_LATE_DIRECTION:
+        log.warning(
+            f"  單腿方向性下注已啟用：剩餘 {sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
+            f"{sim.LATE_DIRECTION_WINDOW_SECONDS:.0f}s、偏移開盤價>={sim.LATE_DIRECTION_MIN_DELTA_PCT:.2f}%、"
+            f"進場價<=${LATE_DIRECTION_MAX_PRICE}"
+        )
+    else:
+        log.info("  單腿方向性下注已停用（POLY_ENABLE_LATE_DIRECTION=false）")
     if live_state.get("halted"):
         log.critical(f"  STRATEGY HALTED: {live_state.get('haltReason')}")
     log.info("=" * 64)
