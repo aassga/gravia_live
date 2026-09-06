@@ -522,7 +522,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
           <span class="red">回撤 ${(v.maxDrawdown||0).toFixed(2)}%</span>
         </div>
         <div style="font-size:8.5px;color:#444;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-          ${isMaker?`Maker queue · Up ${makerQuotes.Up?'$'+makerQuotes.Up.price.toFixed(3):'—'} / Down ${makerQuotes.Down?'$'+makerQuotes.Down.price.toFixed(3):'—'} · 救援 對沖/平倉/失敗 ${makerStats.rescueHedges||0}/${makerStats.rescueUnwinds||0}/${makerStats.rescueFailures||0}`:`${typeof v.entryMaxPrice==='number'?'進場≤$'+v.entryMaxPrice.toFixed(2)+' · ':'只做鎖利／晚進場方向性 · '}鎖利合計≤$${v.lockMaxSum.toFixed(2)}`} · 資產 $${v.portfolio.toFixed(2)}
+          ${isMaker?`Maker queue · Up ${makerQuotes.Up?'$'+makerQuotes.Up.price.toFixed(3):'—'} / Down ${makerQuotes.Down?'$'+makerQuotes.Down.price.toFixed(3):'—'} · 救援 對沖/平倉/失敗 ${makerStats.rescueHedges||0}/${makerStats.rescueUnwinds||0}/${makerStats.rescueFailures||0}`:`${v.liveMirrorOnly?`實盤鏡像 ${Number(v.stakePct||0).toFixed(1)}% · 僅兩腿鎖利 · `:(typeof v.entryMaxPrice==='number'?'進場≤$'+v.entryMaxPrice.toFixed(2)+' · ':'只做鎖利／晚進場方向性 · ')}鎖利合計≤$${v.lockMaxSum.toFixed(2)}`} · 資產 $${v.portfolio.toFixed(2)}
         </div>`;
 
       const trades=v.trades||[];

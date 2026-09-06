@@ -107,6 +107,13 @@ SIM_MIN_ORDER_NOTIONAL_USD  = 1.0   # 跟實盤一致：單腿成交金額低於
 SIM_EXIT_EDGE               = 0.02  # 市場可賣價高於模型持有價值 2¢/股時提早退出
 SIM_FAIR_MODEL_WEIGHT       = 0.65  # Binance 波動模型權重；其餘使用市場隱含機率校準
 SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025, "btc-15m": 0.000025, "btc-4h": 0.000025, "eth": 0.000035}
+
+# 實盤鏡像模擬組：直接讀取與 polymarket_live_strategy.py 相同的環境變數，讓模擬盤
+# 有一張獨立卡片只累積「目前實盤有效策略」的結果，不和 main／晚進場方向性混在一起。
+LIVE_MIRROR_ASSET_ID            = os.environ.get("POLY_LIVE_ASSET_ID", "btc")
+LIVE_MIRROR_STAKE_PCT           = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
+LIVE_MIRROR_MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
+LIVE_MIRROR_MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
 # 股數封頂在「當下看得到的深度」的這個比例。2026-09：實盤好幾次撞到「模擬盤跟實盤在
 # 同一秒看到同一個機會，模擬盤保證吃得到、實盤卻因為深度不夠被拒」——這不是 bug，是
 # 紙上模擬（吃剛看到的快照，保證成交）跟真實下單（要跟其他真人搶同一份流動性，中間
@@ -209,6 +216,18 @@ for _asset in ASSETS:
             "label":         f"{_asset['label']} {_cfg['labelSuffix']}",
             "entryMaxPrice": _cfg["entryMaxPrice"],
             "lockMaxSum":    _cfg["lockMaxSum"],
+        })
+    if _asset["id"] == LIVE_MIRROR_ASSET_ID:
+        AB_VARIANTS.append({
+            "id":                      f"{_asset['id']}-live-lock",
+            "assetId":                 _asset["id"],
+            "label":                   f"{_asset['label']} 實盤鏡像・兩腿鎖利",
+            "entryMaxPrice":           None,
+            "lockMaxSum":              SIM_LOCK_MAX_SUM,
+            "liveMirrorOnly":           True,
+            "stakePct":                LIVE_MIRROR_STAKE_PCT,
+            "maxPairBudgetUsd":         LIVE_MIRROR_MAX_PAIR_BUDGET_USD,
+            "minCashReserveUsd":        LIVE_MIRROR_MIN_CASH_RESERVE_USD,
         })
     AB_VARIANTS.append({
         "id":                    f"{_asset['id']}-late-direction",
@@ -836,7 +855,13 @@ def _target_order_size(variant_id: str) -> tuple[float, float]:
     """模擬版包一層：帶入這組 A/B 變體自己的現金與鎖利門檻。"""
     variant = AB_VARIANT_BY_ID[variant_id]
     cash, _ = compute_cash_and_portfolio(variant_id)
-    return target_pair_order(cash, shared_config["stakePct"], variant["lockMaxSum"])
+    return target_pair_order(
+        cash,
+        float(variant.get("stakePct", shared_config["stakePct"])),
+        variant["lockMaxSum"],
+        float(variant.get("maxPairBudgetUsd", SIM_MAX_PAIR_BUDGET_USD)),
+        float(variant.get("minCashReserveUsd", SIM_MIN_CASH_RESERVE_USD)),
+    )
 
 
 def enter_position(
@@ -2036,8 +2061,12 @@ def build_ab_leaderboard() -> list:
             "assetId":       v["assetId"],
             "label":         v["label"],
             "strategyType":  "maker" if v.get("marketMakerOnly") else "taker",
+            "liveMirrorOnly": bool(v.get("liveMirrorOnly")),
             "entryMaxPrice": v["entryMaxPrice"],
             "lockMaxSum":    v["lockMaxSum"],
+            "stakePct":      float(v.get("stakePct", shared_config["stakePct"])),
+            "maxPairBudgetUsd": float(v.get("maxPairBudgetUsd", SIM_MAX_PAIR_BUDGET_USD)),
+            "minCashReserveUsd": float(v.get("minCashReserveUsd", SIM_MIN_CASH_RESERVE_USD)),
             "totalPnl":      st["totalPnl"],
             "totalTrades":   st["totalTrades"],
             "wins":          st["wins"],

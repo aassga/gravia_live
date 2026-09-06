@@ -74,6 +74,28 @@
 
   .addr{color:#7a6a55;font-size:10.5px;word-break:break-all;}
   .footer-note{margin-top:14px;color:#4a3f30;font-size:10.5px;font-family:'Share Tech Mono';letter-spacing:1px;text-align:center;}
+  .strategy-info{position:relative;display:flex;align-items:center;gap:7px;width:max-content;max-width:100%;margin-top:4px;}
+  .strategy-info #strategy-name{margin-top:0;}
+  .strategy-info-icon{
+    width:18px;height:18px;flex:0 0 18px;border:1px solid #ffb020;border-radius:50%;
+    background:#ffb02012;color:#ffb020;font:700 11px/16px 'JetBrains Mono',monospace;
+    text-align:center;cursor:help;padding:0;
+  }
+  .strategy-info-icon:focus-visible{outline:2px solid #3ddc84;outline-offset:2px;}
+  .strategy-tooltip{
+    position:absolute;z-index:20;left:0;top:calc(100% + 8px);width:min(560px,calc(100vw - 60px));
+    padding:12px 14px;border:1px solid #8a622c;border-radius:4px;background:#171008f7;
+    color:#d8cbb9;font-size:11px;line-height:1.65;box-shadow:0 10px 28px #000b;
+    opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .15s,transform .15s,visibility .15s;
+    pointer-events:none;
+  }
+  .strategy-tooltip::before{content:"";position:absolute;top:-5px;left:8px;width:8px;height:8px;background:#171008;transform:rotate(45deg);border-left:1px solid #8a622c;border-top:1px solid #8a622c;}
+  .strategy-tooltip-title{color:#ffb020;font-weight:700;margin-bottom:5px;}
+  .strategy-tooltip ul{margin:0;padding-left:17px;}
+  .strategy-tooltip li+li{margin-top:3px;}
+  .strategy-info:hover .strategy-tooltip,.strategy-info:focus-within .strategy-tooltip,.strategy-info.open .strategy-tooltip{
+    opacity:1;visibility:visible;transform:translateY(0);pointer-events:auto;
+  }
 </style>
 </head>
 <body>
@@ -113,7 +135,14 @@
   <div class="panel">
     <div class="panel-title">自動策略狀態</div>
     <div id="strategy-health" style="font-size:18px;font-weight:700;color:#7a6a55;">尚未啟動</div>
-    <div id="strategy-name" class="sub-num" style="color:#ffb020;font-size:12.5px;font-weight:600;margin-top:4px;">策略：—</div>
+    <div class="strategy-info" id="strategy-info">
+      <div id="strategy-name" class="sub-num" style="color:#ffb020;font-size:12.5px;font-weight:600;">策略：—</div>
+      <button id="strategy-info-icon" class="strategy-info-icon" type="button" aria-label="查看完整策略內容" aria-expanded="false" aria-describedby="strategy-tooltip">i</button>
+      <div id="strategy-tooltip" class="strategy-tooltip" role="tooltip">
+        <div class="strategy-tooltip-title">完整策略內容</div>
+        <ul id="strategy-tooltip-list"><li>等待策略設定...</li></ul>
+      </div>
+    </div>
     <div id="strategy-config" class="sub-num">每注佔資產 — ・ 鎖利合計上限 — ・ 單組上限 —</div>
     <div id="strategy-position" class="sub-num">部位：—</div>
     <div id="strategy-stats" class="sub-num">估算淨損益 — · 費用 — · 交易 —</div>
@@ -265,6 +294,20 @@ function onData(d){
     ? `每注佔資產 ${cfg.stakePct.toFixed(1)}%（複利）・ 鎖利合計上限 $${Number(cfg.lockMaxSum||0).toFixed(2)}`+
       ` ・ 單組上限 $${Number(cfg.maxPairBudgetUsd||0).toFixed(2)} ・ 現金保留 $${Number(cfg.minCashReserveUsd||0).toFixed(2)}`
     : '每注佔資產 — ・ 鎖利合計上限 — ・ 單組上限 —';
+  const tooltipItems = typeof cfg.stakePct==='number' ? [
+    `市場：${String(cfg.assetId||'BTC').toUpperCase()} 5 分鐘 Up/Down。`,
+    `進場：只使用完整且新鮮的 WebSocket 兩腿訂單簿；兩腿必須都有足夠深度。`,
+    `鎖利：兩腿保守可成交限價合計 ≤ $${Number(cfg.lockMaxSum||0).toFixed(2)}，扣費後淨利 ≥ $${Number(cfg.minNetLockPerShare||0).toFixed(3)}/股。`,
+    `下單：Up／Down 各自簽署 ${cfg.orderType||'FOK'}，以${cfg.batchOrders?'單次 batch 平行':'獨立'}送出；每腿必須完整成交。`,
+    `資金：可用餘額扣除 $${Number(cfg.minCashReserveUsd||0).toFixed(2)} 後取 ${Number(cfg.stakePct||0).toFixed(1)}%，單組最高 $${Number(cfg.maxPairBudgetUsd||0).toFixed(2)}。`,
+    `單腿救援：先確認成交與 Token 到帳，每 ${Number(cfg.emergencyBalancePollSeconds||0).toFixed(2)} 秒刷新；無法安全補腿時按最新買盤平倉，單輪最多等待 ${Number(cfg.emergencyUnwindWaitSeconds||0).toFixed(1)} 秒。`,
+    `安全：整批結果不明會停止策略，避免重複下單；正常動作冷卻 ${Number(cfg.actionCooldownSeconds||0).toFixed(0)} 秒。`,
+    `方向性：${cfg.lateDirectionEnabled?'已啟用窗口末端方向性進場。':'已停用，不會因預測 BTC 漲跌而單獨進場。'}`
+  ] : ['等待策略設定...'];
+  const tooltipList=document.getElementById('strategy-tooltip-list');
+  tooltipList.replaceChildren(...tooltipItems.map(text=>{
+    const li=document.createElement('li'); li.textContent=text; return li;
+  }));
 
   const strategy=d.strategyState||{};
   const health=document.getElementById('strategy-health');

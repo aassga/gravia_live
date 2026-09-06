@@ -84,6 +84,31 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertGreater(cash, 0)
         self.assertAlmostEqual(portfolio, 100.0 + position["lockedPnl"])
 
+    def test_live_lock_variant_mirrors_live_sizing_and_disables_directional_entry(self):
+        variant = sim.AB_VARIANT_BY_ID["btc-live-lock"]
+        self.assertTrue(variant["liveMirrorOnly"])
+        self.assertEqual(variant["lockMaxSum"], sim.SIM_LOCK_MAX_SUM)
+        self.assertEqual(variant["stakePct"], sim.LIVE_MIRROR_STAKE_PCT)
+        self.assertEqual(variant["maxPairBudgetUsd"], sim.LIVE_MIRROR_MAX_PAIR_BUDGET_USD)
+        self.assertEqual(variant["minCashReserveUsd"], sim.LIVE_MIRROR_MIN_CASH_RESERVE_USD)
+
+        expected = sim.target_pair_order(
+            sim.shared_config["startBalance"],
+            sim.LIVE_MIRROR_STAKE_PCT,
+            sim.SIM_LOCK_MAX_SUM,
+            sim.LIVE_MIRROR_MAX_PAIR_BUDGET_USD,
+            sim.LIVE_MIRROR_MIN_CASH_RESERVE_USD,
+        )
+        self.assertEqual(sim._target_order_size("btc-live-lock"), expected)
+
+        # 即使符合晚進場方向訊號，只要沒有兩腿鎖利機會，實盤鏡像組仍保持空手。
+        sim.markets_state["btc"]["windowOpenSpotPrice"] = 100.0
+        sim.markets_state["btc"]["spotPrice"] = 101.0
+        up_book = {"tickSize": 0.01, "minOrderSize": 5.0, "asks": [{"price": 0.60, "size": 100.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "minOrderSize": 5.0, "asks": [{"price": 0.60, "size": 100.0}], "bids": []}
+        sim.simulate_trading("btc-live-lock", "btc-window", up_book, down_book, 5.0, None)
+        self.assertIsNone(sim.ab_states["btc-live-lock"]["position"])
+
     def test_direct_pair_rejects_when_below_real_min_order_shares(self):
         # Polymarket 真正的下限是股數（查證過真實 API 是 5 股），不是金額——就算金額、
         # 深度都夠，股數不到 minOrderSize 一樣不能進場。

@@ -183,12 +183,25 @@ def _fetch_state() -> dict:
         "trades": trades,
         "strategyState": strategy_state,
         "strategyConfig": {
-            "label": strategy._LIVE_VARIANT["label"],
+            "label": (
+                f"{strategy.LIVE_ASSET_ID.upper()} 兩腿鎖利＋晚進場方向性"
+                if strategy.ENABLE_LATE_DIRECTION
+                else f"{strategy.LIVE_ASSET_ID.upper()} 兩腿鎖利（方向性停用）"
+            ),
+            "assetId": strategy.LIVE_ASSET_ID,
             "stakePct": strategy.STAKE_PCT,
             "lockMaxSum": strategy.LOCK_MAX_SUM,
+            "minNetLockPerShare": strategy.sim.SIM_MIN_NET_LOCK_PER_SHARE,
             "lateDirectionMaxPrice": strategy.LATE_DIRECTION_MAX_PRICE,
+            "lateDirectionEnabled": strategy.ENABLE_LATE_DIRECTION,
             "maxPairBudgetUsd": strategy.MAX_PAIR_BUDGET_USD,
             "minCashReserveUsd": strategy.MIN_CASH_RESERVE_USD,
+            "actionCooldownSeconds": strategy.ACTION_COOLDOWN_SECONDS,
+            "emergencyUnwindWaitSeconds": strategy.EMERGENCY_UNWIND_WAIT_SECONDS,
+            "emergencyBalancePollSeconds": strategy.EMERGENCY_UNWIND_POLL_INTERVAL,
+            "emergencyOrderRetrySeconds": strategy.EMERGENCY_UNWIND_ORDER_INTERVAL,
+            "orderType": "FOK",
+            "batchOrders": True,
         },
     }
 
