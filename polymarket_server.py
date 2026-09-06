@@ -121,6 +121,13 @@ SIM_DEPTH_CAP_FRACTION      = 0.5
 # 影響模擬跟實盤，讓兩邊的「進場門檻」保持一致。
 SIM_PRICE_BUFFER_TICKS     = 1
 
+# 紙上成交只能使用同一輪、時間接近的兩腿 WebSocket 訂單簿。REST fallback 仍可拿來
+# 顯示行情，但不能建立模擬交易；否則 WS 重連時可能把一腿的新 snapshot 跟另一腿的
+# 舊 snapshot 拼在一起，製造實際上不存在的低價配對。
+SIM_BOOK_MAX_AGE_SECONDS   = 2.0
+SIM_BOOK_MAX_SKEW_SECONDS  = 0.5
+SIM_DATA_GUARD_LOG_SECONDS = 30.0
+
 # ── ETH maker 紙上策略 ─────────────────────────────────────────────────────
 # 只模擬在 best bid（或價差夠寬時改善一格）掛被動 BUY，不會呼叫任何下單 API。
 # 成交採保守 queue-ahead 模型：同價位的真實成交量必須先吃完掛單時看到的前方深度，
@@ -768,7 +775,7 @@ def _on_binance_price_tick(symbol: str) -> None:
             None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
         )
         up_book, down_book = ms.get("upBook"), ms.get("downBook")
-        if up_book and down_book:
+        if up_book and down_book and _simulation_books_are_coherent(aid, up_book, down_book):
             for variant_id, variant in AB_VARIANT_BY_ID.items():
                 if variant["assetId"] == aid:
                     simulate_trading(
@@ -1455,6 +1462,7 @@ _ws_book_updated_at: dict = {}
 _ws_last_message_at = 0.0
 _ws_price_listeners: set = set()
 _ws_simulation_ticks_enabled = True
+_sim_data_guard_log_at: dict = {}
 
 
 def register_ws_price_listener(callback) -> None:
@@ -1481,6 +1489,43 @@ def ws_feed_status() -> dict:
         "lastMessageAgeSeconds": age,
         "subscribedTokens": len(_ws_subscribed_tokens),
     }
+
+
+def _simulation_book_guard_reason(up_book: dict, down_book: dict, now: float | None = None) -> str | None:
+    """Return why a two-leg paper fill is unsafe, or ``None`` when coherent."""
+    if up_book.get("quoteSource") != "websocket" or down_book.get("quoteSource") != "websocket":
+        return "兩腿並非都來自 WebSocket 完整快照"
+    up_at = up_book.get("receivedAtMonotonic")
+    down_at = down_book.get("receivedAtMonotonic")
+    if not isinstance(up_at, (int, float)) or not isinstance(down_at, (int, float)):
+        return "兩腿缺少接收時間"
+    current = time.monotonic() if now is None else float(now)
+    up_age = current - float(up_at)
+    down_age = current - float(down_at)
+    if up_age < -0.1 or down_age < -0.1:
+        return "兩腿接收時間異常"
+    if max(up_age, down_age) > SIM_BOOK_MAX_AGE_SECONDS:
+        return f"兩腿報價過舊 age={max(up_age, down_age):.3f}s"
+    skew = abs(float(up_at) - float(down_at))
+    if skew > SIM_BOOK_MAX_SKEW_SECONDS:
+        return f"兩腿更新時間差過大 skew={skew:.3f}s"
+    return None
+
+
+def _simulation_books_are_coherent(
+    asset_id: str,
+    up_book: dict,
+    down_book: dict,
+    now: float | None = None,
+) -> bool:
+    reason = _simulation_book_guard_reason(up_book, down_book, now)
+    if reason is None:
+        return True
+    current = time.monotonic() if now is None else float(now)
+    if current - _sim_data_guard_log_at.get(asset_id, 0.0) >= SIM_DATA_GUARD_LOG_SECONDS:
+        _sim_data_guard_log_at[asset_id] = current
+        log.info(f"[SIM-DATA-GUARD:{asset_id}] 跳過模擬成交：{reason}")
+    return False
 
 
 def _notify_ws_price_listeners(token_id: str) -> None:
@@ -1665,6 +1710,8 @@ def _on_ws_price_tick(token_id: str) -> None:
             if up_book is None or down_book is None:
                 break
             ms["upBook"], ms["downBook"] = up_book, down_book
+            if not _simulation_books_are_coherent(aid, up_book, down_book):
+                break
             slug = market["slug"]
             remaining_seconds = (
                 None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
@@ -1847,11 +1894,12 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     remaining_seconds = None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
     fair = estimate_fair_up(aid)
     ms["fair"] = fair  # WS 觸發的即時評估（_on_ws_price_tick）沿用這份，不用每個 tick 都重算
-    if aid == "btc":
-        log_price_sum_diagnostic(f"sim-poll-{aid}", ms["upBook"], ms["downBook"], SIM_LOCK_MAX_SUM)
-    for variant_id, variant in AB_VARIANT_BY_ID.items():
-        if variant["assetId"] == aid:
-            simulate_trading(variant_id, slug, ms["upBook"], ms["downBook"], remaining_seconds, fair)
+    if _simulation_books_are_coherent(aid, ms["upBook"], ms["downBook"]):
+        if aid == "btc":
+            log_price_sum_diagnostic(f"sim-poll-{aid}", ms["upBook"], ms["downBook"], SIM_LOCK_MAX_SUM)
+        for variant_id, variant in AB_VARIANT_BY_ID.items():
+            if variant["assetId"] == aid:
+                simulate_trading(variant_id, slug, ms["upBook"], ms["downBook"], remaining_seconds, fair)
 
     ms["connected"] = True
     persist_quote(aid, fair)

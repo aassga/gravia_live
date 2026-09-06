@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 
 import polymarket_server as sim
@@ -24,6 +25,10 @@ class PolymarketSimulationTests(unittest.TestCase):
             market["spotPrice"] = None
         sim._mm_seen_trade_keys.clear()
         sim._mm_seen_trade_key_set.clear()
+        sim._ws_books.clear()
+        sim._ws_snapshot_tokens.clear()
+        sim._ws_book_updated_at.clear()
+        sim._sim_data_guard_log_at.clear()
 
     def tearDown(self):
         if sim._sim_db is not None:
@@ -184,6 +189,70 @@ class PolymarketSimulationTests(unittest.TestCase):
             sim.set_ws_simulation_ticks_enabled(old_enabled)
         self.assertEqual(received, ["token-a"])
         self.assertEqual(sim._ws_get_book("token-a")["quoteSource"], "websocket")
+
+    def test_simulation_data_guard_rejects_mixed_reconnect_snapshots(self):
+        now = 100.0
+        fresh_up = {
+            "quoteSource": "websocket",
+            "receivedAtMonotonic": now,
+            "asks": [{"price": 0.09, "size": 100.0}],
+        }
+        stale_down = {
+            "quoteSource": "initial_rest_snapshot",
+            "receivedAtMonotonic": now - 2.0,
+            "asks": [{"price": 0.60, "size": 100.0}],
+        }
+        reason = sim._simulation_book_guard_reason(fresh_up, stale_down, now)
+        self.assertIn("WebSocket", reason)
+        self.assertFalse(sim._simulation_books_are_coherent("btc", fresh_up, stale_down, now))
+
+    def test_simulation_data_guard_rejects_stale_or_skewed_books(self):
+        now = 100.0
+        up = {"quoteSource": "websocket", "receivedAtMonotonic": now}
+        stale_down = {
+            "quoteSource": "websocket",
+            "receivedAtMonotonic": now - sim.SIM_BOOK_MAX_AGE_SECONDS - 0.1,
+        }
+        self.assertIn("過舊", sim._simulation_book_guard_reason(up, stale_down, now))
+
+        skewed_down = {
+            "quoteSource": "websocket",
+            "receivedAtMonotonic": now - sim.SIM_BOOK_MAX_SKEW_SECONDS - 0.1,
+        }
+        self.assertIn("時間差", sim._simulation_book_guard_reason(up, skewed_down, now))
+
+    def test_simulation_data_guard_accepts_fresh_two_leg_websocket_books(self):
+        now = 100.0
+        up = {"quoteSource": "websocket", "receivedAtMonotonic": now - 0.10}
+        down = {"quoteSource": "websocket", "receivedAtMonotonic": now - 0.15}
+        self.assertIsNone(sim._simulation_book_guard_reason(up, down, now))
+        self.assertTrue(sim._simulation_books_are_coherent("btc", up, down, now))
+
+    def test_ws_tick_does_not_trade_until_both_reconnect_snapshots_arrive(self):
+        ms = sim.markets_state["btc"]
+        ms["market"] = {"slug": "btc-reconnect-window"}
+        ms["windowEndsAt"] = (sim.real_now() + 120.0) * 1000
+        ms["upTokenId"] = "reconnect-up"
+        ms["downTokenId"] = "reconnect-down"
+        sim._ws_books.update({
+            "reconnect-up": {
+                "bids": {"0.08": 100.0},
+                "asks": {"0.09": 100.0},
+            },
+            "reconnect-down": {
+                "bids": {"0.59": 100.0},
+                "asks": {"0.60": 100.0},
+            },
+        })
+        now = time.monotonic()
+        sim._ws_snapshot_tokens.add("reconnect-up")
+        sim._ws_book_updated_at.update({"reconnect-up": now, "reconnect-down": now - 2.0})
+
+        sim._on_ws_price_tick("reconnect-up")
+
+        for variant in sim.AB_VARIANTS:
+            if variant["assetId"] == "btc":
+                self.assertIsNone(sim.ab_states[variant["id"]]["position"])
 
     def _eth_mm_books(self, bid=0.45, ask=0.46, queue=10.0):
         book = {
