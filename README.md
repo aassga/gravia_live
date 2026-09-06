@@ -38,6 +38,17 @@ cd C:\Users\micha\OneDrive\文件\gravia_live
 pip install -r requirements.txt
 ```
 
+簽名效能：`coincurve` 會讓 `eth-keys` 使用 libsecp256k1 C 後端。Python 3.13 以下會由
+`requirements.txt` 直接安裝；Ubuntu 26.04 的 Python 3.14 目前需先備妥編譯工具，再由原始碼安裝：
+
+```bash
+sudo apt-get install -y build-essential python3.14-dev pkg-config
+python -m pip install hatchling cffi 'scikit-build-core<0.10' cmake ninja
+python -m pip install --no-build-isolation 'coincurve==20.0.0'
+```
+
+服務啟動日誌應顯示 `signing backend=CoinCurveECCBackend`；若顯示 `NativeECCBackend`，仍會使用較慢的純 Python 簽名。
+
 ### 步驟 2：啟動紙上模擬服務
 ```powershell
 py polymarket_server.py

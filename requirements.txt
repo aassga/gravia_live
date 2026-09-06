@@ -4,3 +4,7 @@ aiohttp>=3.9.0
 # 真實下單用（選用，紙上交易模擬不需要這兩個）
 python-dotenv>=1.0.0
 py_clob_client_v2>=1.0.0
+
+# Use libsecp256k1 instead of eth-keys' pure-Python signer. Python 3.14 currently
+# requires a local source build; see README deployment notes.
+coincurve>=20,<22; python_version < "3.14"

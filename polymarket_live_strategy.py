@@ -1665,6 +1665,11 @@ def _log_startup_banner(mode: str) -> None:
         f"and unchanged opportunity >= {PAIR_STABILITY_SECONDS:.2f}s"
     )
     log.info(f"  one-leg rescue lock sum <= ${RESCUE_LOCK_MAX_SUM}")
+    backend = live.signing_backend_name()
+    if backend == "CoinCurveECCBackend":
+        log.info(f"  signing backend={backend} (libsecp256k1 accelerated)")
+    else:
+        log.warning(f"  signing backend={backend} (pure-Python signing may cause latency spikes)")
     log.info(
         f"  emergency unwind: wait={EMERGENCY_UNWIND_WAIT_SECONDS:.1f}s "
         f"balance poll={EMERGENCY_UNWIND_POLL_INTERVAL:.2f}s order retry={EMERGENCY_UNWIND_ORDER_INTERVAL:.1f}s"

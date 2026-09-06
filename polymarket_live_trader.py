@@ -77,6 +77,16 @@ _warmed_order_tokens: set[str] = set()
 _market_fee_by_token: dict[str, dict[str, float]] = {}
 
 
+def signing_backend_name() -> str:
+    """回報 eth-keys 實際使用的簽名後端，讓啟動日誌可確認快速後端已載入。"""
+    try:
+        from eth_keys import keys
+
+        return type(keys.backend).__name__
+    except Exception as exc:
+        return f"unavailable:{type(exc).__name__}"
+
+
 def _assert_real_order_enabled(endpoint: str) -> None:
     """最後一道送單閘門；所有真實 POST 都必須同時通過三個安全條件。"""
     if VALIDATE_ORDER_PATH:
@@ -466,18 +476,22 @@ def place_limit_orders_batch(
     client = get_client()
     order_type_value = getattr(OrderType, order_type.upper())
     sign_started = time.perf_counter()
-    signed_orders = [
-        build_order(order["token_id"], order["side"], order["price"], order["size"])
-        for order in normalized
-    ]
+    signed_orders = []
+    per_order_sign_ms = []
+    for order in normalized:
+        order_started = time.perf_counter()
+        signed_orders.append(build_order(order["token_id"], order["side"], order["price"], order["size"]))
+        per_order_sign_ms.append(round((time.perf_counter() - order_started) * 1000, 3))
     sign_ms = (time.perf_counter() - sign_started) * 1000
     payload = [PostOrdersV2Args(order=signed, orderType=order_type_value) for signed in signed_orders]
 
     log.warning(
-        "[LIVE] 單次 batch 送出 %d 筆 %s 訂單（建單＋簽名 %.1fms）：%s",
+        "[LIVE] 單次 batch 送出 %d 筆 %s 訂單（建單＋簽名 %.1fms，per_order=%s，backend=%s）：%s",
         len(normalized),
         order_type.upper(),
         sign_ms,
+        per_order_sign_ms,
+        signing_backend_name(),
         [
             {
                 "side": order["side"],
