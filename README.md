@@ -102,6 +102,7 @@ Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計�
 - 只有 FOK 訂單回覆 `matched` 才當作成交；`delayed` 長時間無法確認時會自動停止下單。
 - 新進場要求 Up／Down 都是完整 WebSocket 快照、各自不超過 2 秒且時間差不超過 0.5 秒；REST fallback 不能觸發真單。
 - 結果不明時先停止所有新單，再保存已知成交腿並擷取 token 餘額、掛單與近期成交快照，避免狀態頁錯誤顯示空倉。
+- Batch 只有一腿成交時，不把 `matched` 當成 token 已可賣；最多 15 秒輪詢交易狀態、刷新 Conditional Token balance/allowance，餘額足夠後才依最新 bid 重算並送出緊急 SELL。逾時仍保留救援狀態，下一個 tick 會繼續處理。
 - 真實策略狀態儲存在 `polymarket_live_strategy_state.json`，重啟後不會忘記持倉與停止原因。
 
 ### 建議做法：嵌入模擬盤進程（`--with-live`），共用同一條 WS 連線

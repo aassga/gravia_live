@@ -43,6 +43,26 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(trader.order_response_filled({"status": "matched"}))
         self.assertTrue(trader.order_response_filled({"id": "order-1", "status": "ORDER_STATUS_MATCHED"}))
 
+    def test_refresh_conditional_balance_updates_clob_cache_before_read(self):
+        client = MagicMock()
+        client.get_balance_allowance.return_value = {"balance": "5250000"}
+        with patch.object(trader, "get_client", return_value=client):
+            balance = trader.refresh_conditional_balance("token-1")
+        self.assertEqual(balance, 5.25)
+        client.update_balance_allowance.assert_called_once()
+        client.get_balance_allowance.assert_called_once()
+
+    def test_get_order_trade_statuses_matches_trade_ids(self):
+        trades = [
+            {"id": "trade-1", "status": "MATCHED", "taker_order_id": "order-1"},
+            {"id": "trade-2", "status": "CONFIRMED", "taker_order_id": "other"},
+        ]
+        with patch.object(trader, "get_trade_history", return_value=trades):
+            statuses = trader.get_order_trade_statuses(
+                {"orderID": "order-1", "tradeIDs": ["trade-1"]}
+            )
+        self.assertEqual(statuses, ["MATCHED"])
+
     async def test_official_canceled_status_is_terminal_not_filled(self):
         result, _ = await strategy._resolve_fok_response(
             {"id": "order-1", "status": "ORDER_STATUS_CANCELED"},
@@ -617,7 +637,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         retry.assert_not_awaited()
         unwind.assert_not_awaited()
 
-    async def test_emergency_unwind_retries_once_on_transient_settlement_lag(self):
+    async def test_emergency_unwind_waits_for_sellable_balance_before_exit(self):
         # 2026-09 真實交易案例：第一腿剛成交，緊急平倉的 SELL 第一次被 CLOB 拒絕
         # （剛成交的部位鏈上還沒入帳，回 balance: 0），短暫等一下重試就成交了。
         # _emergency_unwind 現在應該自己重試一次，不是撞一次就放棄讓部位繼續單邊曝險。
@@ -630,13 +650,17 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "hedged": False,
         }
         with (
-            patch.object(strategy, "EMERGENCY_UNWIND_RETRY_INTERVAL", 0.01),
+            patch.object(strategy, "EMERGENCY_UNWIND_WAIT_SECONDS", 1.0),
+            patch.object(strategy, "EMERGENCY_UNWIND_POLL_INTERVAL", 0.01),
+            patch.object(strategy.live, "refresh_conditional_balance", side_effect=[0.0, 13.0]) as balance,
+            patch.object(strategy.live, "get_order_trade_statuses", return_value=["MATCHED"]),
             patch.object(strategy.sim, "_get_book_ws_or_rest", AsyncMock(return_value={"bids": [], "asks": []})),
-            patch.object(strategy, "_sell_plan", return_value={"side": "Down", "shares": 13.0, "limitPrice": 0.30}),
-            patch.object(strategy, "_close_position", AsyncMock(side_effect=["not_filled", "filled"])) as close,
+            patch.object(strategy, "_aggressive_sell_plan", return_value={"side": "Down", "shares": 13.0, "limitPrice": 0.30}),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
         ):
             await strategy._emergency_unwind(None, "direct_pair_second_leg_failed")
-        self.assertEqual(close.await_count, 2)
+        self.assertEqual(balance.call_count, 2)
+        close.assert_awaited_once()
 
     async def test_emergency_unwind_stops_retrying_once_hedged_elsewhere(self):
         # 重試等待的空檔裡，如果正常補鎖利路徑已經把部位對沖掉了，不該再搶著平倉。
@@ -653,14 +677,51 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             strategy.live_state["position"]["hedged"] = True
 
         with (
-            patch.object(strategy, "EMERGENCY_UNWIND_RETRY_INTERVAL", 0.01),
+            patch.object(strategy, "EMERGENCY_UNWIND_WAIT_SECONDS", 1.0),
+            patch.object(strategy, "EMERGENCY_UNWIND_POLL_INTERVAL", 0.01),
+            patch.object(strategy.live, "refresh_conditional_balance", return_value=0.0),
+            patch.object(strategy.live, "get_order_trade_statuses", return_value=["MATCHED"]),
             patch.object(strategy.sim, "_get_book_ws_or_rest", AsyncMock(return_value={"bids": [], "asks": []})),
-            patch.object(strategy, "_sell_plan", return_value={"side": "Down", "shares": 13.0, "limitPrice": 0.30}),
+            patch.object(strategy, "_aggressive_sell_plan", return_value={"side": "Down", "shares": 13.0, "limitPrice": 0.30}),
             patch.object(strategy, "_close_position", AsyncMock(return_value="not_filled")) as close,
             patch("asyncio.sleep", side_effect=hedge_it_during_wait),
         ):
             await strategy._emergency_unwind(None, "direct_pair_second_leg_failed")
-        self.assertEqual(close.await_count, 1)
+        close.assert_not_awaited()
+
+    async def test_emergency_unwind_timeout_keeps_resumable_state(self):
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window", "side": "Down", "tokenId": "tok",
+            "shares": 13.0, "dryRun": False, "hedged": False,
+        }
+        with (
+            patch.object(strategy, "EMERGENCY_UNWIND_WAIT_SECONDS", 0.001),
+            patch.object(strategy, "EMERGENCY_UNWIND_POLL_INTERVAL", 0.001),
+            patch.object(strategy.live, "refresh_conditional_balance", return_value=0.0),
+            patch.object(strategy.live, "get_order_trade_statuses", return_value=["MATCHED"]),
+            patch.object(strategy, "_close_position", AsyncMock()) as close,
+        ):
+            await strategy._emergency_unwind(None, "direct_pair_second_leg_failed")
+        pos = strategy.live_state["position"]
+        self.assertTrue(pos["emergencyUnwindPending"])
+        self.assertIn("timedOutAt", pos["emergencyUnwind"])
+        close.assert_not_awaited()
+
+    async def test_polling_path_resumes_pending_emergency_unwind(self):
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window", "side": "Down", "tokenId": "tok",
+            "shares": 5.0, "dryRun": False, "hedged": False,
+            "emergencyUnwindPending": True,
+            "emergencyUnwind": {"reason": "saved_single_leg"},
+        }
+        strategy.sim.state["upBook"] = {"bids": [], "asks": []}
+        strategy.sim.state["downBook"] = {"bids": [], "asks": []}
+        with (
+            patch.object(strategy, "REAL_EXECUTION_ENABLED", True),
+            patch.object(strategy, "_emergency_unwind", AsyncMock()) as unwind,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 100.0, None)
+        unwind.assert_awaited_once_with(None, "saved_single_leg")
 
     async def test_no_new_entry_after_window_closed(self):
         # 90 秒門檻已經拿掉（鎖利不需要、晚進場方向性還得靠它才能在剩不到 10 秒時動作），

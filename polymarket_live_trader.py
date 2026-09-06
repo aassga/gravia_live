@@ -153,6 +153,17 @@ def get_conditional_balance(token_id: str) -> float:
     return int(raw.get("balance", 0)) / 1_000_000
 
 
+def refresh_conditional_balance(token_id: str) -> float:
+    """要求 CLOB 重新同步鏈上 Conditional Token 餘額後再讀取。"""
+    from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+
+    params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=str(token_id))
+    client = get_client()
+    client.update_balance_allowance(params=params)
+    raw = client.get_balance_allowance(params=params)
+    return int(raw.get("balance", 0)) / 1_000_000
+
+
 def get_open_orders() -> list:
     """查詢目前掛在真實帳號上的未成交訂單（唯讀）。"""
     client = get_client()
@@ -243,6 +254,38 @@ def summarize_order_fills(order_response: dict, trades: list) -> dict | None:
 def get_order_fill_summary(order_response: dict, limit: int = 100) -> dict | None:
     """查詢近期真實成交並回傳指定 FOK 訂單的加權平均成交資料。"""
     return summarize_order_fills(order_response, get_trade_history(limit))
+
+
+def get_order_trade_statuses(order_response: dict, limit: int = 100) -> list[str]:
+    """回傳指定訂單關聯交易的狀態，例如 MATCHED／MINED／CONFIRMED。"""
+    if not isinstance(order_response, dict):
+        return []
+    order_id = str(order_response.get("orderID") or order_response.get("orderId") or order_response.get("id") or "")
+    trade_ids = {
+        str(value)
+        for value in (order_response.get("tradeIDs") or order_response.get("associate_trades") or [])
+        if value
+    }
+    statuses: list[str] = []
+    for trade in get_trade_history(limit):
+        if not isinstance(trade, dict):
+            continue
+        trade_id = str(trade.get("id") or trade.get("trade_id") or "")
+        taker_order_id = str(trade.get("taker_order_id") or trade.get("takerOrderId") or "")
+        maker_order_ids = {
+            str(item.get("order_id") or item.get("orderId") or "")
+            for item in (trade.get("maker_orders") or trade.get("makerOrders") or [])
+            if isinstance(item, dict)
+        }
+        matched = (trade_ids and trade_id in trade_ids) or (
+            order_id and (taker_order_id == order_id or order_id in maker_order_ids)
+        )
+        if not matched:
+            continue
+        status = str(trade.get("status") or trade.get("tradeStatus") or "").upper()
+        if status and status not in statuses:
+            statuses.append(status)
+    return statuses
 
 
 def build_order(token_id: str, side: str, price: float, size: float):

@@ -57,14 +57,12 @@ DRY_RUN_BALANCE_USD = max(1.0, float(os.environ.get("POLY_DRY_RUN_BALANCE_USD", 
 ACTION_COOLDOWN_SECONDS = max(1.0, float(os.environ.get("POLY_ACTION_COOLDOWN_SECONDS", "10.0")))
 ORDER_CONFIRM_ATTEMPTS = max(1, int(os.environ.get("POLY_ORDER_CONFIRM_ATTEMPTS", "6")))
 ORDER_CONFIRM_INTERVAL = max(0.5, float(os.environ.get("POLY_ORDER_CONFIRM_INTERVAL", "1.0")))
-# 2026-09：實測發現第一腿剛成交、緊接著想緊急平倉賣掉那一腿時，CLOB 有時會回
-# 「balance: 0」拒單——剛成交的部位在鏈上還沒入帳/索引完成，不是真的沒有這個部位。
-# 短暫等一下通常就會過。這裡刻意只給一次額外重試（不是無限重試）：_emergency_unwind
-# 是在 decision_lock 保護下執行的，多等一次就多佔用一次鎖的時間，擋住同一時間本來
-# 可以正常運作的補鎖利重試（實測那次真的靠這條路 17 秒後補鎖利成功）——重試次數
-# 抓少一點，是刻意在「給結算延遲一次機會」跟「不要卡住正常補鎖利路徑太久」之間取平衡。
-EMERGENCY_UNWIND_RETRY_ATTEMPTS = max(1, int(os.environ.get("POLY_EMERGENCY_UNWIND_RETRY_ATTEMPTS", "2")))
-EMERGENCY_UNWIND_RETRY_INTERVAL = max(0.5, float(os.environ.get("POLY_EMERGENCY_UNWIND_RETRY_INTERVAL", "2.0")))
+# 2026-09：第一腿剛 BUY matched 後立刻送 SELL，CLOB 仍可能因鏈上結算／餘額快取尚未
+# 完成而回覆 balance: 0。不能用固定 sleep 猜入帳時間：救援會主動刷新 Conditional Token
+# balance/allowance，最多等待 15 秒，確認完整股數可賣後才依最新 bid 送出 SELL。
+EMERGENCY_UNWIND_WAIT_SECONDS = max(1.0, float(os.environ.get("POLY_EMERGENCY_UNWIND_WAIT_SECONDS", "15.0")))
+EMERGENCY_UNWIND_POLL_INTERVAL = max(0.25, float(os.environ.get("POLY_EMERGENCY_UNWIND_POLL_INTERVAL", "0.5")))
+EMERGENCY_UNWIND_ORDER_INTERVAL = max(0.5, float(os.environ.get("POLY_EMERGENCY_UNWIND_ORDER_INTERVAL", "1.0")))
 # 2026-09：緊急平倉連續兩次都失敗、部位被迫抱到自然結算、整筆本金虧光的真實案例
 # （-$3.28 那筆）——正常補鎖利跟緊急平倉共用同一套「保守限價多讓一格 tick」的定價，
 # 但緊急平倉的目標是「不計代價盡快出場」，不是「盡量拿到好價格」，值得比平常更激進：
@@ -853,6 +851,8 @@ def _build_position_dict(slug: str, plan: dict, response: dict, execution: dict,
         "entryEdge": plan.get("edge"),
         "entryTime": time.time(),
         "entryOrderId": response.get("orderID") or response.get("orderId"),
+        "entryTradeIds": list(response.get("tradeIDs") or response.get("associate_trades") or []),
+        "entryTransactionHashes": list(response.get("transactionsHashes") or []),
         "hedged": False,
         "hedgeSide": None,
         "hedgePrice": None,
@@ -1012,35 +1012,98 @@ async def _close_position(plan: dict, dry_run: bool, reason: str) -> str:
 
 
 async def _emergency_unwind(session: aiohttp.ClientSession, reason: str) -> None:
-    for attempt in range(EMERGENCY_UNWIND_RETRY_ATTEMPTS):
-        if attempt > 0:
-            await asyncio.sleep(EMERGENCY_UNWIND_RETRY_INTERVAL)
+    """等待首腿可交割後，持續依最新 bid 重算並嘗試強制平倉。"""
+    pos = live_state.get("position")
+    if not pos or pos.get("hedged"):
+        return
+    if pos.get("dryRun", True):
+        latest_book = await sim._get_book_ws_or_rest(session, pos["tokenId"])
+        plan = _aggressive_sell_plan(pos["side"], latest_book, pos["shares"])
+        if plan:
+            await _close_position(plan, True, reason)
+        return
+
+    deadline = time.monotonic() + EMERGENCY_UNWIND_WAIT_SECONDS
+    next_order_at = 0.0
+    polls = 0
+    attempts = 0
+    balance = 0.0
+    pos["emergencyUnwindPending"] = True
+    pos["emergencyUnwind"] = {
+        "reason": reason,
+        "startedAt": time.time(),
+        "waitSeconds": EMERGENCY_UNWIND_WAIT_SECONDS,
+        "polls": 0,
+        "orderAttempts": 0,
+        "lastBalance": 0.0,
+        "tradeStatuses": [],
+    }
+    save_live_state()
+
+    while True:
         pos = live_state.get("position")
         if not pos or pos.get("hedged"):
-            # 等待重試的空檔裡，正常補鎖利路徑可能已經處理掉了，不用再搶著平倉。
             return
+        polls += 1
+        diagnostic = pos.setdefault("emergencyUnwind", {})
+        diagnostic["polls"] = polls
+
         try:
-            latest_book = await sim._get_book_ws_or_rest(session, pos["tokenId"])
+            balance = await asyncio.to_thread(live.refresh_conditional_balance, pos["tokenId"])
+            diagnostic["lastBalance"] = balance
+            diagnostic.pop("lastBalanceError", None)
         except Exception as exc:
-            log.error(f"[LIVE] 緊急退出前無法取得訂單簿：{exc}")
-            continue
-        plan = _aggressive_sell_plan(pos["side"], latest_book, pos["shares"])
-        if not plan:
-            log.error("[LIVE] 第二腿失敗，且第一腿目前沒有足夠 Bid 可緊急退出")
-            continue
-        result = await _close_position(plan, bool(pos.get("dryRun", True)), reason)
-        if result in ("filled", "unconfirmed"):
-            # filled：平倉完成；unconfirmed：_close_position 內部已經觸發 halt，
-            # 兩種情況都不該再重試。
-            return
-        log.warning(
-            f"[LIVE] 緊急平倉第 {attempt + 1}/{EMERGENCY_UNWIND_RETRY_ATTEMPTS} 次嘗試未成交"
-            f"（reason={reason}），可能是剛成交的部位鏈上還沒入帳，稍後重試"
+            balance = 0.0
+            diagnostic["lastBalanceError"] = str(exc)
+
+        try:
+            order_ref = {
+                "orderID": pos.get("entryOrderId"),
+                "tradeIDs": pos.get("entryTradeIds") or [],
+            }
+            diagnostic["tradeStatuses"] = await asyncio.to_thread(
+                live.get_order_trade_statuses, order_ref
+            )
+            diagnostic.pop("tradeStatusError", None)
+        except Exception as exc:
+            diagnostic["tradeStatusError"] = str(exc)
+
+        target_shares = float(pos["shares"])
+        tolerance = max(1e-6, target_shares * 0.001)
+        now = time.monotonic()
+        if balance + tolerance >= target_shares and now >= next_order_at:
+            try:
+                latest_book = await sim._get_book_ws_or_rest(session, pos["tokenId"])
+                diagnostic.pop("lastBookError", None)
+            except Exception as exc:
+                diagnostic["lastBookError"] = str(exc)
+            else:
+                plan = _aggressive_sell_plan(pos["side"], latest_book, target_shares)
+                if plan:
+                    attempts += 1
+                    diagnostic["orderAttempts"] = attempts
+                    diagnostic["lastLimitPrice"] = plan["limitPrice"]
+                    result = await _close_position(plan, False, reason)
+                    if result in ("filled", "unconfirmed"):
+                        return
+                    next_order_at = time.monotonic() + EMERGENCY_UNWIND_ORDER_INTERVAL
+
+        save_live_state()
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(EMERGENCY_UNWIND_POLL_INTERVAL)
+
+    pos = live_state.get("position")
+    if pos and not pos.get("hedged"):
+        diagnostic = pos.setdefault("emergencyUnwind", {})
+        diagnostic["timedOutAt"] = time.time()
+        diagnostic["lastBalance"] = balance
+        save_live_state()
+        log.error(
+            f"[LIVE] 緊急平倉等待 {EMERGENCY_UNWIND_WAIT_SECONDS:.1f}s 仍未完成："
+            f"token balance={balance:.6f}/{float(pos['shares']):.6f}，"
+            "保留救援狀態供下一個 tick 繼續"
         )
-    log.error(
-        f"[LIVE] 緊急平倉重試 {EMERGENCY_UNWIND_RETRY_ATTEMPTS} 次仍未成交，持倉保留為未對沖狀態，"
-        "改靠正常補鎖利流程持續嘗試"
-    )
 
 
 async def _retry_failed_leg_once(session: aiohttp.ClientSession, failed_side: str, dry_run: bool) -> str:
@@ -1305,6 +1368,9 @@ async def evaluate_and_act(
     if not pos.get("dryRun", True) and not REAL_EXECUTION_ENABLED:
         log.error("[LIVE] 存在真實持倉，但真實策略未完整武裝；本程式不會假裝已對沖")
         return
+    if pos.get("emergencyUnwindPending"):
+        await _emergency_unwind(session, pos.get("emergencyUnwind", {}).get("reason", "resume_emergency_unwind"))
+        return
     if pos.get("strategy") == "late_direction":
         # 晚進場方向性進場後就抱到結算，不補鎖利、不提早出場——道理跟 sim 那邊一樣：
         # 進場當下對邊常常正好夠便宜可以「鎖利」，但那樣等於把方向性優勢換成極小的
@@ -1463,6 +1529,9 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
         return
     if not pos.get("dryRun", True) and not REAL_EXECUTION_ENABLED:
         return
+    if pos.get("emergencyUnwindPending"):
+        # 救援含餘額刷新與網路 I/O，交由 3 秒輪詢路徑執行；WS 快速路徑不重複排程。
+        return
     if pos.get("strategy") == "late_direction":
         return
 
@@ -1547,6 +1616,10 @@ def _log_startup_banner(mode: str) -> None:
     log.info(f"  pair budget={STAKE_PCT:.1f}% · hard cap=${MAX_PAIR_BUDGET_USD:.2f}")
     log.info(f"  cash reserve=${MIN_CASH_RESERVE_USD:.2f} · action cooldown={ACTION_COOLDOWN_SECONDS:.0f}s")
     log.info(f"  lock sum <= ${LOCK_MAX_SUM}（跟隨 {LIVE_ASSET_ID}-late-direction）　net lock/share>={sim.SIM_MIN_NET_LOCK_PER_SHARE:.3f}")
+    log.info(
+        f"  emergency unwind: wait={EMERGENCY_UNWIND_WAIT_SECONDS:.1f}s "
+        f"balance poll={EMERGENCY_UNWIND_POLL_INTERVAL:.2f}s order retry={EMERGENCY_UNWIND_ORDER_INTERVAL:.1f}s"
+    )
     if ENABLE_LATE_DIRECTION:
         log.warning(
             f"  單腿方向性下注已啟用：剩餘 {sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
