@@ -44,6 +44,25 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(trader.order_response_filled({"status": "matched"}))
         self.assertTrue(trader.order_response_filled({"id": "order-1", "status": "ORDER_STATUS_MATCHED"}))
 
+    def test_sdk_transaction_hash_polling_is_disabled_without_changing_initial_response(self):
+        class FakeClient:
+            def __init__(self):
+                self.poll_calls = 0
+
+            def _resolve_transactions_hashes(self, response):
+                self.poll_calls += 1
+                return {**response, "transactionsHashes": ["0xlate"]}
+
+        client = FakeClient()
+        original = client._resolve_transactions_hashes
+        trader.disable_transaction_hash_wait(client)
+        initial = {"success": True, "status": "matched", "tradeIDs": ["trade-1"]}
+
+        self.assertIs(client._resolve_transactions_hashes(initial), initial)
+        self.assertEqual(client.poll_calls, 0)
+        self.assertTrue(callable(client._gravia_original_transaction_hash_resolver))
+        self.assertEqual(original(initial)["transactionsHashes"], ["0xlate"])
+
     def test_refresh_conditional_balance_updates_clob_cache_before_read(self):
         client = MagicMock()
         client.get_balance_allowance.return_value = {"balance": "5250000"}

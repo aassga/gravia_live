@@ -115,6 +115,7 @@ Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計�
 - `POLY_RESCUE_LOCK_MAX_SUM=0.99`：已經單腿成交後，只要補腿仍能保住最低淨利，就允許用較寬門檻優先消除曝險。
 - `POLY_ACTION_COOLDOWN_SECONDS=10`：下單嘗試間隔至少 10 秒。
 - 只有 FOK 訂單回覆 `matched` 才當作成交；`delayed` 長時間無法確認時會自動停止下單。
+- `POST /orders` 收到初始 `status/orderID/tradeIDs` 後立即返回，不等待 SDK 以 250ms 間隔輪詢鏈上 `transactionsHashes`；transaction hash 不參與成交判斷或單腿救援。
 - 新進場要求 Up／Down 都是完整 WebSocket 快照、各自不超過 2 秒且時間差不超過 0.5 秒；REST fallback 不能觸發真單。
 - 結果不明時先停止所有新單，再保存已知成交腿並擷取 token 餘額、掛單與近期成交快照，避免狀態頁錯誤顯示空倉。
 - Batch 只有一腿成交時，不把 `matched` 當成 token 已可賣；最多 15 秒輪詢交易狀態、刷新 Conditional Token balance/allowance，餘額足夠後才依最新 bid 重算並送出緊急 SELL。逾時仍保留救援狀態，下一個 tick 會繼續處理。

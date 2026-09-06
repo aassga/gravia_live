@@ -87,6 +87,21 @@ def signing_backend_name() -> str:
         return f"unavailable:{type(exc).__name__}"
 
 
+def disable_transaction_hash_wait(client) -> None:
+    """讓 SDK 在初始撮合回應到達後立即返回，不等待鏈上 transaction hash。
+
+    py_clob_client_v2 預設會對每個有 tradeIDs、但尚無 transactionsHashes 的成交結果
+    以 250ms 間隔輪詢，最長 30 秒。策略只需要初始 status/orderID/tradeIDs 判斷 FOK
+    與啟動單腿救援；transaction hash 可稍後從成交紀錄取得，不應阻塞下單臨界路徑。
+    """
+    resolver = getattr(client, "_resolve_transactions_hashes", None)
+    if not callable(resolver):
+        raise RuntimeError("py_clob_client_v2 does not expose _resolve_transactions_hashes")
+    if not hasattr(client, "_gravia_original_transaction_hash_resolver"):
+        client._gravia_original_transaction_hash_resolver = resolver
+    client._resolve_transactions_hashes = lambda response: response
+
+
 def _assert_real_order_enabled(endpoint: str) -> None:
     """最後一道送單閘門；所有真實 POST 都必須同時通過三個安全條件。"""
     if VALIDATE_ORDER_PATH:
@@ -137,6 +152,8 @@ def get_client():
 
         creds = client.create_or_derive_api_key()
         client.set_api_creds(creds)
+        disable_transaction_hash_wait(client)
+        log.info("[ORDER-LATENCY] 已停用 SDK transaction-hash 輪詢；初始撮合回應到達即返回")
         log.info("API 憑證取得成功")
 
         _client = client
@@ -508,7 +525,11 @@ def place_limit_orders_batch(
     if not isinstance(responses, (list, tuple)) or len(responses) != len(normalized):
         raise RuntimeError(f"POST /orders 回應筆數異常：{responses!r}")
     responses = list(responses)
-    log.warning("[LIVE] batch 訂單回應（SDK return %.1fms）：%s", post_ms, responses)
+    log.warning(
+        "[LIVE] batch 初始撮合回應 %.1fms（未等待 transaction hash）：%s",
+        post_ms,
+        responses,
+    )
     return responses
 
 
