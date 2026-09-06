@@ -115,8 +115,8 @@ LIVE_MIRROR_STAKE_PCT           = max(0.5, min(30.0, float(os.environ.get("POLY_
 LIVE_MIRROR_MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 LIVE_MIRROR_MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
 LIVE_MIRROR_LOCK_MAX_SUM        = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM", "0.92"))))
-LIVE_MIRROR_DEPTH_MULTIPLIER    = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "5.0")))
-LIVE_MIRROR_STABILITY_SECONDS   = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.75")))
+LIVE_MIRROR_DEPTH_MULTIPLIER    = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "3.0")))
+LIVE_MIRROR_STABILITY_SECONDS   = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.25")))
 # 股數封頂在「當下看得到的深度」的這個比例。2026-09：實盤好幾次撞到「模擬盤跟實盤在
 # 同一秒看到同一個機會，模擬盤保證吃得到、實盤卻因為深度不夠被拒」——這不是 bug，是
 # 紙上模擬（吃剛看到的快照，保證成交）跟真實下單（要跟其他真人搶同一份流動性，中間
@@ -906,9 +906,13 @@ def pair_candidate_is_stable(
     seconds: float,
     now: float | None = None,
 ) -> bool:
-    """同一組限價與股數必須持續存在一段時間；用途是過濾只閃現一個 WS tick 的假機會。"""
+    """同一市場的鎖利條件必須持續成立一段時間，過濾只閃現一個 WS tick 的假機會。
+
+    股數與兩腿限價可以隨訂單簿更新；呼叫端每個 tick 都會重新驗證最新價格、深度與費用。
+    只有市場改變或任一 tick 不再符合鎖利條件時，穩定計時才會重新開始。
+    """
     current = time.monotonic() if now is None else float(now)
-    signature = (slug, round(float(shares), 6), round(float(up_limit), 6), round(float(down_limit), 6))
+    signature = (slug,)
     previous = _pair_stability_candidates.get(key)
     if not previous or previous.get("signature") != signature:
         _pair_stability_candidates[key] = {"signature": signature, "since": current}

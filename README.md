@@ -110,8 +110,8 @@ Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計�
 - `POLY_MIN_CASH_RESERVE_USD=5`：至少保留 5 USDC 現金。
 - `POLY_STAKE_PCT=15`：每組兩腿預算為可用現金的 15%。
 - `POLY_LIVE_LOCK_MAX_SUM=0.92`：實盤兩腿保守可成交限價合計上限；門檻越低，理論緩衝越大、機會越少。
-- `POLY_PAIR_MIN_DEPTH_MULTIPLIER=5`：每腿在實際送出限價內的可成交深度，至少要是下單股數的 5 倍。
-- `POLY_PAIR_STABILITY_SECONDS=0.75`：同一市場、股數及兩腿限價必須連續維持至少 0.75 秒才送單。
+- `POLY_PAIR_MIN_DEPTH_MULTIPLIER=3`：每腿在實際送出限價內的可成交深度，至少要是下單股數的 3 倍。
+- `POLY_PAIR_STABILITY_SECONDS=0.25`：同一市場的鎖利條件必須連續成立至少 0.25 秒才送單；期間允許價格與股數更新，但每個 tick 都會用最新訂單簿重新驗證。
 - `POLY_RESCUE_LOCK_MAX_SUM=0.99`：已經單腿成交後，只要補腿仍能保住最低淨利，就允許用較寬門檻優先消除曝險。
 - `POLY_ACTION_COOLDOWN_SECONDS=10`：下單嘗試間隔至少 10 秒。
 - 只有 FOK 訂單回覆 `matched` 才當作成交；`delayed` 長時間無法確認時會自動停止下單。

@@ -928,7 +928,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "outcomes": json.dumps(["Up", "Down"]),
             "clobTokenIds": json.dumps(["up-token", "down-token"]),
         }
-        depth = 100  # 5 倍深度防護封頂後仍要高於 Polymarket 的最低下單金額
+        depth = 60  # 深度防護封頂後仍高於最低下單金額，且低於資金可買的股數
                     # 換算出的股數上限，才能確定是深度、不是資金，在限制最終股數。
         strategy.sim.state["upBook"] = {
             "tickSize": 0.01, "minOrderSize": 1,

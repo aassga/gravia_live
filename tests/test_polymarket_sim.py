@@ -127,6 +127,17 @@ class PolymarketSimulationTests(unittest.TestCase):
 
         self.assertTrue(sim.ab_states["btc-live-lock"]["position"]["hedged"])
 
+    def test_pair_stability_allows_prices_and_size_to_move_while_opportunity_remains_valid(self):
+        self.assertFalse(
+            sim.pair_candidate_is_stable("live:pair", "btc-window", 5, 0.40, 0.50, 0.25, now=10.0)
+        )
+        self.assertTrue(
+            sim.pair_candidate_is_stable("live:pair", "btc-window", 6, 0.42, 0.48, 0.25, now=10.26)
+        )
+        self.assertFalse(
+            sim.pair_candidate_is_stable("live:pair", "btc-next-window", 6, 0.42, 0.48, 0.25, now=10.27)
+        )
+
     def test_direct_pair_rejects_when_below_real_min_order_shares(self):
         # Polymarket 真正的下限是股數（查證過真實 API 是 5 股），不是金額——就算金額、
         # 深度都夠，股數不到 minOrderSize 一樣不能進場。
