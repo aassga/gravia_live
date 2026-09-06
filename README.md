@@ -78,7 +78,7 @@ Windows 上如果 `python` 指令沒反應（跳出 Microsoft Store），請改�
 - 紙上模擬與實盤預設每組都使用資產組合的 15%；實盤仍會套用單組金額上限與現金保留額。
 - 持倉、已結算交易、費用與報價會寫入 `polymarket_sim.sqlite3`，服務重啟後可續跑。
 - `ETH MM` 是獨立的純模擬 maker 策略：同時維護 Up／Down 被動 BUY 報價，價差至少兩格時改善 best bid 一格，否則加入 best bid。成交採保守 queue-ahead 模型，必須先由真實市場成交量消耗掛價當下看到的前方深度，再完整吃到模擬股數才記為成交；不假設排在隊首、不計 maker rebate，距結算 20 秒停止新掛價。
-- ETH maker 逐腿記錄成交；只成交一腿會保留方向性曝險到結算，兩腿完成才記為鎖利。Dashboard 顯示掛價次數、成交腿數、完成配對數、單腿結算數與目前虛擬掛價。
+- ETH maker 逐腿記錄成交；兩腿完成才記為鎖利。只成交首腿時最多等待 15 秒，之後依序嘗試正收益 taker 配對及 taker 平倉，不再刻意把方向性曝險留到結算。Dashboard 顯示掛價、成交、配對、救援與目前虛擬掛價。
 - 所有紙上成交都受雙腿資料一致性防護：Up／Down 必須同時來自 WebSocket 完整快照、各自不超過 2 秒，且接收時間差不超過 0.5 秒。重連期間或 REST fallback 報價仍可顯示，但禁止用來建立模擬交易。
 
 VPS 上的 ETH MM 以 `deploy/gravia-eth-mm.service` 獨立執行：只載入 ETH、使用 8768 與獨立的 `polymarket_eth_mm.sqlite3`，且不帶 `--with-live`，因此不可能啟動真實策略。CPU quota 與較低排程優先級可避免干擾 BTC 實盤。首腿 maker 掛價最高為 `$0.60`；首腿成交後若 15 秒仍未配對，模擬器會先嘗試以 taker 買入另一腿鎖住至少 1¢/股淨利，沒有正收益配對時則立即按持有腿 bid 模擬平倉。Dashboard 的 `makerStats` 會統計救援嘗試、成功配對、平倉與失敗次數。用 SSH 將 8768 轉發到本機後，開啟 `web/polymarket.html?asset=eth&port=8768` 監控。

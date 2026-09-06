@@ -491,7 +491,9 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
           const locked=typeof p.lockedPnl==='number' ? p.lockedPnl : p.shares*(1-p.entryPrice-p.hedgePrice);
           pnlLine=`<div style="font-weight:700;margin-top:2px;color:${locked>=0?'#00ff9d':'#ff3a5c'};">${fmtMoney(locked)}（已鎖定）</div>`;
         } else {
-          pnlLine='<div style="font-weight:700;margin-top:2px;color:#ffd700;">方向性曝險中，等結算</div>';
+          pnlLine=isMaker
+            ? '<div style="font-weight:700;margin-top:2px;color:#ffd700;">單腿曝險中，15 秒後自動救援</div>'
+            : '<div style="font-weight:700;margin-top:2px;color:#ffd700;">方向性曝險中，等結算</div>';
         }
         posHtml=`<div style="font-size:9.5px;background:#00000055;border-radius:2px;padding:4px 6px;margin-bottom:6px;height:${POS_BOX_HEIGHT}px;box-sizing:border-box;overflow:hidden;">
           <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -520,14 +522,16 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
           <span class="red">回撤 ${(v.maxDrawdown||0).toFixed(2)}%</span>
         </div>
         <div style="font-size:8.5px;color:#444;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-          ${isMaker?`Maker queue 模型 · Up ${makerQuotes.Up?'$'+makerQuotes.Up.price.toFixed(3):'—'} / Down ${makerQuotes.Down?'$'+makerQuotes.Down.price.toFixed(3):'—'} · 單腿結算 ${makerStats.singleLegSettlements||0}`:`${typeof v.entryMaxPrice==='number'?'進場≤$'+v.entryMaxPrice.toFixed(2)+' · ':'只做鎖利／晚進場方向性 · '}鎖利合計≤$${v.lockMaxSum.toFixed(2)}`} · 資產 $${v.portfolio.toFixed(2)}
+          ${isMaker?`Maker queue · Up ${makerQuotes.Up?'$'+makerQuotes.Up.price.toFixed(3):'—'} / Down ${makerQuotes.Down?'$'+makerQuotes.Down.price.toFixed(3):'—'} · 救援 對沖/平倉/失敗 ${makerStats.rescueHedges||0}/${makerStats.rescueUnwinds||0}/${makerStats.rescueFailures||0}`:`${typeof v.entryMaxPrice==='number'?'進場≤$'+v.entryMaxPrice.toFixed(2)+' · ':'只做鎖利／晚進場方向性 · '}鎖利合計≤$${v.lockMaxSum.toFixed(2)}`} · 資產 $${v.portfolio.toFixed(2)}
         </div>`;
 
       const trades=v.trades||[];
       const list=trades.length?trades.map(t=>{
         const win=t.pnl>=0;
         const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
-        const dir=t.maker?(t.hedged?`${t.side}/${t.hedgeSide} Maker配對`:`${t.side} Maker單腿`):(t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:(t.tradeType==='early_exit'?`${t.side} 提早退出`:`${t.side} 方向性`));
+        const dir=t.maker
+          ? (t.hedged?`${t.side}/${t.hedgeSide} Maker配對`:(t.exitReason==='maker_inventory_timeout'?`${t.side} Maker救援平倉`:`${t.side} Maker單腿`))
+          : (t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:(t.tradeType==='early_exit'?`${t.side} 提早退出`:`${t.side} 方向性`));
         return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #ffffff08;font-size:9.5px;gap:4px;">
           <span style="color:#444;">${dt}</span>
           <span class="${t.hedged?'up-b':(win?'up-b':'dn-b')}" style="font-size:9px;">${dir}</span>
