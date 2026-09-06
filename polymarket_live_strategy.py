@@ -86,12 +86,15 @@ if LIVE_ASSET_ID != "btc":
 # 2026-09：從「btc-main」（鎖利優先，找不到就靠公平價模型賭單邊）改成「btc-late-direction」
 # （鎖利優先＋找不到鎖利時改成只在窗口剩不到 10 秒、現價已明顯偏離開盤價時才賭方向）——
 # 模擬盤驗證下來後者的方向性單邊勝率遠高於前者（91% vs 0%），詳見對話紀錄。
-# 鎖利（_direct_pair_plans／_execute_direct_pair）邏輯完全沒變，只換掉找不到鎖利時的備案。
+# 晚進場方向性參數仍取自這個變體；兩腿鎖利的實盤防護則由下方獨立環境變數控制。
 _LIVE_VARIANT = sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-late-direction"]
-# 鎖利門檻改回跟 <資產>-late-direction 這組自己的 lockMaxSum 一致（0.95），不再借用
-# btc-loose 的 0.98——這樣實盤才是單一模擬變體的精確複製，不會變成混用兩組門檻、
-# 模擬盤沒有對應組合可驗證的組合。
-LOCK_MAX_SUM = _LIVE_VARIANT["lockMaxSum"]
+# 2026-09-07 實盤再次出現「快照上兩腿合計 0.92，但 346ms 後只成交一腿」。公開 API
+# 的 batch 不是原子交易，因此把門檻收緊、要求限價內有數倍深度，並只接受持續存在的機會。
+# 這些參數也由 btc-live-lock 模擬組讀取，避免模擬與實盤再次使用不同條件。
+LOCK_MAX_SUM = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM", "0.92"))))
+PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "5.0")))
+PAIR_STABILITY_SECONDS = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.75")))
+RESCUE_LOCK_MAX_SUM = max(LOCK_MAX_SUM, min(0.99, float(os.environ.get("POLY_RESCUE_LOCK_MAX_SUM", "0.99"))))
 LATE_DIRECTION_MAX_PRICE = _LIVE_VARIANT["lateDirectionMaxPrice"]
 
 
@@ -465,6 +468,15 @@ def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: floa
     # 算股數預算時扣過了，這裡如果再扣一次會變成保留額重複計算，讓實盤比模擬更早
     # 放棄本可成立的鎖利機會。
     if net_per_share < sim.SIM_MIN_NET_LOCK_PER_SHARE or total_cost > cash:
+        return None
+    if not sim.pair_depth_is_safe(
+        up_book,
+        down_book,
+        up["limitPrice"],
+        down["limitPrice"],
+        shares,
+        PAIR_MIN_DEPTH_MULTIPLIER,
+    ):
         return None
     return up, down
 
@@ -1130,7 +1142,7 @@ async def _retry_failed_leg_once(session: aiohttp.ClientSession, failed_side: st
     net_per_share = (pos["shares"] - projected_cost) / pos["shares"]
     cash = await _strategy_cash(dry_run)
     if not (
-        float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= LOCK_MAX_SUM
+        float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= RESCUE_LOCK_MAX_SUM
         and net_per_share >= sim.SIM_MIN_NET_LOCK_PER_SHARE
         and hedge["riskNotional"] + hedge["fee"] <= cash
     ):
@@ -1353,12 +1365,24 @@ async def evaluate_and_act(
         # 詳見對話紀錄）；鎖不到才在窗口快結束時改用晚進場方向性當備案。
         # 股數先按可見深度的 sim.SIM_DEPTH_CAP_FRACTION 封頂，跟模擬版 sim._try_direct_pair
         # 對齊（見該常數註解）；封頂後再無條件捨去到整數，對應真實下單實際能送出的精度。
-        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * sim.SIM_DEPTH_CAP_FRACTION
+        depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
+        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
         paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
         direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
         if direct:
+            if not sim.pair_candidate_is_stable(
+                "live:pair",
+                slug,
+                paired_shares,
+                direct[0]["limitPrice"],
+                direct[1]["limitPrice"],
+                PAIR_STABILITY_SECONDS,
+            ):
+                return
+            sim.clear_pair_candidate("live:pair")
             await _execute_direct_pair(session, slug, direct[0], direct[1], fair, dry_run)
             return
+        sim.clear_pair_candidate("live:pair")
         if ENABLE_LATE_DIRECTION:
             await _try_late_direction_entry(slug, up_book, down_book, remaining_seconds, shares, dry_run)
         return
@@ -1388,7 +1412,7 @@ async def evaluate_and_act(
         # 跟模擬版 sim.simulate_trading 的補鎖利判斷對齊：只比對 cash 本身，不再扣
         # MIN_CASH_RESERVE_USD——理由同 _direct_pair_plans，避免保留額重複扣兩次。
         if (
-            float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= LOCK_MAX_SUM
+            float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= RESCUE_LOCK_MAX_SUM
             and net_per_share >= sim.SIM_MIN_NET_LOCK_PER_SHARE
             and hedge["riskNotional"] + hedge["fee"] <= cash
         ):
@@ -1507,15 +1531,27 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
         if budget < 1.0 or shares < 1.0:
             return
 
-        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * sim.SIM_DEPTH_CAP_FRACTION
+        depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
+        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
         paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
         direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
         if direct:
+            if not sim.pair_candidate_is_stable(
+                "live:pair",
+                slug,
+                paired_shares,
+                direct[0]["limitPrice"],
+                direct[1]["limitPrice"],
+                PAIR_STABILITY_SECONDS,
+            ):
+                return
+            sim.clear_pair_candidate("live:pair")
             _ws_action_in_flight["v"] = True
             asyncio.get_running_loop().create_task(
                 _run_ws_pair_entry(session, slug, direct[0], direct[1], fair, dry_run, decision_lock)
             )
             return
+        sim.clear_pair_candidate("live:pair")
 
         plan = _late_direction_plan(up_book, down_book, remaining, shares) if ENABLE_LATE_DIRECTION else None
         if plan:
@@ -1547,7 +1583,7 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
     if cash is None:
         return
     if (
-        float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= LOCK_MAX_SUM
+        float(pos.get("entryLimitPrice", pos["entryPrice"])) + hedge["limitPrice"] <= RESCUE_LOCK_MAX_SUM
         and net_per_share >= sim.SIM_MIN_NET_LOCK_PER_SHARE
         and hedge["riskNotional"] + hedge["fee"] <= cash
     ):
@@ -1568,9 +1604,17 @@ async def _run_ws_pair_entry(
     async with decision_lock:
         if live_state.get("position") is not None:
             return
-        if not dry_run and not _live_books_are_coherent(up["book"], down["book"]):
+        latest_up = sim.state.get("upBook") or up["book"]
+        latest_down = sim.state.get("downBook") or down["book"]
+        if not dry_run and not _live_books_are_coherent(latest_up, latest_down):
             return
-        await _execute_direct_pair(session, slug, up, down, fair, dry_run)
+        cash = _strategy_cash_sync(dry_run)
+        if cash is None:
+            return
+        latest = _direct_pair_plans(latest_up, latest_down, float(up["shares"]), cash)
+        if not latest:
+            return
+        await _execute_direct_pair(session, slug, latest[0], latest[1], fair, dry_run)
 
 
 async def _run_ws_late_direction_entry(
@@ -1615,7 +1659,12 @@ def _log_startup_banner(mode: str) -> None:
         log.warning("  ORDER PATH VALIDATION: signing enabled, POST /orders hard-disabled")
     log.info(f"  pair budget={STAKE_PCT:.1f}% · hard cap=${MAX_PAIR_BUDGET_USD:.2f}")
     log.info(f"  cash reserve=${MIN_CASH_RESERVE_USD:.2f} · action cooldown={ACTION_COOLDOWN_SECONDS:.0f}s")
-    log.info(f"  lock sum <= ${LOCK_MAX_SUM}（跟隨 {LIVE_ASSET_ID}-late-direction）　net lock/share>={sim.SIM_MIN_NET_LOCK_PER_SHARE:.3f}")
+    log.info(f"  lock sum <= ${LOCK_MAX_SUM}　net lock/share>={sim.SIM_MIN_NET_LOCK_PER_SHARE:.3f}")
+    log.info(
+        f"  pair safeguard: executable depth >= {PAIR_MIN_DEPTH_MULTIPLIER:.1f}x/leg "
+        f"and unchanged opportunity >= {PAIR_STABILITY_SECONDS:.2f}s"
+    )
+    log.info(f"  one-leg rescue lock sum <= ${RESCUE_LOCK_MAX_SUM}")
     log.info(
         f"  emergency unwind: wait={EMERGENCY_UNWIND_WAIT_SECONDS:.1f}s "
         f"balance poll={EMERGENCY_UNWIND_POLL_INTERVAL:.2f}s order retry={EMERGENCY_UNWIND_ORDER_INTERVAL:.1f}s"

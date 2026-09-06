@@ -296,8 +296,9 @@ function onData(d){
     : '每注佔資產 — ・ 鎖利合計上限 — ・ 單組上限 —';
   const tooltipItems = typeof cfg.stakePct==='number' ? [
     `市場：${String(cfg.assetId||'BTC').toUpperCase()} 5 分鐘 Up/Down。`,
-    `進場：只使用完整且新鮮的 WebSocket 兩腿訂單簿；兩腿必須都有足夠深度。`,
+    `進場：只使用完整且新鮮的 WebSocket 兩腿訂單簿；每腿限價內深度 ≥ 下單量 ${Number(cfg.minDepthMultiplier||1).toFixed(1)} 倍，且相同機會持續 ≥ ${Number(cfg.stabilitySeconds||0).toFixed(2)} 秒。`,
     `鎖利：兩腿保守可成交限價合計 ≤ $${Number(cfg.lockMaxSum||0).toFixed(2)}，扣費後淨利 ≥ $${Number(cfg.minNetLockPerShare||0).toFixed(3)}/股。`,
+    `單腿救援：若 batch 只有一腿成交，補腿可放寬至合計 ≤ $${Number(cfg.rescueLockMaxSum||0.99).toFixed(2)}，但仍須扣費後有正淨利；否則立即嘗試賣回已成交腿。`,
     `下單：Up／Down 各自簽署 ${cfg.orderType||'FOK'}，以${cfg.batchOrders?'單次 batch 平行':'獨立'}送出；每腿必須完整成交。`,
     `資金：可用餘額扣除 $${Number(cfg.minCashReserveUsd||0).toFixed(2)} 後取 ${Number(cfg.stakePct||0).toFixed(1)}%，單組最高 $${Number(cfg.maxPairBudgetUsd||0).toFixed(2)}。`,
     `單腿救援：先確認成交與 Token 到帳，每 ${Number(cfg.emergencyBalancePollSeconds||0).toFixed(2)} 秒刷新；無法安全補腿時按最新買盤平倉，單輪最多等待 ${Number(cfg.emergencyUnwindWaitSeconds||0).toFixed(1)} 秒。`,

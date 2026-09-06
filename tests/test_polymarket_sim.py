@@ -2,6 +2,7 @@ import os
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 import polymarket_server as sim
 
@@ -29,6 +30,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim._ws_snapshot_tokens.clear()
         sim._ws_book_updated_at.clear()
         sim._sim_data_guard_log_at.clear()
+        sim._pair_stability_candidates.clear()
 
     def tearDown(self):
         if sim._sim_db is not None:
@@ -87,15 +89,17 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_live_lock_variant_mirrors_live_sizing_and_disables_directional_entry(self):
         variant = sim.AB_VARIANT_BY_ID["btc-live-lock"]
         self.assertTrue(variant["liveMirrorOnly"])
-        self.assertEqual(variant["lockMaxSum"], sim.SIM_LOCK_MAX_SUM)
+        self.assertEqual(variant["lockMaxSum"], sim.LIVE_MIRROR_LOCK_MAX_SUM)
         self.assertEqual(variant["stakePct"], sim.LIVE_MIRROR_STAKE_PCT)
         self.assertEqual(variant["maxPairBudgetUsd"], sim.LIVE_MIRROR_MAX_PAIR_BUDGET_USD)
         self.assertEqual(variant["minCashReserveUsd"], sim.LIVE_MIRROR_MIN_CASH_RESERVE_USD)
+        self.assertEqual(variant["minDepthMultiplier"], sim.LIVE_MIRROR_DEPTH_MULTIPLIER)
+        self.assertEqual(variant["stabilitySeconds"], sim.LIVE_MIRROR_STABILITY_SECONDS)
 
         expected = sim.target_pair_order(
             sim.shared_config["startBalance"],
             sim.LIVE_MIRROR_STAKE_PCT,
-            sim.SIM_LOCK_MAX_SUM,
+            sim.LIVE_MIRROR_LOCK_MAX_SUM,
             sim.LIVE_MIRROR_MAX_PAIR_BUDGET_USD,
             sim.LIVE_MIRROR_MIN_CASH_RESERVE_USD,
         )
@@ -108,6 +112,20 @@ class PolymarketSimulationTests(unittest.TestCase):
         down_book = {"tickSize": 0.01, "minOrderSize": 5.0, "asks": [{"price": 0.60, "size": 100.0}], "bids": []}
         sim.simulate_trading("btc-live-lock", "btc-window", up_book, down_book, 5.0, None)
         self.assertIsNone(sim.ab_states["btc-live-lock"]["position"])
+
+    def test_live_lock_waits_for_stable_deep_pair_before_simulated_fill(self):
+        up_book = {"tickSize": 0.01, "minOrderSize": 5.0, "asks": [{"price": 0.39, "size": 500.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "minOrderSize": 5.0, "asks": [{"price": 0.39, "size": 500.0}], "bids": []}
+
+        with patch.object(
+            sim.time,
+            "monotonic",
+            side_effect=[100.0, 100.0 + sim.LIVE_MIRROR_STABILITY_SECONDS + 0.01],
+        ):
+            self.assertFalse(sim._try_direct_pair("btc-live-lock", "btc-window", up_book, down_book))
+            self.assertTrue(sim._try_direct_pair("btc-live-lock", "btc-window", up_book, down_book))
+
+        self.assertTrue(sim.ab_states["btc-live-lock"]["position"]["hedged"])
 
     def test_direct_pair_rejects_when_below_real_min_order_shares(self):
         # Polymarket 真正的下限是股數（查證過真實 API 是 5 股），不是金額——就算金額、

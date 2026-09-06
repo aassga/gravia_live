@@ -114,6 +114,9 @@ LIVE_MIRROR_ASSET_ID            = os.environ.get("POLY_LIVE_ASSET_ID", "btc")
 LIVE_MIRROR_STAKE_PCT           = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
 LIVE_MIRROR_MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 LIVE_MIRROR_MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
+LIVE_MIRROR_LOCK_MAX_SUM        = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM", "0.92"))))
+LIVE_MIRROR_DEPTH_MULTIPLIER    = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "5.0")))
+LIVE_MIRROR_STABILITY_SECONDS   = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.75")))
 # 股數封頂在「當下看得到的深度」的這個比例。2026-09：實盤好幾次撞到「模擬盤跟實盤在
 # 同一秒看到同一個機會，模擬盤保證吃得到、實盤卻因為深度不夠被拒」——這不是 bug，是
 # 紙上模擬（吃剛看到的快照，保證成交）跟真實下單（要跟其他真人搶同一份流動性，中間
@@ -223,11 +226,13 @@ for _asset in ASSETS:
             "assetId":                 _asset["id"],
             "label":                   f"{_asset['label']} 實盤鏡像・兩腿鎖利",
             "entryMaxPrice":           None,
-            "lockMaxSum":              SIM_LOCK_MAX_SUM,
+            "lockMaxSum":              LIVE_MIRROR_LOCK_MAX_SUM,
             "liveMirrorOnly":           True,
             "stakePct":                LIVE_MIRROR_STAKE_PCT,
             "maxPairBudgetUsd":         LIVE_MIRROR_MAX_PAIR_BUDGET_USD,
             "minCashReserveUsd":        LIVE_MIRROR_MIN_CASH_RESERVE_USD,
+            "minDepthMultiplier":       LIVE_MIRROR_DEPTH_MULTIPLIER,
+            "stabilitySeconds":         LIVE_MIRROR_STABILITY_SECONDS,
         })
     AB_VARIANTS.append({
         "id":                    f"{_asset['id']}-late-direction",
@@ -864,6 +869,57 @@ def _target_order_size(variant_id: str) -> tuple[float, float]:
     )
 
 
+_pair_stability_candidates: dict[str, dict] = {}
+
+
+def executable_ask_depth(book: dict, limit_price: float) -> float:
+    """回傳 BUY 限價以內真正可吃到的賣盤深度，不把更貴、訂單根本碰不到的檔位算進來。"""
+    return sum(
+        max(0.0, float(level.get("size", 0)))
+        for level in (book.get("asks") or [])
+        if float(level.get("price", 0)) <= float(limit_price) + 1e-9
+    )
+
+
+def pair_depth_is_safe(
+    up_book: dict,
+    down_book: dict,
+    up_limit: float,
+    down_limit: float,
+    shares: float,
+    multiplier: float,
+) -> bool:
+    """兩腿各自在限價內都要有數倍於下單量的深度，降低送達前被別人搶光的機率。"""
+    required = float(shares) * max(1.0, float(multiplier))
+    return (
+        executable_ask_depth(up_book, up_limit) + 1e-9 >= required
+        and executable_ask_depth(down_book, down_limit) + 1e-9 >= required
+    )
+
+
+def pair_candidate_is_stable(
+    key: str,
+    slug: str,
+    shares: float,
+    up_limit: float,
+    down_limit: float,
+    seconds: float,
+    now: float | None = None,
+) -> bool:
+    """同一組限價與股數必須持續存在一段時間；用途是過濾只閃現一個 WS tick 的假機會。"""
+    current = time.monotonic() if now is None else float(now)
+    signature = (slug, round(float(shares), 6), round(float(up_limit), 6), round(float(down_limit), 6))
+    previous = _pair_stability_candidates.get(key)
+    if not previous or previous.get("signature") != signature:
+        _pair_stability_candidates[key] = {"signature": signature, "since": current}
+        return float(seconds) <= 0
+    return current - float(previous["since"]) >= float(seconds)
+
+
+def clear_pair_candidate(key: str) -> None:
+    _pair_stability_candidates.pop(key, None)
+
+
 def enter_position(
     variant_id: str,
     slug: str,
@@ -964,15 +1020,25 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     真實下單時因為深度已經被搶走而被拒。封頂之後如果連目標股數都吃不滿，才照原本
     邏輯整筆視為不可行（simulate_buy_fill 深度不足回傳 None）。"""
     variant = AB_VARIANT_BY_ID[variant_id]
+    stability_key = f"sim:{variant_id}"
+
+    def reject() -> bool:
+        if variant.get("liveMirrorOnly"):
+            clear_pair_candidate(stability_key)
+        return False
+
     shares, budget = _target_order_size(variant_id)
     if shares <= 0:
-        return False
+        return reject()
     up_depth = sum(float(a.get("size", 0)) for a in (up_book.get("asks") or []))
     down_depth = sum(float(a.get("size", 0)) for a in (down_book.get("asks") or []))
-    depth_cap = min(up_depth, down_depth) * SIM_DEPTH_CAP_FRACTION
+    depth_fraction = SIM_DEPTH_CAP_FRACTION
+    if variant.get("liveMirrorOnly"):
+        depth_fraction = min(depth_fraction, 1.0 / float(variant["minDepthMultiplier"]))
+    depth_cap = min(up_depth, down_depth) * depth_fraction
     shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
     if shares <= 0:
-        return False
+        return reject()
     up_fill = simulate_buy_fill(up_book, shares)
     down_fill = simulate_buy_fill(down_book, shares)
     if (
@@ -984,7 +1050,7 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
         or up_fill["shares"] < float(up_book.get("minOrderSize", 1) or 1)
         or down_fill["shares"] < float(down_book.get("minOrderSize", 1) or 1)
     ):
-        return False
+        return reject()
     price_sum = up_fill["decisionPrice"] + down_fill["decisionPrice"]
     total_decision_cost = (
         up_fill["decisionNotional"] + up_fill["decisionFee"]
@@ -997,7 +1063,27 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
         or net_per_share < SIM_MIN_NET_LOCK_PER_SHARE
         or total_decision_cost > cash
     ):
-        return False
+        return reject()
+    if variant.get("liveMirrorOnly"):
+        if not pair_depth_is_safe(
+            up_book,
+            down_book,
+            up_fill["decisionPrice"],
+            down_fill["decisionPrice"],
+            shares,
+            float(variant["minDepthMultiplier"]),
+        ):
+            return reject()
+        if not pair_candidate_is_stable(
+            stability_key,
+            slug,
+            shares,
+            up_fill["decisionPrice"],
+            down_fill["decisionPrice"],
+            float(variant["stabilitySeconds"]),
+        ):
+            return False
+        clear_pair_candidate(stability_key)
     # 深度封頂後實際成交金額可能比原本算的目標預算小，記錄實際花費的金額，
     # 不要留著封頂前那個沒用到的數字。
     budget = up_fill["notional"] + up_fill["fee"] + down_fill["notional"] + down_fill["fee"]
@@ -2067,6 +2153,8 @@ def build_ab_leaderboard() -> list:
             "stakePct":      float(v.get("stakePct", shared_config["stakePct"])),
             "maxPairBudgetUsd": float(v.get("maxPairBudgetUsd", SIM_MAX_PAIR_BUDGET_USD)),
             "minCashReserveUsd": float(v.get("minCashReserveUsd", SIM_MIN_CASH_RESERVE_USD)),
+            "minDepthMultiplier": float(v.get("minDepthMultiplier", 1.0)),
+            "stabilitySeconds": float(v.get("stabilitySeconds", 0.0)),
             "totalPnl":      st["totalPnl"],
             "totalTrades":   st["totalTrades"],
             "wins":          st["wins"],

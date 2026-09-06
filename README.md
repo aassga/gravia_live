@@ -98,6 +98,10 @@ Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計�
 - `POLY_MAX_PAIR_BUDGET_USD=25`：每組兩腿最多 25 USDC。
 - `POLY_MIN_CASH_RESERVE_USD=5`：至少保留 5 USDC 現金。
 - `POLY_STAKE_PCT=15`：每組兩腿預算為可用現金的 15%。
+- `POLY_LIVE_LOCK_MAX_SUM=0.92`：實盤兩腿保守可成交限價合計上限；門檻越低，理論緩衝越大、機會越少。
+- `POLY_PAIR_MIN_DEPTH_MULTIPLIER=5`：每腿在實際送出限價內的可成交深度，至少要是下單股數的 5 倍。
+- `POLY_PAIR_STABILITY_SECONDS=0.75`：同一市場、股數及兩腿限價必須連續維持至少 0.75 秒才送單。
+- `POLY_RESCUE_LOCK_MAX_SUM=0.99`：已經單腿成交後，只要補腿仍能保住最低淨利，就允許用較寬門檻優先消除曝險。
 - `POLY_ACTION_COOLDOWN_SECONDS=10`：下單嘗試間隔至少 10 秒。
 - 只有 FOK 訂單回覆 `matched` 才當作成交；`delayed` 長時間無法確認時會自動停止下單。
 - 新進場要求 Up／Down 都是完整 WebSocket 快照、各自不超過 2 秒且時間差不超過 0.5 秒；REST fallback 不能觸發真單。
@@ -105,7 +109,7 @@ Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計�
 - Batch 只有一腿成交時，不把 `matched` 當成 token 已可賣；最多 15 秒輪詢交易狀態、刷新 Conditional Token balance/allowance，餘額足夠後才依最新 bid 重算並送出緊急 SELL。逾時仍保留救援狀態，下一個 tick 會繼續處理。
 - 真實策略狀態儲存在 `polymarket_live_strategy_state.json`，重啟後不會忘記持倉與停止原因。
 - 真實損益頁面的策略名稱會反映目前實際啟用模式；將滑鼠移到名稱旁的資訊圖示（或用鍵盤聚焦）可查看完整進場、批次 FOK、資金與單腿救援設定。
-- 模擬盤新增 `BTC 實盤鏡像・兩腿鎖利` 獨立組，從 `POLY_STAKE_PCT`、單組上限與現金保留設定讀取實盤資金參數，只累積兩腿鎖利結果，不混入晚進場方向性交易。
+- 模擬盤新增 `BTC 實盤鏡像・兩腿鎖利` 獨立組，讀取與實盤相同的資金、鎖利上限、限價內深度倍數及穩定時間，只累積通過相同進場過濾的兩腿鎖利結果，不混入晚進場方向性交易。
 
 ### 建議做法：嵌入模擬盤進程（`--with-live`），共用同一條 WS 連線
 

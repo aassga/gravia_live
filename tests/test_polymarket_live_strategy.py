@@ -16,6 +16,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         strategy.STATE_FILE = os.path.join(self._tmpdir.name, "live-state.json")
         strategy.reset_live_state_for_tests()
+        strategy.sim._pair_stability_candidates.clear()
 
         # 測試永遠強制跑 dry-run，不管本機真實的 .env 有沒有武裝真實下單——
         # 避免哪天忘記，測試意外打到真實 API。
@@ -285,8 +286,43 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         total = sum(plan["riskNotional"] + plan["fee"] for plan in plans)
         self.assertGreater(10 - total, 0)
 
+    def test_direct_pair_rejects_when_executable_depth_is_below_safety_multiple(self):
+        required = 5 * strategy.PAIR_MIN_DEPTH_MULTIPLIER
+        up_book = {
+            "tickSize": 0.01,
+            "minOrderSize": 5,
+            "asks": [{"price": 0.39, "size": required - 1}],
+            "bids": [],
+        }
+        down_book = {
+            "tickSize": 0.01,
+            "minOrderSize": 5,
+            "asks": [{"price": 0.39, "size": required}],
+            "bids": [],
+        }
+        self.assertIsNone(strategy._direct_pair_plans(up_book, down_book, 5, 100))
+
+    def test_pair_depth_ignores_asks_above_submitted_limit(self):
+        required = 5 * strategy.PAIR_MIN_DEPTH_MULTIPLIER
+        up_book = {
+            "tickSize": 0.01,
+            "minOrderSize": 5,
+            "asks": [
+                {"price": 0.39, "size": required - 1},
+                {"price": 0.80, "size": 1_000},
+            ],
+            "bids": [],
+        }
+        down_book = {
+            "tickSize": 0.01,
+            "minOrderSize": 5,
+            "asks": [{"price": 0.39, "size": required}],
+            "bids": [],
+        }
+        self.assertIsNone(strategy._direct_pair_plans(up_book, down_book, 5, 100))
+
     def test_direct_pair_rejects_same_tick_boundary_as_simulation(self):
-        # 數字挑在剛好卡在目前 LOCK_MAX_SUM（0.95，跟隨 sim.AB_VARIANT_BY_ID["btc-late-direction"]）
+        # 數字挑在目前 LOCK_MAX_SUM 邊界之外：tick-aligned 保守限價加總超過門檻。
         # 兩側：tick-aligned 的保守限價加總超過門檻，應該被拒絕。
         up_book = {
             "tickSize": 0.01,
@@ -755,7 +791,10 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "asks": [{"price": 0.39, "size": 100}],
             "bids": [{"price": 0.38, "size": 100}],
         }
-        with patch.object(trader, "build_order", side_effect=AssertionError("dry-run must not sign")):
+        with (
+            patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
+            patch.object(trader, "build_order", side_effect=AssertionError("dry-run must not sign")),
+        ):
             await strategy.evaluate_and_act(
                 "btc-window", None, 180.0, {"fairUp": 0.5, "fairDown": 0.5}
             )
@@ -844,6 +883,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             patch.object(strategy.sim, "_ws_last_message_at", time.monotonic()),
             patch.object(strategy.sim, "_ws_snapshot_tokens", {"up-token", "down-token"}),
             patch.object(strategy.sim, "_ws_books", books),
+            patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
             patch.object(trader, "build_order", side_effect=AssertionError("dry-run must not sign")),
         ):
             strategy._on_ws_tick_sync("up-token", None, decision_lock)
@@ -869,7 +909,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "outcomes": json.dumps(["Up", "Down"]),
             "clobTokenIds": json.dumps(["up-token", "down-token"]),
         }
-        depth = 40  # 封頂後 (depth * SIM_DEPTH_CAP_FRACTION) 要小於 MAX_PAIR_BUDGET_USD
+        depth = 100  # 5 倍深度防護封頂後仍要高於 Polymarket 的最低下單金額
                     # 換算出的股數上限，才能確定是深度、不是資金，在限制最終股數。
         strategy.sim.state["upBook"] = {
             "tickSize": 0.01, "minOrderSize": 1,
@@ -880,14 +920,21 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "asks": [{"price": 0.10, "size": depth}], "bids": [],
         }
         # 現金給大一點，確保是深度（不是資金）在限制股數，跟本機 .env 的 STAKE_PCT 設多少無關。
-        with patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100_000.0)):
+        with (
+            patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100_000.0)),
+        ):
             await strategy.evaluate_and_act(
                 "btc-window", None, 180.0, {"fairUp": 0.5, "fairDown": 0.5}
             )
         pos = strategy.live_state["position"]
         self.assertIsNotNone(pos)
         self.assertTrue(pos["hedged"])
-        self.assertEqual(pos["shares"], depth * strategy.sim.SIM_DEPTH_CAP_FRACTION)
+        expected_fraction = min(
+            strategy.sim.SIM_DEPTH_CAP_FRACTION,
+            1.0 / strategy.PAIR_MIN_DEPTH_MULTIPLIER,
+        )
+        self.assertEqual(pos["shares"], depth * expected_fraction)
 
     def _set_market_for_preflight(self):
         strategy.sim.state["market"] = {
