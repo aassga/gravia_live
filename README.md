@@ -81,7 +81,7 @@ Windows 上如果 `python` 指令沒反應（跳出 Microsoft Store），請改�
 - ETH maker 逐腿記錄成交；只成交一腿會保留方向性曝險到結算，兩腿完成才記為鎖利。Dashboard 顯示掛價次數、成交腿數、完成配對數、單腿結算數與目前虛擬掛價。
 - 所有紙上成交都受雙腿資料一致性防護：Up／Down 必須同時來自 WebSocket 完整快照、各自不超過 2 秒，且接收時間差不超過 0.5 秒。重連期間或 REST fallback 報價仍可顯示，但禁止用來建立模擬交易。
 
-VPS 上的 ETH MM 以 `deploy/gravia-eth-mm.service` 獨立執行：只載入 ETH、使用 8768 與獨立的 `polymarket_eth_mm.sqlite3`，且不帶 `--with-live`，因此不可能啟動真實策略。CPU quota 與較低排程優先級可避免干擾 BTC 實盤。用 SSH 將 8768 轉發到本機後，開啟 `web/polymarket.html?asset=eth&port=8768` 監控。
+VPS 上的 ETH MM 以 `deploy/gravia-eth-mm.service` 獨立執行：只載入 ETH、使用 8768 與獨立的 `polymarket_eth_mm.sqlite3`，且不帶 `--with-live`，因此不可能啟動真實策略。CPU quota 與較低排程優先級可避免干擾 BTC 實盤。首腿 maker 掛價最高為 `$0.60`；首腿成交後若 15 秒仍未配對，模擬器會先嘗試以 taker 買入另一腿鎖住至少 1¢/股淨利，沒有正收益配對時則立即按持有腿 bid 模擬平倉。Dashboard 的 `makerStats` 會統計救援嘗試、成功配對、平倉與失敗次數。用 SSH 將 8768 轉發到本機後，開啟 `web/polymarket.html?asset=eth&port=8768` 監控。
 
 Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計費用與最大回撤。紙上結果仍不是實盤收益保證。
 

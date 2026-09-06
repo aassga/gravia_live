@@ -344,6 +344,85 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNone(sim.ab_states["eth-mm"]["makerQuotes"]["Up"])
         self.assertIsNone(sim.ab_states["eth-mm"]["makerQuotes"]["Down"])
 
+    def test_eth_maker_caps_first_leg_quotes_at_sixty_cents(self):
+        self._prepare_eth_mm()
+        up_book = {
+            "tickSize": 0.01, "minOrderSize": 5.0,
+            "bids": [{"price": 0.63, "size": 100.0}],
+            "asks": [{"price": 0.65, "size": 100.0}],
+        }
+        down_book = {
+            "tickSize": 0.01, "minOrderSize": 5.0,
+            "bids": [{"price": 0.29, "size": 100.0}],
+            "asks": [{"price": 0.31, "size": 100.0}],
+        }
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 120.0, None)
+        quotes = sim.ab_states["eth-mm"]["makerQuotes"]
+        self.assertEqual(quotes["Up"]["price"], sim.MM_FIRST_LEG_MAX_PRICE)
+        self.assertEqual(quotes["Down"]["price"], 0.30)
+
+    def test_eth_maker_rescue_taker_hedges_when_net_profit_is_available(self):
+        self._prepare_eth_mm()
+        up_book, down_book = self._eth_mm_books(bid=0.45, ask=0.46, queue=100.0)
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 120.0, None)
+        quote = sim.ab_states["eth-mm"]["makerQuotes"]["Up"]
+        sim.process_market_maker_trade("eth-up-token", {
+            "ts": quote["placedAt"] + 0.1, "price": quote["price"] - 0.01,
+            "size": quote["shares"], "side": "SELL",
+        })
+        state = sim.ab_states["eth-mm"]
+        state["position"]["entryTime"] = time.time() - sim.MM_INVENTORY_RESCUE_SECONDS - 1
+
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 100.0, None)
+
+        self.assertTrue(state["position"]["hedged"])
+        self.assertEqual(state["position"]["makerRescueAction"], "taker_hedge")
+        self.assertGreater(state["position"]["lockedPnl"], 0)
+        self.assertEqual(state["makerStats"]["rescueHedges"], 1)
+        self.assertEqual(state["makerStats"]["pairedFills"], 1)
+
+    def test_eth_maker_rescue_unwinds_when_profitable_hedge_is_unavailable(self):
+        self._prepare_eth_mm()
+        up_book, down_book = self._eth_mm_books(bid=0.45, ask=0.46, queue=100.0)
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 120.0, None)
+        quote = sim.ab_states["eth-mm"]["makerQuotes"]["Up"]
+        sim.process_market_maker_trade("eth-up-token", {
+            "ts": quote["placedAt"] + 0.1, "price": quote["price"] - 0.01,
+            "size": quote["shares"], "side": "SELL",
+        })
+        state = sim.ab_states["eth-mm"]
+        state["position"]["entryTime"] = time.time() - sim.MM_INVENTORY_RESCUE_SECONDS - 1
+        expensive_down = {
+            "tickSize": 0.01, "minOrderSize": 5.0,
+            "bids": [{"price": 0.53, "size": 100.0}],
+            "asks": [{"price": 0.54, "size": 100.0}],
+        }
+
+        sim.simulate_trading("eth-mm", "eth-window", up_book, expensive_down, 100.0, None)
+
+        self.assertIsNone(state["position"])
+        self.assertEqual(state["makerStats"]["rescueUnwinds"], 1)
+        self.assertEqual(state["makerStats"]["singleLegSettlements"], 1)
+        self.assertEqual(state["trades"][0]["exitReason"], "maker_inventory_timeout")
+
+    def test_eth_maker_does_not_rescue_before_inventory_timeout(self):
+        self._prepare_eth_mm()
+        up_book, down_book = self._eth_mm_books(queue=0.0)
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 120.0, None)
+        quote = sim.ab_states["eth-mm"]["makerQuotes"]["Up"]
+        sim.process_market_maker_trade("eth-up-token", {
+            "ts": quote["placedAt"] + 0.1, "price": quote["price"] - 0.01,
+            "size": quote["shares"], "side": "SELL",
+        })
+        state = sim.ab_states["eth-mm"]
+        state["position"]["entryTime"] = time.time() - sim.MM_INVENTORY_RESCUE_SECONDS + 1
+
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 100.0, None)
+
+        self.assertFalse(state["position"]["hedged"])
+        self.assertIsNotNone(state["makerQuotes"]["Down"])
+        self.assertEqual(state["makerStats"]["rescueAttempts"], 0)
+
     def test_eth_maker_metrics_are_exposed_to_dashboard(self):
         self._prepare_eth_mm()
         up_book, down_book = self._eth_mm_books()

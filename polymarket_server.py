@@ -135,6 +135,8 @@ SIM_DATA_GUARD_LOG_SECONDS = 30.0
 # 做得過度樂觀。兩腿成本上限同時保留至少 2 cents/share 的結算空間。
 MM_MAX_PAIR_COST          = 0.98
 MM_MIN_NET_PAIR_EDGE      = 0.02
+MM_FIRST_LEG_MAX_PRICE    = 0.60
+MM_INVENTORY_RESCUE_SECONDS = 15.0
 MM_REQUOTE_SECONDS        = 2.0
 MM_STOP_QUOTING_SECONDS   = 20.0
 
@@ -265,6 +267,10 @@ def _new_variant_state() -> dict:
             "pairedFills": 0,
             "singleLegSettlements": 0,
             "queueVolumeConsumed": 0.0,
+            "rescueAttempts": 0,
+            "rescueHedges": 0,
+            "rescueUnwinds": 0,
+            "rescueFailures": 0,
         },
     }
 
@@ -1037,6 +1043,10 @@ def _maker_stats(st: dict) -> dict:
         "pairedFills": 0,
         "singleLegSettlements": 0,
         "queueVolumeConsumed": 0.0,
+        "rescueAttempts": 0,
+        "rescueHedges": 0,
+        "rescueUnwinds": 0,
+        "rescueFailures": 0,
     }
     stats = st.setdefault("makerStats", {})
     for key, value in defaults.items():
@@ -1098,6 +1108,63 @@ def _maker_set_quote(st: dict, slug: str, side: str, candidate: tuple[float, flo
     return True
 
 
+def _rescue_maker_inventory(variant_id: str, up_book: dict, down_book: dict) -> None:
+    """首腿久未配對時，先以 taker 鎖正收益；否則立即賣回市場，限制方向曝險。"""
+    st = ab_states[variant_id]
+    pos = st.get("position")
+    if not pos or pos.get("hedged"):
+        return
+
+    now = time.time()
+    last_attempt = float(pos.get("makerRescueAttemptAt", 0) or 0)
+    if now - last_attempt < MM_REQUOTE_SECONDS:
+        return
+    pos["makerRescueAttemptAt"] = now
+    stats = _maker_stats(st)
+    stats["rescueAttempts"] += 1
+
+    quotes = st.get("makerQuotes")
+    if isinstance(quotes, dict):
+        quotes["Up"] = quotes["Down"] = None
+
+    other_side = "Down" if pos["side"] == "Up" else "Up"
+    other_book = down_book if other_side == "Down" else up_book
+    hedge_fill = simulate_buy_fill(other_book, float(pos["shares"]))
+    if hedge_fill:
+        projected_cost = (
+            _position_decision_cost(pos)
+            + hedge_fill["decisionNotional"]
+            + hedge_fill["decisionFee"]
+        )
+        projected_net_per_share = (float(pos["shares"]) - projected_cost) / float(pos["shares"])
+        cash, _ = compute_cash_and_portfolio(variant_id)
+        hedge_cash = hedge_fill["decisionNotional"] + hedge_fill["decisionFee"]
+        if projected_net_per_share >= SIM_MIN_NET_LOCK_PER_SHARE and hedge_cash <= cash + 1e-9:
+            hedge_position(variant_id, other_side, hedge_fill)
+            pos["makerRescueAction"] = "taker_hedge"
+            stats["pairedFills"] += 1
+            stats["rescueHedges"] += 1
+            log.info(
+                f"[SIM:{variant_id}] maker 15秒救援：taker 配對 {other_side} "
+                f"VWAP=${hedge_fill['vwap']:.4f} 淨鎖利=${pos['lockedPnl']:+.2f}"
+            )
+            save_sim_state()
+            return
+
+    held_book = up_book if pos["side"] == "Up" else down_book
+    exit_fill = simulate_sell_fill(held_book, float(pos["shares"]))
+    if exit_fill:
+        stats["rescueUnwinds"] += 1
+        _close_directional_position(variant_id, exit_fill, "maker_inventory_timeout")
+        log.info(f"[SIM:{variant_id}] maker 15秒救援：無正收益配對，已 taker 平倉")
+        save_sim_state()
+        return
+
+    stats["rescueFailures"] += 1
+    log.warning(f"[SIM:{variant_id}] maker 15秒救援失敗：持有腿沒有足夠 bid 深度，稍後重試")
+    save_sim_state()
+
+
 def update_market_maker_quotes(
     variant_id: str,
     slug: str,
@@ -1117,6 +1184,13 @@ def update_market_maker_quotes(
         quotes = st["makerQuotes"]
         changed = True
 
+    pos = st.get("position")
+    if pos and pos.get("windowSlug") == slug and not pos.get("hedged"):
+        inventory_age = time.time() - float(pos.get("entryTime", time.time()))
+        if inventory_age >= MM_INVENTORY_RESCUE_SECONDS:
+            _rescue_maker_inventory(variant_id, up_book, down_book)
+            return
+
     if remaining_seconds is None or remaining_seconds <= MM_STOP_QUOTING_SECONDS:
         if quotes.get("Up") is not None or quotes.get("Down") is not None:
             quotes["Up"] = quotes["Down"] = None
@@ -1125,7 +1199,6 @@ def update_market_maker_quotes(
             save_sim_state()
         return
 
-    pos = st.get("position")
     if pos and pos.get("windowSlug") != slug:
         return
     shares, _ = _target_order_size(variant_id)
@@ -1139,7 +1212,7 @@ def update_market_maker_quotes(
     wanted = ["Up", "Down"] if pos is None else ["Down" if pos["side"] == "Up" else "Up"]
     candidates: dict[str, tuple[float, float]] = {}
     for side in wanted:
-        price_cap = None
+        price_cap = MM_FIRST_LEG_MAX_PRICE
         if pos:
             price_cap = 1.0 - float(pos.get("entryPrice", 0)) - MM_MIN_NET_PAIR_EDGE
         candidate = _maker_quote_candidate(books[side], price_cap)
