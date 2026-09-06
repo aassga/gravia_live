@@ -22,6 +22,8 @@ class PolymarketSimulationTests(unittest.TestCase):
             market["downBook"] = {"bids": [], "asks": []}
             market["windowOpenSpotPrice"] = None
             market["spotPrice"] = None
+        sim._mm_seen_trade_keys.clear()
+        sim._mm_seen_trade_key_set.clear()
 
     def tearDown(self):
         if sim._sim_db is not None:
@@ -182,6 +184,105 @@ class PolymarketSimulationTests(unittest.TestCase):
             sim.set_ws_simulation_ticks_enabled(old_enabled)
         self.assertEqual(received, ["token-a"])
         self.assertEqual(sim._ws_get_book("token-a")["quoteSource"], "websocket")
+
+    def _eth_mm_books(self, bid=0.45, ask=0.46, queue=10.0):
+        book = {
+            "tickSize": 0.01,
+            "minOrderSize": 5.0,
+            "bids": [{"price": bid, "size": queue}],
+            "asks": [{"price": ask, "size": 100.0}],
+        }
+        return dict(book), dict(book)
+
+    def _prepare_eth_mm(self):
+        ms = sim.markets_state["eth"]
+        ms["upTokenId"] = "eth-up-token"
+        ms["downTokenId"] = "eth-down-token"
+        return ms
+
+    def test_eth_asset_has_only_market_maker_variant(self):
+        eth = next(asset for asset in sim.ASSETS if asset["id"] == "eth")
+        variants = [v for v in sim.AB_VARIANTS if v["assetId"] == "eth"]
+        self.assertTrue(eth["marketMakerOnly"])
+        self.assertEqual([v["id"] for v in variants], ["eth-mm"])
+        self.assertTrue(variants[0]["marketMakerOnly"])
+
+    def test_eth_maker_waits_for_queue_ahead_before_fill(self):
+        self._prepare_eth_mm()
+        up_book, down_book = self._eth_mm_books()
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 120.0, None)
+        quote = sim.ab_states["eth-mm"]["makerQuotes"]["Up"]
+        self.assertEqual(quote["price"], 0.45)
+        self.assertEqual(quote["queueAhead"], 10.0)
+
+        sim.process_market_maker_trade("eth-up-token", {
+            "ts": quote["placedAt"] + 0.05, "price": 0.45, "size": 1_000.0, "side": "BUY",
+        })
+        self.assertIsNone(sim.ab_states["eth-mm"]["position"])
+        self.assertEqual(quote["queueAhead"], 10.0)
+
+        sim.process_market_maker_trade("eth-up-token", {
+            "ts": quote["placedAt"] + 0.1, "price": 0.45, "size": 10.0, "side": "SELL",
+        })
+        self.assertIsNone(sim.ab_states["eth-mm"]["position"])
+        shares = quote["shares"]
+        sim.process_market_maker_trade("eth-up-token", {
+            "ts": quote["placedAt"] + 0.2, "price": 0.45, "size": shares, "side": "SELL",
+        })
+        pos = sim.ab_states["eth-mm"]["position"]
+        self.assertEqual(pos["side"], "Up")
+        self.assertTrue(pos["maker"])
+        self.assertEqual(pos["entryFee"], 0.0)
+
+    def test_eth_maker_two_queued_fills_create_locked_pair(self):
+        self._prepare_eth_mm()
+        up_book, down_book = self._eth_mm_books()
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 120.0, None)
+        up_quote = sim.ab_states["eth-mm"]["makerQuotes"]["Up"]
+        sim.process_market_maker_trade("eth-up-token", {
+            "ts": up_quote["placedAt"] + 0.1,
+            "price": up_quote["price"] - 0.01,
+            "size": up_quote["shares"],
+            "side": "SELL",
+        })
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 110.0, None)
+        down_quote = sim.ab_states["eth-mm"]["makerQuotes"]["Down"]
+        sim.process_market_maker_trade("eth-down-token", {
+            "ts": down_quote["placedAt"] + 0.1,
+            "price": down_quote["price"] - 0.01,
+            "size": down_quote["shares"],
+            "side": "SELL",
+        })
+        state = sim.ab_states["eth-mm"]
+        self.assertTrue(state["position"]["hedged"])
+        self.assertTrue(state["position"]["maker"])
+        self.assertGreater(state["position"]["lockedPnl"], 0)
+        self.assertEqual(state["makerStats"]["fills"], 2)
+        self.assertEqual(state["makerStats"]["pairedFills"], 1)
+
+    def test_eth_maker_rejects_unprofitable_pair_and_stops_near_close(self):
+        self._prepare_eth_mm()
+        expensive_up, expensive_down = self._eth_mm_books(bid=0.50, ask=0.51)
+        sim.simulate_trading("eth-mm", "eth-window", expensive_up, expensive_down, 120.0, None)
+        quotes = sim.ab_states["eth-mm"]["makerQuotes"]
+        self.assertIsNone(quotes["Up"])
+        self.assertIsNone(quotes["Down"])
+
+        up_book, down_book = self._eth_mm_books()
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 120.0, None)
+        self.assertIsNotNone(sim.ab_states["eth-mm"]["makerQuotes"]["Up"])
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 10.0, None)
+        self.assertIsNone(sim.ab_states["eth-mm"]["makerQuotes"]["Up"])
+        self.assertIsNone(sim.ab_states["eth-mm"]["makerQuotes"]["Down"])
+
+    def test_eth_maker_metrics_are_exposed_to_dashboard(self):
+        self._prepare_eth_mm()
+        up_book, down_book = self._eth_mm_books()
+        sim.simulate_trading("eth-mm", "eth-window", up_book, down_book, 120.0, None)
+        row = next(r for r in sim.build_ab_leaderboard() if r["id"] == "eth-mm")
+        self.assertEqual(row["strategyType"], "maker")
+        self.assertEqual(row["makerStats"]["quotesPlaced"], 2)
+        self.assertIsNotNone(row["makerQuotes"]["Up"])
 
 
 if __name__ == "__main__":

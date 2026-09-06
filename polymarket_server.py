@@ -63,7 +63,7 @@ if __name__ == "__main__":
 
 # ── 設定 ──────────────────────────────────────────────────────────────────
 HOST = "localhost"
-PORT = 8766             # Polymarket 紙上模擬 Dashboard
+PORT = int(os.environ.get("POLY_SIM_PORT", "8766"))  # 可讓隔離的 ETH MM 服務使用 8768
 POLL_INTERVAL = 3       # 報價輪詢間隔（秒）－ Polymarket 沒有強制要求 WebSocket，輪詢就綽綽有餘
 
 # 這個進程實際運行的地區標籤，純粹顯示用（例如 "TW-Home" / "AWS eu-west-1 Dublin"）。
@@ -106,7 +106,7 @@ SIM_MIN_NET_LOCK_PER_SHARE  = 0.01  # 完成配對後至少淨賺 1¢/股
 SIM_MIN_ORDER_NOTIONAL_USD  = 1.0   # 跟實盤一致：單腿成交金額低於這個門檻就不下單（Polymarket 最小下注是 $1，不是 $5）
 SIM_EXIT_EDGE               = 0.02  # 市場可賣價高於模型持有價值 2¢/股時提早退出
 SIM_FAIR_MODEL_WEIGHT       = 0.65  # Binance 波動模型權重；其餘使用市場隱含機率校準
-SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025, "btc-15m": 0.000025, "btc-4h": 0.000025}
+SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025, "btc-15m": 0.000025, "btc-4h": 0.000025, "eth": 0.000035}
 # 股數封頂在「當下看得到的深度」的這個比例。2026-09：實盤好幾次撞到「模擬盤跟實盤在
 # 同一秒看到同一個機會，模擬盤保證吃得到、實盤卻因為深度不夠被拒」——這不是 bug，是
 # 紙上模擬（吃剛看到的快照，保證成交）跟真實下單（要跟其他真人搶同一份流動性，中間
@@ -121,6 +121,16 @@ SIM_DEPTH_CAP_FRACTION      = 0.5
 # 影響模擬跟實盤，讓兩邊的「進場門檻」保持一致。
 SIM_PRICE_BUFFER_TICKS     = 1
 
+# ── ETH maker 紙上策略 ─────────────────────────────────────────────────────
+# 只模擬在 best bid（或價差夠寬時改善一格）掛被動 BUY，不會呼叫任何下單 API。
+# 成交採保守 queue-ahead 模型：同價位的真實成交量必須先吃完掛單時看到的前方深度，
+# 再累積到我們的完整股數才算成交。未完整成交的零碎量不列入資產，避免把 maker 回測
+# 做得過度樂觀。兩腿成本上限同時保留至少 2 cents/share 的結算空間。
+MM_MAX_PAIR_COST          = 0.98
+MM_MIN_NET_PAIR_EDGE      = 0.02
+MM_REQUOTE_SECONDS        = 2.0
+MM_STOP_QUOTING_SECONDS   = 20.0
+
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # 對齊公開資料裡「T-10 秒、window delta」那套做法：不是在窗口一開始就靠模型優勢
 # 賭單邊（那條退路驗證下來是 0% 勝率，2026-09 起已對其他變體關閉），而是等到窗口
@@ -131,7 +141,7 @@ LATE_DIRECTION_MIN_ENTRY_REMAINING = 3.0   # 剩不到這個秒數就別進了�
 LATE_DIRECTION_MIN_DELTA_PCT       = 0.02  # 現價相對開盤價至少要偏移這個百分比（公開資料裡的「強訊號」門檻）
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SIM_DB_PATH = os.path.join(BASE_DIR, "polymarket_sim.sqlite3")
+SIM_DB_PATH = os.environ.get("POLY_SIM_DB_PATH", os.path.join(BASE_DIR, "polymarket_sim.sqlite3"))
 
 # ── 追蹤的資產：Polymarket 目前總共有 7 個「5 分鐘漲跌」市場（直接對 Gamma API
 #    逐一探測 slug 驗證過，其餘主流幣如 ADA/AVAX/LINK/DOT 都沒有對應市場，不是列表不全），
@@ -142,11 +152,19 @@ SIM_DB_PATH = os.path.join(BASE_DIR, "polymarket_sim.sqlite3")
 #    4h ~23k 股，5m 通常只有幾十到幾百股），值得先加進模擬盤觀察是否值得接進實盤。
 #    id 要唯一（拿來當 markets_state／AB_VARIANTS 的 key），windowSeconds 沒填的話
 #    預設是 WINDOW_SECONDS（5 分鐘）。
-ASSETS = [
+ASSET_CATALOG = [
     {"id": "btc",     "label": "BTC",      "slugPrefix": "btc-updown-5m-",  "binanceSymbol": "BTCUSDT", "windowSeconds": 300},
     {"id": "btc-15m", "label": "BTC 15m",  "slugPrefix": "btc-updown-15m-", "binanceSymbol": "BTCUSDT", "windowSeconds": 900},
     {"id": "btc-4h",  "label": "BTC 4h",   "slugPrefix": "btc-updown-4h-",  "binanceSymbol": "BTCUSDT", "windowSeconds": 14400},
+    {"id": "eth",     "label": "ETH MM",   "slugPrefix": "eth-updown-5m-",  "binanceSymbol": "ETHUSDT", "windowSeconds": 300, "marketMakerOnly": True},
 ]
+_default_asset_ids = "btc,btc-15m,btc-4h" if WITH_LIVE else "btc,btc-15m,btc-4h,eth"
+_enabled_asset_ids = {
+    value.strip() for value in os.environ.get("POLY_SIM_ASSETS", _default_asset_ids).split(",") if value.strip()
+}
+ASSETS = [asset for asset in ASSET_CATALOG if asset["id"] in _enabled_asset_ids]
+if not ASSETS:
+    raise RuntimeError("POLY_SIM_ASSETS 沒有選到任何已知資產")
 
 # ── A/B 門檻測試：每個資產各自跑同一套四組門檻設定，彼此獨立記帳，方便直接比較
 #    「同一套策略邏輯放到不同資產上，表現差多少」。variant id 格式是
@@ -165,6 +183,16 @@ _VARIANT_CONFIGS = [
 ]
 AB_VARIANTS = []
 for _asset in ASSETS:
+    if _asset.get("marketMakerOnly"):
+        AB_VARIANTS.append({
+            "id":              f"{_asset['id']}-mm",
+            "assetId":         _asset["id"],
+            "label":           f"{_asset['label']} 被動雙邊做市",
+            "entryMaxPrice":   None,
+            "lockMaxSum":      MM_MAX_PAIR_COST,
+            "marketMakerOnly": True,
+        })
+        continue
     for _cfg in _VARIANT_CONFIGS:
         AB_VARIANTS.append({
             "id":            f"{_asset['id']}-{_cfg['key']}",
@@ -182,8 +210,9 @@ for _asset in ASSETS:
         "lateDirectionOnly":     True,
         "lateDirectionMaxPrice": 0.92,
     })
-del _asset, _cfg
+del _asset
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
+MARKET_MAKER_VARIANTS = [v for v in AB_VARIANTS if v.get("marketMakerOnly")]
 
 def _new_market_state() -> dict:
     return {
@@ -206,7 +235,7 @@ def _new_market_state() -> dict:
 
 # ── 全域狀態：每個資產各自一份，互不干擾 ─────────────────────────────────────
 markets_state = {a["id"]: _new_market_state() for a in ASSETS}
-state = markets_state["btc"]  # 向後相容：既有程式碼引用 state 的地方，等同於 BTC 這份
+state = markets_state.get("btc") or next(iter(markets_state.values()))
 
 def _new_variant_state() -> dict:
     return {
@@ -222,9 +251,18 @@ def _new_variant_state() -> dict:
         "earlyExits":          0,
         "peakPortfolio":       SIM_DEFAULT_BALANCE,
         "maxDrawdown":         0.0,
+        "makerQuotes":         None,
+        "makerStats": {
+            "quotesPlaced": 0,
+            "fills": 0,
+            "pairedFills": 0,
+            "singleLegSettlements": 0,
+            "queueVolumeConsumed": 0.0,
+        },
     }
 
 ab_states = {v["id"]: _new_variant_state() for v in AB_VARIANTS}
+DEFAULT_VARIANT_ID = "btc-main" if "btc-main" in ab_states else AB_VARIANTS[0]["id"]
 
 # 下注比例／起始資產是所有 A/B 組共用的設定，刻意保持一致，
 # 這樣比較結果的差異只來自「進場/鎖利門檻」本身，不會被其他變因干擾。
@@ -234,7 +272,7 @@ shared_config = {
     "runId":        int(time.time() * 1000),
 }
 
-sim_state = ab_states["btc-main"]  # 向後相容：既有程式碼引用 sim_state 的地方，等同於 "main" 這組
+sim_state = ab_states[DEFAULT_VARIANT_ID]
 
 def set_stake_pct(pct: float) -> None:
     shared_config["stakePct"] = max(SIM_MIN_STAKE_PCT, min(SIM_MAX_STAKE_PCT, float(pct)))
@@ -249,7 +287,7 @@ def reset_with_balance(start_balance: float) -> None:
         ab_states[vid] = _new_variant_state()
         ab_states[vid]["peakPortfolio"] = shared_config["startBalance"]
     global sim_state
-    sim_state = ab_states["btc-main"]
+    sim_state = ab_states[DEFAULT_VARIANT_ID]
     save_sim_state()
     log.info(f"[SIM] 重置：起始資產=${shared_config['startBalance']:,.2f}（全部 A/B 組一起重置）")
 
@@ -552,7 +590,7 @@ def load_sim_state() -> None:
             ab_states[variant_id] = defaults
         except Exception as exc:
             log.warning(f"[SIM:{variant_id}] 無法載入狀態，改用空白狀態：{exc}")
-    sim_state = ab_states["btc-main"]
+    sim_state = ab_states[DEFAULT_VARIANT_ID]
 
 
 def persist_trade(variant_id: str, trade: dict) -> None:
@@ -985,6 +1023,214 @@ def _close_directional_position(variant_id: str, fill: dict, reason: str) -> Non
     log.info(f"[SIM:{variant_id}] 提早退出 {pos['side']} VWAP=${fill['vwap']:.4f} PnL=${pnl:+.2f} reason={reason}")
 
 
+def _maker_stats(st: dict) -> dict:
+    defaults = {
+        "quotesPlaced": 0,
+        "fills": 0,
+        "pairedFills": 0,
+        "singleLegSettlements": 0,
+        "queueVolumeConsumed": 0.0,
+    }
+    stats = st.setdefault("makerStats", {})
+    for key, value in defaults.items():
+        stats.setdefault(key, value)
+    return stats
+
+
+def _maker_quote_candidate(book: dict, price_cap: float | None = None) -> tuple[float, float] | None:
+    """回傳保證不 crossing 的 maker bid 與掛單時前方隊列量。"""
+    bids = book.get("bids") or []
+    asks = book.get("asks") or []
+    if not bids or not asks:
+        return None
+    tick = max(0.001, float(book.get("tickSize", 0.01) or 0.01))
+    best_bid = max(float(level["price"]) for level in bids)
+    best_ask = min(float(level["price"]) for level in asks)
+    if best_ask - best_bid >= 2 * tick - 1e-9:
+        candidate = best_bid + tick
+    else:
+        candidate = best_bid
+    candidate = min(candidate, best_ask - tick)
+    if price_cap is not None:
+        candidate = min(candidate, float(price_cap))
+    tick_d = Decimal(str(tick))
+    candidate = float((Decimal(str(candidate)) / tick_d).to_integral_value(rounding=ROUND_DOWN) * tick_d)
+    if candidate < tick or candidate >= best_ask - 1e-9:
+        return None
+    queue_ahead = sum(
+        float(level.get("size", 0))
+        for level in bids
+        if abs(float(level["price"]) - candidate) < tick / 10
+    )
+    return candidate, queue_ahead
+
+
+def _maker_set_quote(st: dict, slug: str, side: str, candidate: tuple[float, float], shares: float) -> bool:
+    quotes = st.setdefault("makerQuotes", {"windowSlug": slug, "Up": None, "Down": None})
+    now = time.time()
+    price, queue_ahead = candidate
+    old = quotes.get(side)
+    if old and old.get("windowSlug") == slug:
+        same_order = abs(float(old.get("price", 0)) - price) < 1e-9 and abs(float(old.get("shares", 0)) - shares) < 1e-9
+        if same_order or now - float(old.get("placedAt", 0)) < MM_REQUOTE_SECONDS:
+            return False
+    quotes[side] = {
+        "windowSlug": slug,
+        "side": side,
+        "price": price,
+        "shares": shares,
+        "queueAhead": queue_ahead,
+        "fillProgress": 0.0,
+        "placedAt": now,
+    }
+    _maker_stats(st)["quotesPlaced"] += 1
+    log.info(
+        f"[SIM:eth-mm] maker 掛價 {side} BUY ${price:.3f} x {shares:.2f} "
+        f"queueAhead={queue_ahead:.2f}"
+    )
+    return True
+
+
+def update_market_maker_quotes(
+    variant_id: str,
+    slug: str,
+    up_book: dict,
+    down_book: dict,
+    remaining_seconds: float | None,
+) -> None:
+    """依即時 book 維護 ETH maker 紙上掛價；不會建立、簽署或送出真實訂單。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    if not variant.get("marketMakerOnly"):
+        return
+    st = ab_states[variant_id]
+    changed = False
+    quotes = st.get("makerQuotes")
+    if not isinstance(quotes, dict) or quotes.get("windowSlug") != slug:
+        st["makerQuotes"] = {"windowSlug": slug, "Up": None, "Down": None}
+        quotes = st["makerQuotes"]
+        changed = True
+
+    if remaining_seconds is None or remaining_seconds <= MM_STOP_QUOTING_SECONDS:
+        if quotes.get("Up") is not None or quotes.get("Down") is not None:
+            quotes["Up"] = quotes["Down"] = None
+            changed = True
+        if changed:
+            save_sim_state()
+        return
+
+    pos = st.get("position")
+    if pos and pos.get("windowSlug") != slug:
+        return
+    shares, _ = _target_order_size(variant_id)
+    if pos:
+        shares = float(pos["shares"])
+    shares = float(Decimal(str(shares)).to_integral_value(rounding=ROUND_DOWN))
+    if shares <= 0:
+        return
+
+    books = {"Up": up_book, "Down": down_book}
+    wanted = ["Up", "Down"] if pos is None else ["Down" if pos["side"] == "Up" else "Up"]
+    candidates: dict[str, tuple[float, float]] = {}
+    for side in wanted:
+        price_cap = None
+        if pos:
+            price_cap = 1.0 - float(pos.get("entryPrice", 0)) - MM_MIN_NET_PAIR_EDGE
+        candidate = _maker_quote_candidate(books[side], price_cap)
+        min_size = float(books[side].get("minOrderSize", 1) or 1)
+        if candidate is None or shares < min_size or candidate[0] * shares < SIM_MIN_ORDER_NOTIONAL_USD:
+            if quotes.get(side) is not None:
+                quotes[side] = None
+                changed = True
+            continue
+        candidates[side] = candidate
+
+    if pos is None:
+        if set(candidates) != {"Up", "Down"} or sum(x[0] for x in candidates.values()) > MM_MAX_PAIR_COST + 1e-9:
+            if quotes.get("Up") is not None or quotes.get("Down") is not None:
+                quotes["Up"] = quotes["Down"] = None
+                changed = True
+            if changed:
+                save_sim_state()
+            return
+
+    cash, _ = compute_cash_and_portfolio(variant_id)
+    required_cash = shares * sum(candidate[0] for candidate in candidates.values())
+    if required_cash > cash + 1e-9:
+        return
+    for side, candidate in candidates.items():
+        changed = _maker_set_quote(st, slug, side, candidate, shares) or changed
+    for side in ("Up", "Down"):
+        if side not in wanted and quotes.get(side) is not None:
+            quotes[side] = None
+            changed = True
+    if changed:
+        save_sim_state()
+
+
+def process_market_maker_trade(token_id: str, trade: dict) -> None:
+    """用真實 last_trade_price 消耗 maker queue；完整排到才記一筆紙上成交。"""
+    for variant in MARKET_MAKER_VARIANTS:
+        ms = markets_state[variant["assetId"]]
+        side = "Up" if token_id == ms.get("upTokenId") else ("Down" if token_id == ms.get("downTokenId") else None)
+        if side is None:
+            continue
+        st = ab_states[variant["id"]]
+        quotes = st.get("makerQuotes") or {}
+        quote = quotes.get(side)
+        if not quote:
+            continue
+        trade_ts = float(trade.get("ts") or time.time())
+        if trade_ts + 0.5 < float(quote.get("placedAt", 0)):
+            continue
+        if str(trade.get("side", "")).upper() != "SELL":
+            # Maker BUY 只會被主動 SELL 吃到；BUY 成交發生在 ask，不能拿來消耗 bid queue。
+            continue
+        trade_price = float(trade["price"])
+        quote_price = float(quote["price"])
+        if trade_price > quote_price + 1e-9:
+            continue
+        trade_size = max(0.0, float(trade.get("size", 0)))
+        queue_before = max(0.0, float(quote.get("queueAhead", 0)))
+        if trade_price < quote_price - 1e-9:
+            eligible = queue_before + float(quote["shares"])
+        else:
+            eligible = trade_size
+        queue_used = min(queue_before, eligible)
+        quote["queueAhead"] = queue_before - queue_used
+        _maker_stats(st)["queueVolumeConsumed"] += queue_used
+        quote["fillProgress"] = float(quote.get("fillProgress", 0)) + max(0.0, eligible - queue_used)
+        if quote["fillProgress"] + 1e-9 < float(quote["shares"]):
+            continue
+
+        shares = float(quote["shares"])
+        fill = {
+            "vwap": quote_price,
+            "notional": quote_price * shares,
+            "fee": 0.0,
+            "worstPrice": quote_price,
+            "decisionPrice": quote_price,
+            "decisionNotional": quote_price * shares,
+            "decisionFee": 0.0,
+            "shares": shares,
+        }
+        quotes[side] = None
+        stats = _maker_stats(st)
+        stats["fills"] += 1
+        pos = st.get("position")
+        if pos is None:
+            enter_position(variant["id"], quote["windowSlug"], side, fill, fill["notional"], None, None)
+            st["position"]["maker"] = True
+            log.info(f"[SIM:{variant['id']}] maker 首腿成交 {side} ${quote_price:.3f} x {shares:.2f}")
+        elif pos.get("windowSlug") == quote.get("windowSlug") and pos.get("side") != side:
+            hedge_position(variant["id"], side, fill)
+            st["position"]["maker"] = True
+            stats["pairedFills"] += 1
+            quotes["Up"] = quotes["Down"] = None
+            log.info(f"[SIM:{variant['id']}] maker 兩腿完成，鎖定 PnL=${st['position']['lockedPnl']:+.2f}")
+        save_sim_state()
+        return
+
+
 def simulate_trading(
     variant_id: str,
     slug: str,
@@ -997,6 +1243,10 @@ def simulate_trading(
     variant = AB_VARIANT_BY_ID[variant_id]
     st = ab_states[variant_id]
     pos = st["position"]
+
+    if variant.get("marketMakerOnly"):
+        update_market_maker_quotes(variant_id, slug, up_book, down_book, remaining_seconds)
+        return
 
     if pos is None:
         if remaining_seconds is None or remaining_seconds <= 0:
@@ -1113,6 +1363,7 @@ def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
         "exitReason":   pos.get("exitReason"),
         "fairProbability": pos.get("fairProbability"),
         "entryEdge":    pos.get("entryEdge"),
+        "maker":         bool(pos.get("maker")),
         "tradeType":    trade_type,
         "outcome":      outcome,
         "fees":         fees,
@@ -1134,6 +1385,8 @@ def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
         st["directionalTrades"] += 1
     if pnl > 0:
         st["wins"] += 1
+    if AB_VARIANT_BY_ID[variant_id].get("marketMakerOnly") and not pos.get("hedged"):
+        _maker_stats(st)["singleLegSettlements"] += 1
     persist_trade(variant_id, trade)
     save_sim_state()
 
@@ -1173,6 +1426,9 @@ def queue_settlement(slug: str) -> None:
         if pos is not None and pos["windowSlug"] == slug:
             st["pendingSettlements"].append(pos)
             st["position"] = None
+        quotes = st.get("makerQuotes")
+        if isinstance(quotes, dict) and quotes.get("windowSlug") == slug:
+            st["makerQuotes"] = None
     save_sim_state()
 
 # ── Polymarket 市場資料 WebSocket（只用在模擬版）───────────────────────────
@@ -1288,6 +1544,8 @@ MM_SUMMARY_INTERVAL = 60.0
 
 _mm_trades: dict = {}          # token_id -> deque[{"ts","price","size","side"}]（最近成交）
 _mm_last_summary_at = 0.0
+_mm_seen_trade_keys = deque(maxlen=2_000)
+_mm_seen_trade_key_set: set = set()
 
 
 def _mm_record_trade(payload: dict) -> None:
@@ -1295,15 +1553,25 @@ def _mm_record_trade(payload: dict) -> None:
     if not tid:
         return
     try:
+        raw_ts = float(payload.get("timestamp", 0) or 0)
         trade = {
-            "ts": float(payload.get("timestamp", 0)) / 1000.0,
+            "ts": (raw_ts / 1000.0 if raw_ts > 10_000_000_000 else raw_ts) if raw_ts > 0 else time.time(),
             "price": float(payload["price"]),
             "size": float(payload["size"]),
             "side": str(payload.get("side", "")).upper(),
         }
     except (KeyError, ValueError, TypeError):
         return
+    trade_key = (tid, trade["ts"], trade["price"], trade["size"], trade["side"])
+    if trade_key in _mm_seen_trade_key_set:
+        return
+    if len(_mm_seen_trade_keys) == _mm_seen_trade_keys.maxlen:
+        _mm_seen_trade_key_set.discard(_mm_seen_trade_keys[0])
+    _mm_seen_trade_keys.append(trade_key)
+    _mm_seen_trade_key_set.add(trade_key)
     _mm_trades.setdefault(tid, deque(maxlen=MM_TRADE_HISTORY_LIMIT)).append(trade)
+    if MARKET_MAKER_VARIANTS:
+        process_market_maker_trade(tid, trade)
 
 
 def _mm_maybe_log_summary() -> None:
@@ -1313,7 +1581,7 @@ def _mm_maybe_log_summary() -> None:
     if now - _mm_last_summary_at < MM_SUMMARY_INTERVAL:
         return
     _mm_last_summary_at = now
-    for ms in markets_state.values():
+    for asset_id, ms in markets_state.items():
         for side_label, tid in (("Up", ms.get("upTokenId")), ("Down", ms.get("downTokenId"))):
             if not tid:
                 continue
@@ -1325,12 +1593,12 @@ def _mm_maybe_log_summary() -> None:
                 spread = book["asks"][0]["price"] - book["bids"][0]["price"]
             spread_txt = f"${spread:.3f}" if spread is not None else "無雙邊報價"
             if not recent:
-                log.info(f"[MM觀察:{side_label}] 過去{MM_SUMMARY_INTERVAL:.0f}秒無成交　目前價差={spread_txt}")
+                log.info(f"[MM觀察:{asset_id}:{side_label}] 過去{MM_SUMMARY_INTERVAL:.0f}秒無成交　目前價差={spread_txt}")
                 continue
             total_size = sum(t["size"] for t in recent)
             avg_size = total_size / len(recent)
             log.info(
-                f"[MM觀察:{side_label}] 過去{MM_SUMMARY_INTERVAL:.0f}秒 成交{len(recent)}筆　"
+                f"[MM觀察:{asset_id}:{side_label}] 過去{MM_SUMMARY_INTERVAL:.0f}秒 成交{len(recent)}筆　"
                 f"總量={total_size:.1f}股　平均單筆={avg_size:.1f}股　目前價差={spread_txt}"
             )
 
@@ -1646,6 +1914,7 @@ def build_ab_leaderboard() -> list:
             "id":            v["id"],
             "assetId":       v["assetId"],
             "label":         v["label"],
+            "strategyType":  "maker" if v.get("marketMakerOnly") else "taker",
             "entryMaxPrice": v["entryMaxPrice"],
             "lockMaxSum":    v["lockMaxSum"],
             "totalPnl":      st["totalPnl"],
@@ -1662,14 +1931,14 @@ def build_ab_leaderboard() -> list:
             "directionalTrades": st.get("directionalTrades", 0),
             "earlyExits":    st.get("earlyExits", 0),
             "maxDrawdown":   st.get("maxDrawdown", 0.0),
+            "makerQuotes":   st.get("makerQuotes"),
+            "makerStats":    _maker_stats(st) if v.get("marketMakerOnly") else None,
             "trades":        st["trades"],  # 這組自己的成交紀錄，前端獨立顯示，方便看個別下注金額
         })
     return rows
 
 def build_asset_payload(asset_id: str) -> dict:
-    """單一資產的市場行情。策略戰績不在這裡——每個資產各自 4 組（conservative/main/
-    loose/late-direction），都在 build_ab_leaderboard() 裡用 "<資產id>-<組別>" 的 id
-    區分，前端依網址參數 ?asset= 篩選要看哪個資產的那 4 組。"""
+    """單一資產行情；策略戰績由 build_ab_leaderboard() 依 assetId 分流。"""
     ms = markets_state[asset_id]
     m = ms["market"] or {}
     remaining_seconds = None

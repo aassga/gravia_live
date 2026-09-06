@@ -1,0 +1,27 @@
+[Unit]
+Description=Gravia ETH 5m market-maker paper simulation
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+Environment=PYTHONUNBUFFERED=1
+Environment=POLY_SIM_PORT=8768
+Environment=POLY_SIM_ASSETS=eth
+Environment=POLY_SIM_DB_PATH=/home/ubuntu/gravia_live/polymarket_eth_mm.sqlite3
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_server.py
+Restart=on-failure
+RestartSec=3
+Nice=10
+CPUQuota=30%
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

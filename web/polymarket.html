@@ -245,14 +245,15 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   };
 
   // 跟後端 polymarket_server.py 的 ASSETS 對齊，這裡直接列出來畫分頁籤，不用等第一筆
-  // WS 資料回來才有分頁可以按。2026-09 起模擬盤只保留 BTC（樣本數/勝率明顯領先其餘
-  // 資產，見對話紀錄），其餘之後有需要再加回來；同時加入 BTC 15m／4h 兩種窗口長度觀察。
-  const ASSET_LIST=[
+  // WS 資料回來才有分頁可以按。BTC 與 ETH maker 可由不同模擬服務動態回報。
+  let ASSET_LIST=[
     {id:'btc',     label:'BTC'},
     {id:'btc-15m', label:'BTC 15m'},
     {id:'btc-4h',  label:'BTC 4h'},
+    {id:'eth',     label:'ETH MM'},
   ];
-  const _urlAsset=new URLSearchParams(location.search).get('asset');
+  const _urlParams=new URLSearchParams(location.search);
+  const _urlAsset=_urlParams.get('asset');
   let currentAsset=ASSET_LIST.some(a=>a.id===_urlAsset)?_urlAsset:'btc';
 
   let logEntries=[];
@@ -261,7 +262,8 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   let clockOffsetMs=0;  // 伺服器校正過的真實時間 - 本機時間；本機時鐘可能不準，別直接用 Date.now()
 
   // ── WebSocket ──
-  const WS='ws://localhost:8766';
+  const _requestedPort=Number(_urlParams.get('port')||8766);
+  const WS='ws://localhost:'+(_requestedPort>=1&&_requestedPort<=65535?_requestedPort:8766);
   let ws=null;
 
   function connect(){
@@ -310,6 +312,10 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
 
   function onFull(d){
     lastPayload=d;
+    if(Array.isArray(d.assetList)&&d.assetList.length){
+      ASSET_LIST=d.assetList;
+      if(!ASSET_LIST.some(a=>a.id===currentAsset)) currentAsset=ASSET_LIST[0].id;
+    }
     if(typeof d.serverTimeMs==='number'){
       clockOffsetMs=d.serverTimeMs-Date.now();
     }
@@ -418,7 +424,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   }
 
   function renderSummary(variants,cfg){
-    const mainRow=variants.find(v=>v.id===currentAsset+'-main');
+    const mainRow=variants.find(v=>v.id===currentAsset+'-main')||variants[0];
     if(mainRow){
       const pf=$('asset-portfolio');
       pf.textContent='$'+mainRow.portfolio.toFixed(2);
@@ -471,6 +477,9 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       const pnlColor=v.totalPnl>0?'#00ff9d':(v.totalPnl<0?'#ff3a5c':'#888');
 
       const p=v.position;
+      const isMaker=v.strategyType==='maker';
+      const makerStats=v.makerStats||{};
+      const makerQuotes=v.makerQuotes||{};
       let posHtml;
       const POS_BOX_HEIGHT=78;  // 固定高度：不管有沒有鎖利那行，三欄下面的成交紀錄都從同一個 Y 座標開始
       if(!p){
@@ -507,18 +516,18 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
           <span>費用 $${(v.totalFees||0).toFixed(2)}</span>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:nowrap;overflow:hidden;font-size:9px;color:#888;margin-bottom:4px;white-space:nowrap;">
-          <span>鎖利/方向/提早 ${v.lockedTrades||0}/${v.directionalTrades||0}/${v.earlyExits||0}</span>
+          <span>${isMaker?`掛價/成交/配對 ${makerStats.quotesPlaced||0}/${makerStats.fills||0}/${makerStats.pairedFills||0}`:`鎖利/方向/提早 ${v.lockedTrades||0}/${v.directionalTrades||0}/${v.earlyExits||0}`}</span>
           <span class="red">回撤 ${(v.maxDrawdown||0).toFixed(2)}%</span>
         </div>
         <div style="font-size:8.5px;color:#444;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-          ${typeof v.entryMaxPrice==='number'?'進場≤$'+v.entryMaxPrice.toFixed(2)+' · ':'只做鎖利／晚進場方向性 · '}鎖利合計≤$${v.lockMaxSum.toFixed(2)} · 資產 $${v.portfolio.toFixed(2)}
+          ${isMaker?`Maker queue 模型 · Up ${makerQuotes.Up?'$'+makerQuotes.Up.price.toFixed(3):'—'} / Down ${makerQuotes.Down?'$'+makerQuotes.Down.price.toFixed(3):'—'} · 單腿結算 ${makerStats.singleLegSettlements||0}`:`${typeof v.entryMaxPrice==='number'?'進場≤$'+v.entryMaxPrice.toFixed(2)+' · ':'只做鎖利／晚進場方向性 · '}鎖利合計≤$${v.lockMaxSum.toFixed(2)}`} · 資產 $${v.portfolio.toFixed(2)}
         </div>`;
 
       const trades=v.trades||[];
       const list=trades.length?trades.map(t=>{
         const win=t.pnl>=0;
         const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
-        const dir=t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:(t.tradeType==='early_exit'?`${t.side} 提早退出`:`${t.side} 方向性`);
+        const dir=t.maker?(t.hedged?`${t.side}/${t.hedgeSide} Maker配對`:`${t.side} Maker單腿`):(t.hedged?`${t.side}/${t.hedgeSide} 鎖利`:(t.tradeType==='early_exit'?`${t.side} 提早退出`:`${t.side} 方向性`));
         return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #ffffff08;font-size:9.5px;gap:4px;">
           <span style="color:#444;">${dt}</span>
           <span class="${t.hedged?'up-b':(win?'up-b':'dn-b')}" style="font-size:9px;">${dir}</span>
