@@ -158,6 +158,27 @@ MM_STOP_QUOTING_SECONDS   = 20.0
 LATE_DIRECTION_WINDOW_SECONDS      = 10.0  # 還原 12:24:56 那筆所用的最後 10 秒窗口
 LATE_DIRECTION_MIN_ENTRY_REMAINING = 3.0   # 還原原策略；只替換方向價格來源為 Chainlink
 LATE_DIRECTION_MIN_DELTA_PCT       = 0.02  # Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 的最低偏移
+
+# BTC 15 分鐘專用方向策略。15 分鐘市場雖然同樣由 Chainlink BTC/USD 決勝，價格在窗口
+# 內有更長時間累積偏移，不能沿用 5 分鐘的固定 0.02%／最後 3–10 秒門檻。這裡用最近
+# 5 分鐘的 60 秒 TWAP 實現波動估計，再按剩餘秒數換算反轉風險；所有門檻先只跑紙上盤。
+BTC_15M_DIRECTION_MAX_REMAINING       = 30.0
+BTC_15M_DIRECTION_MIN_REMAINING       = 12.0
+BTC_15M_DIRECTION_MIN_DELTA_PCT       = 0.04
+BTC_15M_DIRECTION_VOL_LOOKBACK_SECONDS = 300.0
+BTC_15M_DIRECTION_VOL_BUCKET_SECONDS  = 10.0
+BTC_15M_DIRECTION_MIN_SIGMA_PCT       = 0.02
+BTC_15M_DIRECTION_VOL_SAFETY_MULTIPLIER = 1.35
+BTC_15M_DIRECTION_MIN_PROBABILITY     = 0.78
+BTC_15M_DIRECTION_MIN_EDGE_PER_SHARE  = 0.03
+BTC_15M_DIRECTION_MIN_MARKET_PROBABILITY = 0.55
+BTC_15M_DIRECTION_MAX_SPREAD          = 0.05
+BTC_15M_DIRECTION_MAX_PRICE           = 0.88
+BTC_15M_DIRECTION_DEPTH_MULTIPLIER     = 2.0
+BTC_15M_DIRECTION_STABILITY_SECONDS    = 1.5
+BTC_15M_DIRECTION_STAKE_PCT            = 5.0
+BTC_15M_DIRECTION_MAX_BUDGET_USD       = 10.0
+BTC_15M_DIRECTION_MIN_CASH_RESERVE_USD = 10.0
 # 2026-08-14 起 5 分鐘 crypto 市場以 Chainlink 60 秒 TWAP 的窗口起／終值結算。
 # RTDS 是 Polymarket 官方建議的免憑證 production feed。方向性策略只能使用這份來源；
 # Binance 仍保留給圖表與非結算公平價模型，不可再拿來判斷最終 Up/Down。
@@ -228,14 +249,29 @@ for _asset in ASSETS:
             "marketMakerOnly": True,
         })
         continue
-    for _cfg in _VARIANT_CONFIGS:
+    if _asset["id"] == "btc-15m":
         AB_VARIANTS.append({
-            "id":            f"{_asset['id']}-{_cfg['key']}",
-            "assetId":       _asset["id"],
-            "label":         f"{_asset['label']} {_cfg['labelSuffix']}",
-            "entryMaxPrice": _cfg["entryMaxPrice"],
-            "lockMaxSum":    _cfg["lockMaxSum"],
+            "id":                  "btc-15m-adaptive-lock",
+            "assetId":             "btc-15m",
+            "label":               "BTC 15m 深度確認兩腿鎖利",
+            "entryMaxPrice":       None,
+            "lockMaxSum":          0.95,
+            "executionSafePair":   True,
+            "stakePct":            10.0,
+            "maxPairBudgetUsd":    20.0,
+            "minCashReserveUsd":   10.0,
+            "minDepthMultiplier":  2.0,
+            "stabilitySeconds":    0.20,
         })
+    else:
+        for _cfg in _VARIANT_CONFIGS:
+            AB_VARIANTS.append({
+                "id":            f"{_asset['id']}-{_cfg['key']}",
+                "assetId":       _asset["id"],
+                "label":         f"{_asset['label']} {_cfg['labelSuffix']}",
+                "entryMaxPrice": _cfg["entryMaxPrice"],
+                "lockMaxSum":    _cfg["lockMaxSum"],
+            })
     if _asset["id"] == LIVE_MIRROR_ASSET_ID:
         AB_VARIANTS.append({
             "id":                      f"{_asset['id']}-live-lock",
@@ -252,7 +288,23 @@ for _asset in ASSETS:
         })
     # 方向性策略必須使用跟市場結算同源的 RTDS feed。目前只實作 BTC/USD
     # Chainlink 60 秒 TWAP；其他幣種先只跑兩腿鎖利，不用 Binance 冒充結算來源。
-    if _asset["binanceSymbol"] == "BTCUSDT":
+    if _asset["id"] == "btc-15m":
+        AB_VARIANTS.append({
+            "id":                    "btc-15m-chainlink-late-direction",
+            "assetId":               "btc-15m",
+            "label":                 "BTC 15m Chainlink 自適應方向性（T-12~30s）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateDirectionOnly":     True,
+            "directionProfile":      "btc-15m-adaptive",
+            "lateDirectionMaxPrice": BTC_15M_DIRECTION_MAX_PRICE,
+            "stakePct":              BTC_15M_DIRECTION_STAKE_PCT,
+            "maxDirectionalBudgetUsd": BTC_15M_DIRECTION_MAX_BUDGET_USD,
+            "minCashReserveUsd":     BTC_15M_DIRECTION_MIN_CASH_RESERVE_USD,
+            "minDepthMultiplier":    BTC_15M_DIRECTION_DEPTH_MULTIPLIER,
+            "stabilitySeconds":      BTC_15M_DIRECTION_STABILITY_SECONDS,
+        })
+    elif _asset["binanceSymbol"] == "BTCUSDT":
         AB_VARIANTS.append({
             "id":                    f"{_asset['id']}-chainlink-late-direction",
             "assetId":               _asset["id"],
@@ -1068,6 +1120,7 @@ def _target_order_size(variant_id: str) -> tuple[float, float]:
 
 
 _pair_stability_candidates: dict[str, dict] = {}
+_direction_stability_candidates: dict[str, dict] = {}
 
 
 def executable_ask_depth(book: dict, limit_price: float) -> float:
@@ -1120,6 +1173,27 @@ def pair_candidate_is_stable(
 
 def clear_pair_candidate(key: str) -> None:
     _pair_stability_candidates.pop(key, None)
+
+
+def direction_candidate_is_stable(
+    key: str,
+    slug: str,
+    side: str,
+    seconds: float,
+    now: float | None = None,
+) -> bool:
+    """方向、窗口與全部風控條件必須連續成立，避免把單一跳價當成 15 分鐘訊號。"""
+    current = time.monotonic() if now is None else float(now)
+    signature = (slug, side)
+    previous = _direction_stability_candidates.get(key)
+    if not previous or previous.get("signature") != signature:
+        _direction_stability_candidates[key] = {"signature": signature, "since": current}
+        return float(seconds) <= 0
+    return current - float(previous["since"]) >= float(seconds)
+
+
+def clear_direction_candidate(key: str) -> None:
+    _direction_stability_candidates.pop(key, None)
 
 
 def enter_position(
@@ -1224,8 +1298,10 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     variant = AB_VARIANT_BY_ID[variant_id]
     stability_key = f"sim:{variant_id}"
 
+    execution_safe = bool(variant.get("liveMirrorOnly") or variant.get("executionSafePair"))
+
     def reject() -> bool:
-        if variant.get("liveMirrorOnly"):
+        if execution_safe:
             clear_pair_candidate(stability_key)
         return False
 
@@ -1235,7 +1311,7 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     up_depth = sum(float(a.get("size", 0)) for a in (up_book.get("asks") or []))
     down_depth = sum(float(a.get("size", 0)) for a in (down_book.get("asks") or []))
     depth_fraction = SIM_DEPTH_CAP_FRACTION
-    if variant.get("liveMirrorOnly"):
+    if execution_safe:
         depth_fraction = min(depth_fraction, 1.0 / float(variant["minDepthMultiplier"]))
     depth_cap = min(up_depth, down_depth) * depth_fraction
     shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
@@ -1266,7 +1342,7 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
         or total_decision_cost > cash
     ):
         return reject()
-    if variant.get("liveMirrorOnly"):
+    if execution_safe:
         if not pair_depth_is_safe(
             up_book,
             down_book,
@@ -1294,6 +1370,203 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     return True
 
 
+def estimate_btc_15m_direction_signal(
+    signal: dict,
+    remaining_seconds: float,
+) -> dict:
+    """用 Chainlink 60 秒 TWAP 自身的近期波動，估算目前方向維持到 15m 結束的機率。
+
+    使用不重疊的 10 秒 bucket，避免把每秒高度自相關的 TWAP 更新誤當成大量獨立樣本。
+    歷史不足時採固定波動下限，且再乘安全係數，刻意避免過度自信。
+    """
+    current = float(signal["current"])
+    opening = float(signal["opening"])
+    observed_ms = int(signal["observedAt"])
+    cutoff_ms = observed_ms - int(BTC_15M_DIRECTION_VOL_LOOKBACK_SECONDS * 1000)
+    bucket_ms = int(BTC_15M_DIRECTION_VOL_BUCKET_SECONDS * 1000)
+    buckets: dict[int, tuple[int, float]] = {}
+    for ts, value in _chainlink_twap_history:
+        if ts < cutoff_ms or ts > observed_ms or value <= 0:
+            continue
+        bucket = int(ts) // bucket_ms
+        previous = buckets.get(bucket)
+        if previous is None or ts > previous[0]:
+            buckets[bucket] = (int(ts), float(value))
+    points = [row for _, row in sorted(buckets.items())]
+    returns_pct = [
+        math.log(cur[1] / prev[1]) * 100
+        for prev, cur in zip(points, points[1:])
+        if prev[1] > 0 and cur[1] > 0
+    ]
+    observed_sigma_pct = pstdev(returns_pct) if len(returns_pct) >= 5 else 0.0
+    bucket_sigma_pct = max(BTC_15M_DIRECTION_MIN_SIGMA_PCT, observed_sigma_pct)
+    horizon_buckets = max(1.0, float(remaining_seconds) / BTC_15M_DIRECTION_VOL_BUCKET_SECONDS)
+    projected_sigma_pct = (
+        bucket_sigma_pct
+        * math.sqrt(horizon_buckets)
+        * BTC_15M_DIRECTION_VOL_SAFETY_MULTIPLIER
+    )
+    delta_pct = (current - opening) / opening * 100
+    z_score = abs(delta_pct) / projected_sigma_pct if projected_sigma_pct > 0 else 0.0
+    probability = max(0.50, min(0.995, NormalDist().cdf(z_score)))
+    return {
+        "deltaPct": delta_pct,
+        "observedSigmaPct": observed_sigma_pct,
+        "projectedSigmaPct": projected_sigma_pct,
+        "zScore": z_score,
+        "probability": probability,
+        "sampleCount": len(returns_pct),
+    }
+
+
+def _two_sided_market_probability(up_book: dict, down_book: dict, side: str) -> tuple[float, float] | None:
+    """回傳所選方向的正規化 mid probability 與該腿 spread；缺少雙邊報價就拒絕。"""
+    values = []
+    for book in (up_book, down_book):
+        bids, asks = book.get("bids") or [], book.get("asks") or []
+        if not bids or not asks:
+            return None
+        bid, ask = float(bids[0]["price"]), float(asks[0]["price"])
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return None
+        values.append(((bid + ask) / 2, ask - bid))
+    total_mid = values[0][0] + values[1][0]
+    if total_mid <= 0:
+        return None
+    index = 0 if side == "Up" else 1
+    return values[index][0] / total_mid, values[index][1]
+
+
+def _direction_fill_with_budget(variant_id: str, book: dict) -> tuple[dict, float] | None:
+    """以真正的單腿美元風險預算反推最大整數股數，不沿用兩腿成本換算公式。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    cash, _ = compute_cash_and_portfolio(variant_id)
+    reserve = float(variant.get("minCashReserveUsd", SIM_MIN_CASH_RESERVE_USD))
+    available = max(0.0, cash - reserve)
+    budget = min(
+        float(variant.get("maxDirectionalBudgetUsd", SIM_MAX_PAIR_BUDGET_USD)),
+        available * float(variant.get("stakePct", shared_config["stakePct"])) / 100,
+    )
+    asks = book.get("asks") or []
+    if budget < SIM_MIN_ORDER_NOTIONAL_USD or not asks:
+        return None
+    best_ask = float(asks[0].get("price", 0))
+    if best_ask <= 0:
+        return None
+    depth_multiplier = max(1.0, float(variant.get("minDepthMultiplier", 1.0)))
+    visible_depth = sum(max(0.0, float(level.get("size", 0))) for level in asks)
+    high = int(min(visible_depth / depth_multiplier, budget / best_ask))
+    low, best_fill = 1, None
+    while low <= high:
+        mid = (low + high) // 2
+        fill = simulate_buy_fill(book, float(mid))
+        cost = float("inf") if not fill else fill["decisionNotional"] + fill["decisionFee"]
+        if fill and cost <= budget + 1e-9:
+            best_fill = fill
+            low = mid + 1
+        else:
+            high = mid - 1
+    return (best_fill, budget) if best_fill else None
+
+
+def _try_btc_15m_adaptive_direction_entry(
+    variant_id: str,
+    slug: str,
+    up_book: dict,
+    down_book: dict,
+    remaining_seconds: float,
+) -> None:
+    """BTC 15m 紙上方向策略：結算同源、波動自適應、EV、深度與穩定性一起驗證。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    stability_key = f"sim-direction:{variant_id}"
+
+    def reject() -> None:
+        clear_direction_candidate(stability_key)
+
+    if not (
+        BTC_15M_DIRECTION_MIN_REMAINING
+        <= remaining_seconds
+        <= BTC_15M_DIRECTION_MAX_REMAINING
+    ):
+        reject()
+        return
+    signal = get_chainlink_twap_signal(variant["assetId"])
+    if not signal:
+        reject()
+        return
+    metrics = estimate_btc_15m_direction_signal(signal, remaining_seconds)
+    if (
+        abs(metrics["deltaPct"]) < BTC_15M_DIRECTION_MIN_DELTA_PCT
+        or metrics["probability"] < BTC_15M_DIRECTION_MIN_PROBABILITY
+    ):
+        reject()
+        return
+    side, book = ("Up", up_book) if metrics["deltaPct"] > 0 else ("Down", down_book)
+    market = _two_sided_market_probability(up_book, down_book, side)
+    if not market:
+        reject()
+        return
+    market_probability, spread = market
+    if (
+        market_probability < BTC_15M_DIRECTION_MIN_MARKET_PROBABILITY
+        or spread > BTC_15M_DIRECTION_MAX_SPREAD
+    ):
+        reject()
+        return
+    planned = _direction_fill_with_budget(variant_id, book)
+    if not planned:
+        reject()
+        return
+    fill, budget = planned
+    min_order_size = float(book.get("minOrderSize", 1) or 1)
+    if fill["shares"] < min_order_size or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
+        reject()
+        return
+    if fill["decisionPrice"] > float(variant["lateDirectionMaxPrice"]):
+        reject()
+        return
+    required_depth = fill["shares"] * float(variant.get("minDepthMultiplier", 1.0))
+    if executable_ask_depth(book, fill["decisionPrice"]) + 1e-9 < required_depth:
+        reject()
+        return
+    decision_cost_per_share = (fill["decisionNotional"] + fill["decisionFee"]) / fill["shares"]
+    entry_edge = metrics["probability"] - decision_cost_per_share
+    if entry_edge < BTC_15M_DIRECTION_MIN_EDGE_PER_SHARE:
+        reject()
+        return
+    if not direction_candidate_is_stable(
+        stability_key,
+        slug,
+        side,
+        float(variant.get("stabilitySeconds", 0.0)),
+    ):
+        return
+    clear_direction_candidate(stability_key)
+    enter_position(
+        variant_id,
+        slug,
+        side,
+        fill,
+        min(budget, fill["notional"] + fill["fee"]),
+        metrics["probability"],
+        entry_edge,
+    )
+    pos = ab_states[variant_id]["position"]
+    pos.update({
+        "signalDeltaPct": metrics["deltaPct"],
+        "signalZScore": metrics["zScore"],
+        "signalProjectedSigmaPct": metrics["projectedSigmaPct"],
+        "marketProbability": market_probability,
+        "signalRemainingSeconds": remaining_seconds,
+    })
+    save_sim_state()
+    log.info(
+        f"[SIM:{variant_id}] 15m 自適應方向 {side} Δ={metrics['deltaPct']:+.3f}% "
+        f"z={metrics['zScore']:.2f} p={metrics['probability']:.1%} market={market_probability:.1%} "
+        f"edge={entry_edge:+.3f} 剩餘={remaining_seconds:.1f}s"
+    )
+
+
 def _try_late_direction_entry(
     variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float
 ) -> None:
@@ -1302,9 +1575,14 @@ def _try_late_direction_entry(
     還原 12:24:56 那筆所用的原始進場條件；唯一差異是以 Chainlink TWAP 取代
     Binance spot 判斷方向。原策略不要求 Polymarket 訂單簿同方向。
     """
+    variant = AB_VARIANT_BY_ID[variant_id]
+    if variant.get("directionProfile") == "btc-15m-adaptive":
+        _try_btc_15m_adaptive_direction_entry(
+            variant_id, slug, up_book, down_book, remaining_seconds
+        )
+        return
     if remaining_seconds > LATE_DIRECTION_WINDOW_SECONDS or remaining_seconds < LATE_DIRECTION_MIN_ENTRY_REMAINING:
         return
-    variant = AB_VARIANT_BY_ID[variant_id]
     signal = get_chainlink_twap_signal(variant["assetId"])
     if not signal:
         return
