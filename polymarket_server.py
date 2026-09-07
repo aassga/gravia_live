@@ -314,6 +314,17 @@ for _asset in ASSETS:
             "directionSignalSource": "binance_window",
             "lateDirectionMaxPrice": 0.92,
         })
+        AB_VARIANTS.append({
+            "id":                    "btc-historical-hybrid",
+            "assetId":               "btc",
+            "label":                 "BTC ????????Binance T-10s?",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateDirectionOnly":     True,
+            "historicalHybrid":      True,
+            "directionSignalSource": "binance_window",
+            "lateDirectionMaxPrice": 0.92,
+        })
     elif _asset["binanceSymbol"] == "BTCUSDT":
         AB_VARIANTS.append({
             "id":                    f"{_asset['id']}-chainlink-late-direction",
@@ -1939,6 +1950,14 @@ def simulate_trading(
 
     if pos is None:
         if remaining_seconds is None or remaining_seconds <= 0:
+            return
+        # ???? 2026-09-03 ????????????????????????
+        # ???????? T-3?10 ??? Binance window delta ?????????
+        # ????????????????????????????????
+        if variant.get("historicalHybrid"):
+            if _try_direct_pair(variant_id, slug, up_book, down_book):
+                return
+            _try_late_direction_entry(variant_id, slug, up_book, down_book, remaining_seconds)
             return
         # 這一組是純方向性驗證，不能先被兩腿鎖利部位占用；否則 Dashboard 顯示的
         # 勝率其實都是 locked trades，完全沒有驗證即將上實盤的方向訊號。

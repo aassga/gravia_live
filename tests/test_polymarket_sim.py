@@ -240,9 +240,35 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_btc_5m_uses_separate_binance_variant_for_clean_comparison(self):
         ids = [v["id"] for v in sim.AB_VARIANTS if v["assetId"] == "btc"]
         self.assertIn("btc-binance-late-direction", ids)
+        self.assertIn("btc-historical-hybrid", ids)
         self.assertNotIn("btc-chainlink-late-direction", ids)
         variant = sim.AB_VARIANT_BY_ID["btc-binance-late-direction"]
         self.assertEqual(variant["directionSignalSource"], "binance_window")
+
+    def test_historical_hybrid_prioritizes_direct_pair(self):
+        self._set_binance_signal()
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+
+        sim.simulate_trading("btc-historical-hybrid", "btc-window", up_book, down_book, 5.0, None)
+
+        pos = sim.ab_states["btc-historical-hybrid"]["position"]
+        self.assertIsNotNone(pos)
+        self.assertTrue(pos["hedged"])
+        self.assertGreater(pos["lockedPnl"], 0)
+
+    def test_historical_hybrid_falls_back_to_binance_late_direction(self):
+        self._set_binance_signal(opening=100.0, current=100.5)
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+
+        sim.simulate_trading("btc-historical-hybrid", "btc-window", up_book, down_book, 5.0, None)
+
+        pos = sim.ab_states["btc-historical-hybrid"]["position"]
+        self.assertIsNotNone(pos)
+        self.assertFalse(pos["hedged"])
+        self.assertEqual(pos["side"], "Up")
+        self.assertEqual(pos["signalSource"], "binance_futures_window")
 
     def test_late_direction_position_never_auto_hedges(self):
         self._set_binance_signal()
