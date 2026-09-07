@@ -303,7 +303,9 @@ function onData(d){
     `資金：可用餘額扣除 $${Number(cfg.minCashReserveUsd||0).toFixed(2)} 後取 ${Number(cfg.stakePct||0).toFixed(1)}%，單組最高 $${Number(cfg.maxPairBudgetUsd||0).toFixed(2)}。`,
     `單腿救援：先確認成交與 Token 到帳，每 ${Number(cfg.emergencyBalancePollSeconds||0).toFixed(2)} 秒刷新；無法安全補腿時按最新買盤平倉，單輪最多等待 ${Number(cfg.emergencyUnwindWaitSeconds||0).toFixed(1)} 秒。`,
     `安全：整批結果不明會停止策略，避免重複下單；正常動作冷卻 ${Number(cfg.actionCooldownSeconds||0).toFixed(0)} 秒。`,
-    `方向性：${cfg.lateDirectionEnabled?'已啟用窗口末端方向性進場。':'已停用，不會因預測 BTC 漲跌而單獨進場。'}`
+    `方向性：${cfg.lateDirectionEnabled
+      ? `已啟用；只使用 ${cfg.lateDirectionSignal||'Chainlink TWAP'}，偏移 ≥ ${Number(cfg.lateDirectionMinDeltaPct||0).toFixed(2)}%，且 Polymarket 同向機率 ≥ ${(Number(cfg.lateDirectionMinMarketProbability||0)*100).toFixed(0)}%。`
+      : '已停用，不會因預測 BTC 漲跌而單獨進場。'}`
   ] : ['等待策略設定...'];
   const tooltipList=document.getElementById('strategy-tooltip-list');
   tooltipList.replaceChildren(...tooltipItems.map(text=>{

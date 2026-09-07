@@ -1,7 +1,7 @@
 """
 Polymarket BTC 5 分鐘 Up/Down · 真實自動下單策略
 
-真實版與紙上模擬共用同一套核心判斷（套用模擬版 "btc-late-direction" 這組）：
+真實版與紙上模擬共用同一套核心判斷（套用模擬版 "btc-chainlink-late-direction" 這組）：
     - 使用 Ask/Bid 深度計算 VWAP，再以含滑點、向不利 tick 取整的最差限價作決策。
     - 優先鎖利：當下兩邊同時買得到、扣費用後淨賺達門檻才配對進場，這是唯一的
       無方向曝險進場路徑。
@@ -80,14 +80,14 @@ if LIVE_ASSET_ID != "btc":
     sim.state = sim.markets_state[LIVE_ASSET_ID]  # 重新指向對應資產的市場狀態（見 sim.state 的定義）
 
 # 真實版套用模擬版 A/B 測試裡「LIVE_ASSET_ID 晚進場方向性」這組
-# （sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-late-direction"]）。這裡引用 AB_VARIANT_BY_ID
+# （sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-chainlink-late-direction"]）。這裡引用 AB_VARIANT_BY_ID
 # 而不是直接寫死數字，是為了跟模擬版共用同一個真實來源，模擬版調整這組門檻時真實版會
 # 自動跟著同步。
-# 2026-09：從「btc-main」（鎖利優先，找不到就靠公平價模型賭單邊）改成「btc-late-direction」
+# 2026-09：從「btc-main」（鎖利優先，找不到就靠公平價模型賭單邊）改成 Chainlink 方向組
 # （鎖利優先＋找不到鎖利時改成只在窗口剩不到 10 秒、現價已明顯偏離開盤價時才賭方向）——
 # 模擬盤驗證下來後者的方向性單邊勝率遠高於前者（91% vs 0%），詳見對話紀錄。
 # 晚進場方向性參數仍取自這個變體；兩腿鎖利的實盤防護則由下方獨立環境變數控制。
-_LIVE_VARIANT = sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-late-direction"]
+_LIVE_VARIANT = sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-chainlink-late-direction"]
 # 2026-09-07 實盤再次出現「快照上兩腿合計 0.92，但 346ms 後只成交一腿」。公開 API
 # 的 batch 不是原子交易，因此把門檻收緊、要求限價內有數倍深度，並只接受持續存在的機會。
 # 這些參數也由 btc-live-lock 模擬組讀取，避免模擬與實盤再次使用不同條件。
@@ -96,6 +96,10 @@ PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_M
 PAIR_STABILITY_SECONDS = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.25")))
 RESCUE_LOCK_MAX_SUM = max(LOCK_MAX_SUM, min(0.99, float(os.environ.get("POLY_RESCUE_LOCK_MAX_SUM", "0.99"))))
 LATE_DIRECTION_MAX_PRICE = _LIVE_VARIANT["lateDirectionMaxPrice"]
+LATE_DIRECTION_MIN_MARKET_PROB = max(
+    0.50,
+    min(0.99, float(os.environ.get("POLY_LATE_DIRECTION_MIN_MARKET_PROB", str(sim.LATE_DIRECTION_MIN_MARKET_PROB)))),
+)
 
 
 def _new_live_state() -> dict:
@@ -399,23 +403,25 @@ def _late_direction_plan(
     remaining_seconds: float,
     shares: float,
 ) -> dict | None:
-    """純同步、零延遲的判斷：只在窗口剩不到 10 秒、且現價已經明顯偏離這個窗口開盤價時
-    才考慮賭方向。跟模擬版 sim._try_late_direction_entry 同一套門檻。拆成獨立的同步
-    函式是為了讓 _on_ws_tick_sync 這條快速路徑可以直接呼叫，不用等 create_task 排程——
-    真正送單（會動用網路 I/O）仍然留在呼叫端用 async 處理。"""
+    """只用結算同源且新鮮的 Chainlink 60 秒 TWAP 建立方向單。"""
     if (
         remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS
         or remaining_seconds < sim.LATE_DIRECTION_MIN_ENTRY_REMAINING
     ):
         return None
-    open_price = sim.state.get("windowOpenSpotPrice")
-    spot = sim.state.get("spotPrice")
-    if not open_price or not spot or open_price <= 0:
+    signal = sim.get_chainlink_twap_signal(LIVE_ASSET_ID)
+    if not signal:
         return None
-    delta_pct = (spot - open_price) / open_price * 100
+    delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
     if abs(delta_pct) < sim.LATE_DIRECTION_MIN_DELTA_PCT:
         return None
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
+    bids, asks = book.get("bids") or [], book.get("asks") or []
+    if not bids or not asks:
+        return None
+    market_probability = (max(float(x["price"]) for x in bids) + min(float(x["price"]) for x in asks)) / 2
+    if market_probability < LATE_DIRECTION_MIN_MARKET_PROB:
+        return None
     # 跟模擬版對齊：不把股數縮到「當下看得到的深度」——真正的 FOK 語意是要嘛整筆用
     # 目標股數成交、要嘛深度不夠就整筆不成交，不會自動改成「有多少吃多少」。這裡故意
     # 不呼叫 _ask_depth 縮股，讓 _buy_plan 內部的 simulate_buy_fill 用同一套全有全無
@@ -424,6 +430,10 @@ def _late_direction_plan(
     if not plan or plan["limitPrice"] > LATE_DIRECTION_MAX_PRICE:
         return None
     plan["_deltaPct"] = delta_pct
+    plan["_signalSource"] = "chainlink_twap_60s"
+    plan["_signalObservedAt"] = signal["observedAt"]
+    plan["_signalAgeSeconds"] = signal["ageSeconds"]
+    plan["_marketProbability"] = market_probability
     return plan
 
 
@@ -440,7 +450,11 @@ async def _try_late_direction_entry(
     plan = _late_direction_plan(up_book, down_book, remaining_seconds, shares)
     if not plan:
         return False
-    log.info(f"[LIVE] 晚進場方向性 {plan['side']} Δ={plan['_deltaPct']:+.3f}% 剩餘={remaining_seconds:.1f}s")
+    log.info(
+        f"[LIVE] 晚進場方向性 {plan['side']} Chainlink60 Δ={plan['_deltaPct']:+.3f}% "
+        f"market={plan['_marketProbability']:.3f} age={plan['_signalAgeSeconds']:.3f}s "
+        f"剩餘={remaining_seconds:.1f}s"
+    )
     result = await _enter_position(slug, plan, dry_run)
     if result == "filled":
         live_state["position"]["strategy"] = "late_direction"
@@ -1629,10 +1643,16 @@ async def _run_ws_late_direction_entry(
         up_book, down_book = sim.state.get("upBook"), sim.state.get("downBook")
         if not dry_run and (not up_book or not down_book or not _live_books_are_coherent(up_book, down_book)):
             return
+        remaining = max(0.0, sim.state["windowEndsAt"] / 1000 - sim.real_now())
+        latest_plan = _late_direction_plan(up_book, down_book, remaining, float(plan["shares"]))
+        if not latest_plan or latest_plan["side"] != plan["side"]:
+            return
         log.info(
-            f"[LIVE] 晚進場方向性 {plan['side']} Δ={plan['_deltaPct']:+.3f}%（WS 即時觸發）"
+            f"[LIVE] 晚進場方向性 {latest_plan['side']} Chainlink60 "
+            f"Δ={latest_plan['_deltaPct']:+.3f}% market={latest_plan['_marketProbability']:.3f} "
+            f"age={latest_plan['_signalAgeSeconds']:.3f}s（WS 即時觸發）"
         )
-        result = await _enter_position(slug, plan, dry_run)
+        result = await _enter_position(slug, latest_plan, dry_run)
         if result == "filled":
             live_state["position"]["strategy"] = "late_direction"
             save_live_state()
@@ -1676,9 +1696,10 @@ def _log_startup_banner(mode: str) -> None:
     )
     if ENABLE_LATE_DIRECTION:
         log.warning(
-            f"  單腿方向性下注已啟用：剩餘 {sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
+            f"  單腿方向性下注已啟用：Chainlink {sim.CHAINLINK_TWAP_WINDOW_SECONDS}s TWAP，剩餘 "
+            f"{sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
             f"{sim.LATE_DIRECTION_WINDOW_SECONDS:.0f}s、偏移開盤價>={sim.LATE_DIRECTION_MIN_DELTA_PCT:.2f}%、"
-            f"進場價<=${LATE_DIRECTION_MAX_PRICE}"
+            f"市場同向機率>={LATE_DIRECTION_MIN_MARKET_PROB:.2f}、進場價<=${LATE_DIRECTION_MAX_PRICE}"
         )
     else:
         log.info("  單腿方向性下注已停用（POLY_ENABLE_LATE_DIRECTION=false）")

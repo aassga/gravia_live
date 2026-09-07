@@ -24,10 +24,34 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self._old_real_execution = strategy.REAL_EXECUTION_ENABLED
         self._old_validate_order_path = trader.VALIDATE_ORDER_PATH
         self._old_trader_armed = trader.STRATEGY_ARMED
+        self._old_sim_market = strategy.sim.state.get("market")
         strategy.STRATEGY_ARMED = False
         strategy.REAL_EXECUTION_ENABLED = False
         trader.VALIDATE_ORDER_PATH = False
         trader.STRATEGY_ARMED = False
+        strategy.sim.state.update({
+            "market": {
+                "slug": "btc-window",
+                "outcomes": json.dumps(["Up", "Down"]),
+                "clobTokenIds": json.dumps(["up-token", "down-token"]),
+            },
+            "chainlinkTwapPrice": None,
+            "chainlinkTwapObservedAt": None,
+            "windowOpenChainlinkTwapPrice": None,
+            "windowOpenChainlinkTwapObservedAt": None,
+            "windowOpenChainlinkTwapSlug": None,
+        })
+
+    def _set_chainlink_signal(self, opening=100.0, current=100.5):
+        now_ms = int(time.time() * 1000)
+        strategy.sim.state.update({
+            "market": {"slug": "btc-window"},
+            "windowOpenChainlinkTwapSlug": "btc-window",
+            "windowOpenChainlinkTwapPrice": opening,
+            "windowOpenChainlinkTwapObservedAt": now_ms - 300_000,
+            "chainlinkTwapPrice": current,
+            "chainlinkTwapObservedAt": now_ms,
+        })
 
     def tearDown(self):
         strategy.STATE_FILE = self._old_state_file
@@ -36,6 +60,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         strategy.REAL_EXECUTION_ENABLED = self._old_real_execution
         trader.VALIDATE_ORDER_PATH = self._old_validate_order_path
         trader.STRATEGY_ARMED = self._old_trader_armed
+        strategy.sim.state["market"] = self._old_sim_market
 
     def test_only_matched_order_is_treated_as_filled(self):
         self.assertTrue(trader.order_response_filled({"success": True, "status": "matched"}))
@@ -263,10 +288,9 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["notional"], 1.6)
 
     async def test_late_direction_skips_outside_window(self):
-        strategy.sim.state["windowOpenSpotPrice"] = 100.0
-        strategy.sim.state["spotPrice"] = 100.5  # +0.5%，遠超門檻
-        up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.60, "size": 100}], "bids": []}
-        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": []}
+        self._set_chainlink_signal()
+        up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]}
+        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]}
         filled = await strategy._try_late_direction_entry(
             "btc-window", up_book, down_book, remaining_seconds=30.0, shares=10.0, dry_run=True
         )
@@ -274,10 +298,9 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(strategy.live_state["position"])
 
     async def test_late_direction_enters_favored_side_near_close(self):
-        strategy.sim.state["windowOpenSpotPrice"] = 100.0
-        strategy.sim.state["spotPrice"] = 100.5  # +0.5%，偏 Up
-        up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.60, "size": 100}], "bids": []}
-        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": []}
+        self._set_chainlink_signal()
+        up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]}
+        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]}
         filled = await strategy._try_late_direction_entry(
             "btc-window", up_book, down_book, remaining_seconds=5.0, shares=10.0, dry_run=True
         )
@@ -286,6 +309,12 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pos["side"], "Up")
         self.assertEqual(pos["strategy"], "late_direction")
         self.assertFalse(pos["hedged"])
+
+    def test_late_direction_rejects_chainlink_market_disagreement(self):
+        self._set_chainlink_signal(opening=100.0, current=99.5)
+        up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 100}], "bids": [{"price": 0.97, "size": 100}]}
+        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.03, "size": 100}], "bids": [{"price": 0.02, "size": 100}]}
+        self.assertIsNone(strategy._late_direction_plan(up_book, down_book, 5.0, 10.0))
 
     def test_direct_pair_checks_worst_case_limit_and_fees(self):
         up_book = {

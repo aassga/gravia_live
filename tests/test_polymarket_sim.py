@@ -24,6 +24,12 @@ class PolymarketSimulationTests(unittest.TestCase):
             market["downBook"] = {"bids": [], "asks": []}
             market["windowOpenSpotPrice"] = None
             market["spotPrice"] = None
+            market["market"] = None
+            market["chainlinkTwapPrice"] = None
+            market["chainlinkTwapObservedAt"] = None
+            market["windowOpenChainlinkTwapPrice"] = None
+            market["windowOpenChainlinkTwapObservedAt"] = None
+            market["windowOpenChainlinkTwapSlug"] = None
         sim._mm_seen_trade_keys.clear()
         sim._mm_seen_trade_key_set.clear()
         sim._ws_books.clear()
@@ -31,6 +37,18 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim._ws_book_updated_at.clear()
         sim._sim_data_guard_log_at.clear()
         sim._pair_stability_candidates.clear()
+        sim._chainlink_twap_history.clear()
+        sim._chainlink_twap_latest.clear()
+
+    def _set_chainlink_signal(self, opening=100.0, current=100.5):
+        ms = sim.markets_state["btc"]
+        ms["market"] = {"slug": "btc-window"}
+        ms["windowOpenChainlinkTwapSlug"] = "btc-window"
+        ms["windowOpenChainlinkTwapPrice"] = opening
+        ms["windowOpenChainlinkTwapObservedAt"] = int(time.time() * 1000) - 300_000
+        ms["chainlinkTwapPrice"] = current
+        ms["chainlinkTwapObservedAt"] = int(time.time() * 1000)
+        return ms
 
     def tearDown(self):
         if sim._sim_db is not None:
@@ -192,36 +210,65 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIs(sim.sim_state, sim.ab_states["btc-main"])
 
     def test_late_direction_skips_outside_window(self):
-        ms = sim.markets_state["btc"]
-        ms["windowOpenSpotPrice"] = 100.0
-        ms["spotPrice"] = 100.5  # +0.5%，遠超門檻
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.60, "size": 1_000.0}], "bids": []}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
-        sim._try_late_direction_entry("btc-late-direction", "btc-window", up_book, down_book, remaining_seconds=30.0)
-        self.assertIsNone(sim.ab_states["btc-late-direction"]["position"])
+        self._set_chainlink_signal()
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": [{"price": 0.39, "size": 1_000.0}]}
+        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=30.0)
+        self.assertIsNone(sim.ab_states["btc-chainlink-late-direction"]["position"])
 
     def test_late_direction_enters_favored_side_near_close(self):
-        ms = sim.markets_state["btc"]
-        ms["windowOpenSpotPrice"] = 100.0
-        ms["spotPrice"] = 100.5  # +0.5%，偏 Up
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.60, "size": 1_000.0}], "bids": []}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
-        sim._try_late_direction_entry("btc-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
-        pos = sim.ab_states["btc-late-direction"]["position"]
+        self._set_chainlink_signal()
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": [{"price": 0.39, "size": 1_000.0}]}
+        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
+        pos = sim.ab_states["btc-chainlink-late-direction"]["position"]
         self.assertIsNotNone(pos)
         self.assertEqual(pos["side"], "Up")
         self.assertFalse(pos["hedged"])
 
     def test_late_direction_position_never_auto_hedges(self):
+        self._set_chainlink_signal()
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": [{"price": 0.29, "size": 1_000.0}]}  # 便宜到能鎖利
+        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
+        self.assertFalse(sim.ab_states["btc-chainlink-late-direction"]["position"]["hedged"])
+        sim.simulate_trading("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=4.0, fair=None)
+        self.assertFalse(sim.ab_states["btc-chainlink-late-direction"]["position"]["hedged"])
+
+    def test_late_direction_rejects_market_disagreement(self):
+        self._set_chainlink_signal(opening=100.0, current=99.5)
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.98, "size": 1_000.0}], "bids": [{"price": 0.97, "size": 1_000.0}]}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.03, "size": 1_000.0}], "bids": [{"price": 0.02, "size": 1_000.0}]}
+        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
+        self.assertIsNone(sim.ab_states["btc-chainlink-late-direction"]["position"])
+
+    def test_chainlink_signal_rejects_stale_observation(self):
+        self._set_chainlink_signal()
+        sim.markets_state["btc"]["chainlinkTwapObservedAt"] = int(
+            (time.time() - sim.CHAINLINK_TWAP_MAX_AGE_SECONDS - 1) * 1000
+        )
+        self.assertIsNone(sim.get_chainlink_twap_signal("btc"))
+
+    def test_chainlink_rtds_history_captures_exact_window_open(self):
+        start = int(time.time())
         ms = sim.markets_state["btc"]
-        ms["windowOpenSpotPrice"] = 100.0
-        ms["spotPrice"] = 100.5
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.60, "size": 1_000.0}], "bids": []}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": []}  # 便宜到能鎖利
-        sim._try_late_direction_entry("btc-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
-        self.assertFalse(sim.ab_states["btc-late-direction"]["position"]["hedged"])
-        sim.simulate_trading("btc-late-direction", "btc-window", up_book, down_book, remaining_seconds=4.0, fair=None)
-        self.assertFalse(sim.ab_states["btc-late-direction"]["position"]["hedged"])
+        ms["market"] = {"slug": f"btc-updown-5m-{start}"}
+        applied = sim._apply_chainlink_twap_message({
+            "topic": "crypto_prices_twap_sixty",
+            "type": "subscribe",
+            "payload": {
+                "symbol": "btc/usd",
+                "data": [{
+                    "timestamp": start * 1000,
+                    "full_accuracy_value": "100500000000000000000",
+                    "window_s": 60,
+                }],
+            },
+        })
+        self.assertEqual(applied, 1)
+        self.assertTrue(sim._capture_window_open_chainlink_twap(ms))
+        self.assertEqual(ms["windowOpenChainlinkTwapPrice"], 100.5)
+        self.assertEqual(ms["windowOpenChainlinkTwapSlug"], ms["market"]["slug"])
 
     def test_websocket_book_change_notifies_registered_listener(self):
         received = []

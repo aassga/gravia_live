@@ -157,7 +157,18 @@ MM_STOP_QUOTING_SECONDS   = 20.0
 # 訊號的確定性遠比窗口剛開盤時高很多。
 LATE_DIRECTION_WINDOW_SECONDS      = 10.0  # 只在剩不到這個秒數才考慮晚進場
 LATE_DIRECTION_MIN_ENTRY_REMAINING = 3.0   # 剩不到這個秒數就別進了，怕來不及成交
-LATE_DIRECTION_MIN_DELTA_PCT       = 0.02  # 現價相對開盤價至少要偏移這個百分比（公開資料裡的「強訊號」門檻）
+LATE_DIRECTION_MIN_DELTA_PCT       = 0.02  # Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 的最低偏移
+LATE_DIRECTION_MIN_MARKET_PROB     = 0.55  # Polymarket 自己也必須同方向，拒絕逆著近乎確定的市場下注
+
+# 2026-08-14 起 5 分鐘 crypto 市場以 Chainlink 60 秒 TWAP 的窗口起／終值結算。
+# RTDS 是 Polymarket 官方建議的免憑證 production feed。方向性策略只能使用這份來源；
+# Binance 仍保留給圖表與非結算公平價模型，不可再拿來判斷最終 Up/Down。
+CHAINLINK_RTDS_URL = "wss://ws-live-data.polymarket.com"
+CHAINLINK_TWAP_WINDOW_SECONDS = 60
+CHAINLINK_TWAP_MAX_AGE_SECONDS = 2.5
+CHAINLINK_BOUNDARY_TOLERANCE_MS = 250
+_chainlink_twap_history: deque[tuple[int, float]] = deque(maxlen=1200)
+_chainlink_twap_latest: dict = {}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SIM_DB_PATH = os.environ.get("POLY_SIM_DB_PATH", os.path.join(BASE_DIR, "polymarket_sim.sqlite3"))
@@ -188,7 +199,7 @@ if not ASSETS:
 # ── A/B 門檻測試：每個資產各自跑同一套四組門檻設定，彼此獨立記帳，方便直接比較
 #    「同一套策略邏輯放到不同資產上，表現差多少」。variant id 格式是
 #    "<資產id>-<組別>"（例如 "btc-main"），"<資產>-main" 這組固定對應
-#    SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM。"<資產>-late-direction" 是實驗組：
+#    SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM。"<資產>-chainlink-late-direction" 是實驗組：
 #    進場邏輯跟其他三組不同，不用 entryMaxPrice/fair 模型賭單邊，而是只在窗口剩不到
 #    10 秒、且現價已經明顯偏離開盤價時才進場賭方向，對齊公開資料裡「window delta」
 #    那套做法，且進場後不補鎖利、不提早出場。
@@ -235,9 +246,9 @@ for _asset in ASSETS:
             "stabilitySeconds":         LIVE_MIRROR_STABILITY_SECONDS,
         })
     AB_VARIANTS.append({
-        "id":                    f"{_asset['id']}-late-direction",
+        "id":                    f"{_asset['id']}-chainlink-late-direction",
         "assetId":               _asset["id"],
-        "label":                 f"{_asset['label']} 晚進場方向性（T-10s）",
+        "label":                 f"{_asset['label']} Chainlink 晚進場方向性（T-10s）",
         "entryMaxPrice":         None,
         "lockMaxSum":            SIM_LOCK_MAX_SUM,
         "lateDirectionOnly":     True,
@@ -257,6 +268,11 @@ def _new_market_state() -> dict:
         "downBook":      {"bids": [], "asks": []},
         "spotPrice":     None,   # Binance Futures 參考價；不是市場結算用的 Chainlink TWAP
         "windowOpenSpotPrice": None,  # 這一輪窗口第一次觀察到的現價，晚進場方向性策略用來算偏移幅度
+        "chainlinkTwapPrice": None,
+        "chainlinkTwapObservedAt": None,
+        "windowOpenChainlinkTwapPrice": None,
+        "windowOpenChainlinkTwapObservedAt": None,
+        "windowOpenChainlinkTwapSlug": None,
         "spotChangePct": None,   # 24h 漲跌幅
         "klines":        [],     # 真實 1 分鐘 K 線（Binance），畫蠟燭圖用
         "connected":     False,
@@ -778,6 +794,175 @@ def get_binance_ws_price(symbol: str, max_age_seconds: float = 5.0) -> float | N
     return entry["price"]
 
 
+def _market_window_start_ms(market: dict | None) -> int | None:
+    slug = (market or {}).get("slug") or ""
+    try:
+        return int(slug.rsplit("-", 1)[-1]) * 1000
+    except (TypeError, ValueError):
+        return None
+
+
+def _capture_window_open_chainlink_twap(ms: dict) -> bool:
+    """Bind a market to the exact RTDS TWAP observation at its start boundary.
+
+    RTDS publishes one observation per second.  We deliberately refuse a nearby
+    Binance value or a late "first value seen" because neither is the market's
+    Chainlink price-to-beat.
+    """
+    market = ms.get("market") or {}
+    slug = market.get("slug")
+    if slug and ms.get("windowOpenChainlinkTwapSlug") == slug:
+        return True
+    target_ms = _market_window_start_ms(market)
+    if not slug or target_ms is None:
+        return False
+    candidates = [
+        (abs(observed_ms - target_ms), observed_ms, value)
+        for observed_ms, value in _chainlink_twap_history
+        if abs(observed_ms - target_ms) <= CHAINLINK_BOUNDARY_TOLERANCE_MS
+    ]
+    if not candidates:
+        return False
+    _, observed_ms, value = min(candidates)
+    ms["windowOpenChainlinkTwapPrice"] = value
+    ms["windowOpenChainlinkTwapObservedAt"] = observed_ms
+    ms["windowOpenChainlinkTwapSlug"] = slug
+    return True
+
+
+def get_chainlink_twap_signal(asset_id: str, now_ms: float | None = None) -> dict | None:
+    """Return fresh settlement-aligned current/open TWAP values, else ``None``."""
+    ms = markets_state.get(asset_id)
+    if not ms or not _capture_window_open_chainlink_twap(ms):
+        return None
+    observed_ms = ms.get("chainlinkTwapObservedAt")
+    current = ms.get("chainlinkTwapPrice")
+    opening = ms.get("windowOpenChainlinkTwapPrice")
+    if not isinstance(observed_ms, (int, float)) or not current or not opening:
+        return None
+    wall_ms = time.time() * 1000 if now_ms is None else float(now_ms)
+    age_ms = wall_ms - float(observed_ms)
+    if age_ms < -1000 or age_ms > CHAINLINK_TWAP_MAX_AGE_SECONDS * 1000:
+        return None
+    return {
+        "current": float(current),
+        "opening": float(opening),
+        "observedAt": int(observed_ms),
+        "ageSeconds": max(0.0, age_ms / 1000),
+        "windowSeconds": CHAINLINK_TWAP_WINDOW_SECONDS,
+    }
+
+
+def chainlink_twap_status() -> dict:
+    observed_ms = _chainlink_twap_latest.get("observedAt")
+    age = None if observed_ms is None else max(0.0, time.time() - float(observed_ms) / 1000)
+    return {
+        "connected": bool(_chainlink_twap_latest.get("connected")),
+        "healthy": bool(age is not None and age <= CHAINLINK_TWAP_MAX_AGE_SECONDS),
+        "lastObservationAgeSeconds": age,
+        "windowSeconds": CHAINLINK_TWAP_WINDOW_SECONDS,
+    }
+
+
+def _on_chainlink_twap_tick() -> None:
+    """Drive the pure directional simulation and embedded live listener."""
+    for asset in ASSETS:
+        if asset.get("binanceSymbol") != "BTCUSDT":
+            continue
+        aid = asset["id"]
+        ms = markets_state[aid]
+        _capture_window_open_chainlink_twap(ms)
+        market = ms.get("market") or {}
+        up_book, down_book = ms.get("upBook"), ms.get("downBook")
+        if not market or not up_book or not down_book:
+            continue
+        remaining = None if ms.get("windowEndsAt") is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
+        if _simulation_books_are_coherent(aid, up_book, down_book):
+            variant_id = f"{aid}-chainlink-late-direction"
+            if variant_id in AB_VARIANT_BY_ID:
+                simulate_trading(variant_id, market["slug"], up_book, down_book, remaining, ms.get("fair"), False)
+        if aid == "btc" and ms.get("upTokenId"):
+            _notify_ws_price_listeners(ms["upTokenId"])
+
+
+def _apply_chainlink_twap_message(message: dict) -> int:
+    """Apply either an RTDS history subscription response or one live update."""
+    if not isinstance(message, dict) or message.get("topic") != "crypto_prices_twap_sixty":
+        return 0
+    payload = message.get("payload") or {}
+    if payload.get("symbol") not in (None, "btc/usd"):
+        return 0
+    rows = payload.get("data") if isinstance(payload.get("data"), list) else [payload]
+    applied = 0
+    for row in rows:
+        if not isinstance(row, dict) or int(row.get("window_s", 0) or 0) != CHAINLINK_TWAP_WINDOW_SECONDS:
+            continue
+        try:
+            observed_ms = int(row["timestamp"])
+            if row.get("full_accuracy_value") not in (None, ""):
+                value = float(Decimal(str(row["full_accuracy_value"])) / Decimal(10**18))
+            else:
+                value = float(row["value"])
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            continue
+        if value <= 0:
+            continue
+        _chainlink_twap_history.append((observed_ms, value))
+        latest_ms = int(_chainlink_twap_latest.get("observedAt", 0) or 0)
+        if observed_ms >= latest_ms:
+            _chainlink_twap_latest.update({"price": value, "observedAt": observed_ms, "connected": True})
+            for asset in ASSETS:
+                if asset.get("binanceSymbol") == "BTCUSDT":
+                    ms = markets_state[asset["id"]]
+                    ms["chainlinkTwapPrice"] = value
+                    ms["chainlinkTwapObservedAt"] = observed_ms
+        applied += 1
+    if applied:
+        _on_chainlink_twap_tick()
+    return applied
+
+
+async def chainlink_twap_loop() -> None:
+    subscription = {
+        "action": "subscribe",
+        "subscriptions": [{
+            "topic": "crypto_prices_twap_sixty",
+            "type": "update",
+            "filters": '{"symbol":"btc/usd"}',
+        }],
+    }
+    backoff_idx = 0
+    while True:
+        try:
+            async with websockets.connect(CHAINLINK_RTDS_URL, ping_interval=None) as ws:
+                await ws.send(json.dumps(subscription))
+                _chainlink_twap_latest["connected"] = True
+                log.info("[Chainlink-RTDS] 已連線，訂閱 BTC/USD 60 秒 TWAP")
+                backoff_idx = 0
+                last_ping = time.monotonic()
+                while True:
+                    timeout = max(0.1, 5.0 - (time.monotonic() - last_ping))
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        raw = None
+                    if time.monotonic() - last_ping >= 5.0:
+                        await ws.send("PING")
+                        last_ping = time.monotonic()
+                    if not raw or raw == "PONG":
+                        continue
+                    try:
+                        _apply_chainlink_twap_message(json.loads(raw))
+                    except Exception as exc:
+                        log.warning(f"[Chainlink-RTDS] 忽略無法解析的更新：{exc}")
+        except Exception as exc:
+            log.warning(f"[Chainlink-RTDS] 連線失敗，方向性策略暫停：{exc}")
+        _chainlink_twap_latest["connected"] = False
+        delay = WS_RECONNECT_BACKOFF[min(backoff_idx, len(WS_RECONNECT_BACKOFF) - 1)]
+        backoff_idx += 1
+        await asyncio.sleep(delay)
+
+
 def _on_binance_price_tick(symbol: str) -> None:
     """Binance 現貨價一有變動就立刻重算 theo、重跑鎖利判斷（純記憶體運算，沒有 I/O，
     很便宜，可以跑得比 3 秒輪詢頻繁很多）。跟 _on_ws_price_tick（Polymarket 訂單簿
@@ -1099,25 +1284,27 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
 def _try_late_direction_entry(
     variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float
 ) -> None:
-    """晚進場方向性策略：只在窗口快結束、現價已經明顯偏離開盤價時才賭方向。
+    """晚進場方向性策略：只依結算同源的 Chainlink 60 秒 TWAP 判斷。
 
-    跟其他變體「一開窗口就靠模型優勢賭單邊」完全相反——那條路統計下來是 0% 勝率
-    （鎖不到對沖，往往正代表市場對另一邊已有強烈共識，而共識通常是對的）。
-    這裡反過來利用同一個道理：等到只剩最後幾秒，現價相對開盤價的偏移還沒完全
-    反映在賠率上，且已經沒什麼時間反轉，這時候的方向性判斷確定性才夠高。
+    Binance 與市場實際使用的 Chainlink TWAP 可能方向相反，因此不再允許 Binance
+    spot 作為替代來源；Polymarket 訂單簿也必須同意該方向，避免逆著市場下注。
     """
     if remaining_seconds > LATE_DIRECTION_WINDOW_SECONDS or remaining_seconds < LATE_DIRECTION_MIN_ENTRY_REMAINING:
         return
     variant = AB_VARIANT_BY_ID[variant_id]
-    ms = markets_state[variant["assetId"]]
-    open_price = ms.get("windowOpenSpotPrice")
-    spot = ms.get("spotPrice")
-    if not open_price or not spot or open_price <= 0:
+    signal = get_chainlink_twap_signal(variant["assetId"])
+    if not signal:
         return
-    delta_pct = (spot - open_price) / open_price * 100
+    delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
     if abs(delta_pct) < LATE_DIRECTION_MIN_DELTA_PCT:
         return
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
+    bids, asks = book.get("bids") or [], book.get("asks") or []
+    if not bids or not asks:
+        return
+    market_probability = (max(float(x["price"]) for x in bids) + min(float(x["price"]) for x in asks)) / 2
+    if market_probability < LATE_DIRECTION_MIN_MARKET_PROB:
+        return
     shares, budget = _target_order_size(variant_id)
     if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
         return
@@ -1446,10 +1633,13 @@ def simulate_trading(
     if pos is None:
         if remaining_seconds is None or remaining_seconds <= 0:
             return
-        if _try_direct_pair(variant_id, slug, up_book, down_book):
-            return
+        # 這一組是純方向性驗證，不能先被兩腿鎖利部位占用；否則 Dashboard 顯示的
+        # 勝率其實都是 locked trades，完全沒有驗證即將上實盤的方向訊號。
         if variant.get("lateDirectionOnly"):
             _try_late_direction_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+            return
+        if _try_direct_pair(variant_id, slug, up_book, down_book):
+            return
         # 其餘變體：找不到能立即鎖住兩邊的機會就空手，不退而求其次先賭單邊留下方向性
         # 曝險——這條退路統計下來歷史勝率是 0%（42 戰 0 勝、-$364.75），關閉／重開過
         # 幾次，2026-09 確認維持關閉。核心策略就是「兩邊都買才進場」，找不到就不進場。
@@ -2031,6 +2221,10 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
         ms["market"] = new_market
         ms["windowEndsAt"] = _iso_to_ms(new_market["endDate"])
         ms["windowOpenSpotPrice"] = None  # 換窗口了，開盤價重新觀察
+        ms["windowOpenChainlinkTwapPrice"] = None
+        ms["windowOpenChainlinkTwapObservedAt"] = None
+        ms["windowOpenChainlinkTwapSlug"] = None
+        _capture_window_open_chainlink_twap(ms)
         log.info(f"[MARKET:{aid}] 切換到新窗口 {new_market['slug']}　結束於 {new_market['endDate']}")
 
     if not ms["market"]:
@@ -2199,6 +2393,10 @@ def build_asset_payload(asset_id: str) -> dict:
         "upBook":       ms["upBook"],
         "downBook":     ms["downBook"],
         "spotPrice":     ms["spotPrice"],
+        "chainlinkTwapPrice": ms.get("chainlinkTwapPrice"),
+        "chainlinkTwapObservedAt": ms.get("chainlinkTwapObservedAt"),
+        "windowOpenChainlinkTwapPrice": ms.get("windowOpenChainlinkTwapPrice"),
+        "chainlinkTwapStatus": chainlink_twap_status(),
         "spotChangePct": ms["spotChangePct"],
         "klines":       ms.get("klines", []),
         "connected":    ms["connected"],
@@ -2282,6 +2480,8 @@ async def main():
     log.info("=" * 50)
 
     tasks = [data_fetcher(), broadcast_loop(), market_ws_loop(), binance_ws_loop()]
+    if any(asset.get("binanceSymbol") == "BTCUSDT" for asset in ASSETS):
+        tasks.append(chainlink_twap_loop())
     if WITH_LIVE:
         import polymarket_live_strategy as live_strategy
         tasks.append(live_strategy.run_embedded())
