@@ -92,8 +92,8 @@ _LIVE_VARIANT = sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-chainlink-late-direction"
 # 的 batch 不是原子交易，因此把門檻收緊、要求限價內有數倍深度，並只接受持續存在的機會。
 # 這些參數也由 btc-live-lock 模擬組讀取，避免模擬與實盤再次使用不同條件。
 LOCK_MAX_SUM = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM", "0.92"))))
-PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "3.0")))
-PAIR_STABILITY_SECONDS = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.25")))
+PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "2.0")))
+PAIR_STABILITY_SECONDS = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.15")))
 RESCUE_LOCK_MAX_SUM = max(LOCK_MAX_SUM, min(0.99, float(os.environ.get("POLY_RESCUE_LOCK_MAX_SUM", "0.99"))))
 LATE_DIRECTION_MAX_PRICE = _LIVE_VARIANT["lateDirectionMaxPrice"]
 LATE_DIRECTION_MIN_MARKET_PROB = max(

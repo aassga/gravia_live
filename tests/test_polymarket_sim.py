@@ -216,11 +216,14 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=30.0)
         self.assertIsNone(sim.ab_states["btc-chainlink-late-direction"]["position"])
 
+        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=4.0)
+        self.assertIsNone(sim.ab_states["btc-chainlink-late-direction"]["position"])
+
     def test_late_direction_enters_favored_side_near_close(self):
         self._set_chainlink_signal()
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": [{"price": 0.39, "size": 1_000.0}]}
-        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
+        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=15.0)
         pos = sim.ab_states["btc-chainlink-late-direction"]["position"]
         self.assertIsNotNone(pos)
         self.assertEqual(pos["side"], "Up")

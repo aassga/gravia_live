@@ -115,8 +115,8 @@ LIVE_MIRROR_STAKE_PCT           = max(0.5, min(30.0, float(os.environ.get("POLY_
 LIVE_MIRROR_MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 LIVE_MIRROR_MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
 LIVE_MIRROR_LOCK_MAX_SUM        = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM", "0.92"))))
-LIVE_MIRROR_DEPTH_MULTIPLIER    = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "3.0")))
-LIVE_MIRROR_STABILITY_SECONDS   = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.25")))
+LIVE_MIRROR_DEPTH_MULTIPLIER    = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "2.0")))
+LIVE_MIRROR_STABILITY_SECONDS   = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.15")))
 # 股數封頂在「當下看得到的深度」的這個比例。2026-09：實盤好幾次撞到「模擬盤跟實盤在
 # 同一秒看到同一個機會，模擬盤保證吃得到、實盤卻因為深度不夠被拒」——這不是 bug，是
 # 紙上模擬（吃剛看到的快照，保證成交）跟真實下單（要跟其他真人搶同一份流動性，中間
@@ -151,12 +151,12 @@ MM_REQUOTE_SECONDS        = 2.0
 MM_STOP_QUOTING_SECONDS   = 20.0
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
-# 對齊公開資料裡「T-10 秒、window delta」那套做法：不是在窗口一開始就靠模型優勢
+# 在窗口最後 20 秒使用 window delta：不是在窗口一開始就靠模型優勢
 # 賭單邊（那條退路驗證下來是 0% 勝率，2026-09 起已對其他變體關閉），而是等到窗口
 # 快結束、現價已經明顯偏離「這個窗口開盤時的價格」——這時已經沒什麼時間反轉，
 # 訊號的確定性遠比窗口剛開盤時高很多。
-LATE_DIRECTION_WINDOW_SECONDS      = 10.0  # 只在剩不到這個秒數才考慮晚進場
-LATE_DIRECTION_MIN_ENTRY_REMAINING = 3.0   # 剩不到這個秒數就別進了，怕來不及成交
+LATE_DIRECTION_WINDOW_SECONDS      = 20.0  # 提早觀察，避開最後幾秒訂單簿單邊化
+LATE_DIRECTION_MIN_ENTRY_REMAINING = 5.0   # 剩不到這個秒數就別進了，怕來不及成交
 LATE_DIRECTION_MIN_DELTA_PCT       = 0.02  # Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 的最低偏移
 LATE_DIRECTION_MIN_MARKET_PROB     = 0.55  # Polymarket 自己也必須同方向，拒絕逆著近乎確定的市場下注
 
@@ -248,7 +248,7 @@ for _asset in ASSETS:
     AB_VARIANTS.append({
         "id":                    f"{_asset['id']}-chainlink-late-direction",
         "assetId":               _asset["id"],
-        "label":                 f"{_asset['label']} Chainlink 晚進場方向性（T-10s）",
+        "label":                 f"{_asset['label']} Chainlink 晚進場方向性（T-20s）",
         "entryMaxPrice":         None,
         "lockMaxSum":            SIM_LOCK_MAX_SUM,
         "lateDirectionOnly":     True,

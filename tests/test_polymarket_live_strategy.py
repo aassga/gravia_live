@@ -297,12 +297,18 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(filled)
         self.assertIsNone(strategy.live_state["position"])
 
+        filled = await strategy._try_late_direction_entry(
+            "btc-window", up_book, down_book, remaining_seconds=4.0, shares=10.0, dry_run=True
+        )
+        self.assertFalse(filled)
+        self.assertIsNone(strategy.live_state["position"])
+
     async def test_late_direction_enters_favored_side_near_close(self):
         self._set_chainlink_signal()
         up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]}
         down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]}
         filled = await strategy._try_late_direction_entry(
-            "btc-window", up_book, down_book, remaining_seconds=5.0, shares=10.0, dry_run=True
+            "btc-window", up_book, down_book, remaining_seconds=15.0, shares=10.0, dry_run=True
         )
         self.assertTrue(filled)
         pos = strategy.live_state["position"]
@@ -808,7 +814,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         unwind.assert_awaited_once_with(None, "saved_single_leg")
 
     async def test_no_new_entry_after_window_closed(self):
-        # 90 秒門檻已經拿掉（鎖利不需要、晚進場方向性還得靠它才能在剩不到 10 秒時動作），
+        # 90 秒門檻已經拿掉（鎖利不需要、晚進場方向性還得靠它才能在剩不到 20 秒時動作），
         # 現在唯一會擋新倉位的是「已經沒剩餘時間」。
         with patch.object(strategy, "_strategy_cash", AsyncMock()) as cash:
             await strategy.evaluate_and_act("btc-window", None, 0.0, {"fairUp": 0.5, "fairDown": 0.5})
@@ -957,7 +963,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "outcomes": json.dumps(["Up", "Down"]),
             "clobTokenIds": json.dumps(["up-token", "down-token"]),
         }
-        depth = 60  # 深度防護封頂後仍高於最低下單金額，且低於資金可買的股數
+        depth = 40  # 深度防護封頂後仍高於最低下單金額，且低於資金可買的股數
                     # 換算出的股數上限，才能確定是深度、不是資金，在限制最終股數。
         strategy.sim.state["upBook"] = {
             "tickSize": 0.01, "minOrderSize": 1,

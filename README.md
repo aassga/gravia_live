@@ -107,14 +107,14 @@ Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計�
 - `LIVE_TRADING=false`：只跑 dry-run，不簽名、不送單。
 - `POLY_STRATEGY_ARMED=false`：新增的第二道武裝開關。只有它與 `LIVE_TRADING` 同時為 `true` 才會送出真實策略訂單。
 - `POLY_VALIDATE_ORDER_PATH=true`：安全驗證模式。每個新市場預熱並簽署兩筆 FOK，但硬性禁止 `POST /orders`；即使另外兩個開關誤設為 `true` 也不會真實執行。
-- `POLY_ENABLE_LATE_DIRECTION=false`：預設禁止窗口末端的單腿方向性下注；只有明確改成 `true` 才會啟用。啟用後仍只接受 Chainlink 60 秒 TWAP 報價新鮮、具有精確窗口開盤 TWAP，且市場同向的訊號，不再以 Binance 判定結算方向。
+- `POLY_ENABLE_LATE_DIRECTION=false`：預設禁止窗口末端的單腿方向性下注；只有明確改成 `true` 才會啟用。啟用後會在剩餘 5–20 秒內判斷，仍只接受 Chainlink 60 秒 TWAP 報價新鮮、具有精確窗口開盤 TWAP，且市場同向的訊號，不再以 Binance 判定結算方向。
 - `POLY_LATE_DIRECTION_MIN_MARKET_PROB=0.55`：方向性訊號選定的一腿，其 Polymarket 最佳 bid/ask 中間價至少要有 55%，避免逆著市場接近確定的結果下注。
 - `POLY_MAX_PAIR_BUDGET_USD=25`：每組兩腿最多 25 USDC。
 - `POLY_MIN_CASH_RESERVE_USD=5`：至少保留 5 USDC 現金。
 - `POLY_STAKE_PCT=15`：每組兩腿預算為可用現金的 15%。
 - `POLY_LIVE_LOCK_MAX_SUM=0.92`：實盤兩腿保守可成交限價合計上限；門檻越低，理論緩衝越大、機會越少。
-- `POLY_PAIR_MIN_DEPTH_MULTIPLIER=3`：每腿在實際送出限價內的可成交深度，至少要是下單股數的 3 倍。
-- `POLY_PAIR_STABILITY_SECONDS=0.25`：同一市場的鎖利條件必須連續成立至少 0.25 秒才送單；期間允許價格與股數更新，但每個 tick 都會用最新訂單簿重新驗證。
+- `POLY_PAIR_MIN_DEPTH_MULTIPLIER=2`：每腿在實際送出限價內的可成交深度，至少要是下單股數的 2 倍。
+- `POLY_PAIR_STABILITY_SECONDS=0.15`：同一市場的鎖利條件必須連續成立至少 0.15 秒才送單；期間允許價格與股數更新，但每個 tick 都會用最新訂單簿重新驗證。
 - `POLY_RESCUE_LOCK_MAX_SUM=0.99`：已經單腿成交後，只要補腿仍能保住最低淨利，就允許用較寬門檻優先消除曝險。
 - `POLY_ACTION_COOLDOWN_SECONDS=10`：下單嘗試間隔至少 10 秒。
 - 只有 FOK 訂單回覆 `matched` 才當作成交；`delayed` 長時間無法確認時會自動停止下單。
