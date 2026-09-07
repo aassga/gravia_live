@@ -151,7 +151,7 @@ MM_REQUOTE_SECONDS        = 2.0
 MM_STOP_QUOTING_SECONDS   = 20.0
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
-# 在窗口最後 10 秒使用 window delta：不是在窗口一開始就靠模型優勢
+# BTC 5m 暫時在窗口最後 10 秒使用 Binance window delta 做隔離測試：不是在窗口一開始就靠模型優勢
 # 賭單邊（那條退路驗證下來是 0% 勝率，2026-09 起已對其他變體關閉），而是等到窗口
 # 快結束、現價已經明顯偏離「這個窗口開盤時的價格」——這時已經沒什麼時間反轉，
 # 訊號的確定性遠比窗口剛開盤時高很多。
@@ -179,9 +179,8 @@ BTC_15M_DIRECTION_STABILITY_SECONDS    = 1.5
 BTC_15M_DIRECTION_STAKE_PCT            = 5.0
 BTC_15M_DIRECTION_MAX_BUDGET_USD       = 10.0
 BTC_15M_DIRECTION_MIN_CASH_RESERVE_USD = 10.0
-# 2026-08-14 起 5 分鐘 crypto 市場以 Chainlink 60 秒 TWAP 的窗口起／終值結算。
-# RTDS 是 Polymarket 官方建議的免憑證 production feed。方向性策略只能使用這份來源；
-# Binance 仍保留給圖表與非結算公平價模型，不可再拿來判斷最終 Up/Down。
+# Chainlink RTDS 仍供 15m／4h 方向性策略與結算觀察使用。BTC 5m 這次刻意改回 Binance
+# 只是比較訊號來源是否影響下單率；Binance 並非結算來源，結果可能與市場最終判定不同。
 CHAINLINK_RTDS_URL = "wss://ws-live-data.polymarket.com"
 CHAINLINK_TWAP_WINDOW_SECONDS = 60
 CHAINLINK_TWAP_MAX_AGE_SECONDS = 2.5
@@ -225,7 +224,7 @@ if not ASSETS:
 # ── A/B 門檻測試：每個資產各自跑同一套四組門檻設定，彼此獨立記帳，方便直接比較
 #    「同一套策略邏輯放到不同資產上，表現差多少」。variant id 格式是
 #    "<資產id>-<組別>"（例如 "btc-main"），"<資產>-main" 這組固定對應
-#    SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM。"<資產>-chainlink-late-direction" 是實驗組：
+#    SIM_ENTRY_MAX_PRICE / SIM_LOCK_MAX_SUM。BTC 5m 的 "btc-binance-late-direction" 是實驗組：
 #    進場邏輯跟其他三組不同，不用 entryMaxPrice/fair 模型賭單邊，而是只在窗口剩不到
 #    10 秒、且現價已經明顯偏離開盤價時才進場賭方向，對齊公開資料裡「window delta」
 #    那套做法，且進場後不補鎖利、不提早出場。
@@ -286,8 +285,8 @@ for _asset in ASSETS:
             "minDepthMultiplier":       LIVE_MIRROR_DEPTH_MULTIPLIER,
             "stabilitySeconds":         LIVE_MIRROR_STABILITY_SECONDS,
         })
-    # 方向性策略必須使用跟市場結算同源的 RTDS feed。目前只實作 BTC/USD
-    # Chainlink 60 秒 TWAP；其他幣種先只跑兩腿鎖利，不用 Binance 冒充結算來源。
+    # BTC 15m／4h 保留結算同源 Chainlink；BTC 5m 暫時另開新的 Binance variant id，
+    # 讓本次比較不會混入原本 Chainlink 方向組的歷史績效。
     if _asset["id"] == "btc-15m":
         AB_VARIANTS.append({
             "id":                    "btc-15m-chainlink-late-direction",
@@ -303,6 +302,17 @@ for _asset in ASSETS:
             "minCashReserveUsd":     BTC_15M_DIRECTION_MIN_CASH_RESERVE_USD,
             "minDepthMultiplier":    BTC_15M_DIRECTION_DEPTH_MULTIPLIER,
             "stabilitySeconds":      BTC_15M_DIRECTION_STABILITY_SECONDS,
+        })
+    elif _asset["id"] == "btc":
+        AB_VARIANTS.append({
+            "id":                    "btc-binance-late-direction",
+            "assetId":               "btc",
+            "label":                 "BTC Binance 晚進場方向性（T-10s）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateDirectionOnly":     True,
+            "directionSignalSource": "binance_window",
+            "lateDirectionMaxPrice": 0.92,
         })
     elif _asset["binanceSymbol"] == "BTCUSDT":
         AB_VARIANTS.append({
@@ -1046,6 +1056,10 @@ def _on_binance_price_tick(symbol: str) -> None:
         if not ms.get("market"):
             continue
         ms["spotPrice"] = price
+        # BTC 5m 實盤嵌入模式也要由 Binance tick 立即觸發判斷，否則雖然改用 Binance
+        # 當訊號，真正送單仍只會等 Polymarket book／Chainlink 更新才被動重算。
+        if aid == "btc" and ms.get("upTokenId"):
+            _notify_ws_price_listeners(ms["upTokenId"])
         fair = estimate_fair_up(aid)
         if not fair:
             continue
@@ -1570,11 +1584,7 @@ def _try_btc_15m_adaptive_direction_entry(
 def _try_late_direction_entry(
     variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float
 ) -> None:
-    """晚進場方向性策略：只依結算同源的 Chainlink 60 秒 TWAP 判斷。
-
-    還原 12:24:56 那筆所用的原始進場條件；唯一差異是以 Chainlink TWAP 取代
-    Binance spot 判斷方向。原策略不要求 Polymarket 訂單簿同方向。
-    """
+    """晚進場方向性；BTC 5m 實驗組用 Binance，較長窗口仍用 Chainlink。"""
     variant = AB_VARIANT_BY_ID[variant_id]
     if variant.get("directionProfile") == "btc-15m-adaptive":
         _try_btc_15m_adaptive_direction_entry(
@@ -1583,10 +1593,19 @@ def _try_late_direction_entry(
         return
     if remaining_seconds > LATE_DIRECTION_WINDOW_SECONDS or remaining_seconds < LATE_DIRECTION_MIN_ENTRY_REMAINING:
         return
-    signal = get_chainlink_twap_signal(variant["assetId"])
-    if not signal:
-        return
-    delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
+    if variant.get("directionSignalSource") == "binance_window":
+        ms = markets_state[variant["assetId"]]
+        opening, current = ms.get("windowOpenSpotPrice"), ms.get("spotPrice")
+        if not opening or not current or opening <= 0:
+            return
+        delta_pct = (current - opening) / opening * 100
+        signal_source = "binance_futures_window"
+    else:
+        signal = get_chainlink_twap_signal(variant["assetId"])
+        if not signal:
+            return
+        delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
+        signal_source = "chainlink_twap_60s"
     if abs(delta_pct) < LATE_DIRECTION_MIN_DELTA_PCT:
         return
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
@@ -1602,8 +1621,11 @@ def _try_late_direction_entry(
     if fill["decisionPrice"] > variant["lateDirectionMaxPrice"]:
         return
     enter_position(variant_id, slug, side, fill, budget, None, None)
+    ab_states[variant_id]["position"]["signalSource"] = signal_source
+    ab_states[variant_id]["position"]["signalDeltaPct"] = delta_pct
+    save_sim_state()
     log.info(
-        f"[SIM:{variant_id}] 晚進場方向性 {side} Δ={delta_pct:+.3f}% "
+        f"[SIM:{variant_id}] 晚進場方向性 {side} source={signal_source} Δ={delta_pct:+.3f}% "
         f"剩餘={remaining_seconds:.1f}s VWAP=${fill['vwap']:.4f}"
     )
 

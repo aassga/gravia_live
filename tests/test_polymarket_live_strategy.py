@@ -35,6 +35,8 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
                 "outcomes": json.dumps(["Up", "Down"]),
                 "clobTokenIds": json.dumps(["up-token", "down-token"]),
             },
+            "windowOpenSpotPrice": None,
+            "spotPrice": None,
             "chainlinkTwapPrice": None,
             "chainlinkTwapObservedAt": None,
             "windowOpenChainlinkTwapPrice": None,
@@ -46,6 +48,8 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         now_ms = int(time.time() * 1000)
         strategy.sim.state.update({
             "market": {"slug": "btc-window"},
+            "windowOpenSpotPrice": opening,
+            "spotPrice": current,
             "windowOpenChainlinkTwapSlug": "btc-window",
             "windowOpenChainlinkTwapPrice": opening,
             "windowOpenChainlinkTwapObservedAt": now_ms - 300_000,
@@ -314,15 +318,17 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         pos = strategy.live_state["position"]
         self.assertEqual(pos["side"], "Up")
         self.assertEqual(pos["strategy"], "late_direction")
+        self.assertEqual(pos["signalSource"], "binance_futures_window")
         self.assertFalse(pos["hedged"])
 
-    def test_late_direction_allows_original_market_disagreement_behavior(self):
+    def test_binance_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 100}], "bids": [{"price": 0.97, "size": 100}]}
         down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.20, "size": 100}], "bids": []}
         plan = strategy._late_direction_plan(up_book, down_book, 5.0, 10.0)
         self.assertIsNotNone(plan)
         self.assertEqual(plan["side"], "Down")
+        self.assertEqual(plan["_signalSource"], "binance_futures_window")
 
     def test_direct_pair_checks_worst_case_limit_and_fees(self):
         up_book = {

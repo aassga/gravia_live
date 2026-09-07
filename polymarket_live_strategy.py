@@ -1,7 +1,7 @@
 """
 Polymarket BTC 5 分鐘 Up/Down · 真實自動下單策略
 
-真實版與紙上模擬共用同一套核心判斷（套用模擬版 "btc-chainlink-late-direction" 這組）：
+真實版與紙上模擬共用同一套核心判斷（BTC 5m 暫用 "btc-binance-late-direction" 實驗組）：
     - 使用 Ask/Bid 深度計算 VWAP，再以含滑點、向不利 tick 取整的最差限價作決策。
     - 優先鎖利：當下兩邊同時買得到、扣費用後淨賺達門檻才配對進場，這是唯一的
       無方向曝險進場路徑。
@@ -80,14 +80,18 @@ if LIVE_ASSET_ID != "btc":
     sim.state = sim.markets_state[LIVE_ASSET_ID]  # 重新指向對應資產的市場狀態（見 sim.state 的定義）
 
 # 真實版套用模擬版 A/B 測試裡「LIVE_ASSET_ID 晚進場方向性」這組
-# （sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-chainlink-late-direction"]）。這裡引用 AB_VARIANT_BY_ID
+# （BTC 5m 為 btc-binance-late-direction，其餘窗口仍是 Chainlink variant）。這裡引用 AB_VARIANT_BY_ID
 # 而不是直接寫死數字，是為了跟模擬版共用同一個真實來源，模擬版調整這組門檻時真實版會
 # 自動跟著同步。
-# 2026-09：從「btc-main」（鎖利優先，找不到就靠公平價模型賭單邊）改成 Chainlink 方向組
-# （鎖利優先＋找不到鎖利時改成只在窗口剩不到 10 秒、現價已明顯偏離開盤價時才賭方向）——
-# 模擬盤驗證下來後者的方向性單邊勝率遠高於前者（91% vs 0%），詳見對話紀錄。
+# 2026-09：方向組只在窗口剩不到 10 秒、價格已明顯偏離開盤價時才賭方向；本次為了
+# 隔離測試訊號來源是否影響下單率，BTC 5m 暫時從 Chainlink 改回 Binance window delta。
 # 晚進場方向性參數仍取自這個變體；兩腿鎖利的實盤防護則由下方獨立環境變數控制。
-_LIVE_VARIANT = sim.AB_VARIANT_BY_ID[f"{LIVE_ASSET_ID}-chainlink-late-direction"]
+_LIVE_DIRECTION_VARIANT_ID = (
+    "btc-binance-late-direction"
+    if LIVE_ASSET_ID == "btc"
+    else f"{LIVE_ASSET_ID}-chainlink-late-direction"
+)
+_LIVE_VARIANT = sim.AB_VARIANT_BY_ID[_LIVE_DIRECTION_VARIANT_ID]
 # 2026-09-07 實盤再次出現「快照上兩腿合計 0.92，但 346ms 後只成交一腿」。公開 API
 # 的 batch 不是原子交易，因此把門檻收緊、要求限價內有數倍深度，並只接受持續存在的機會。
 # 這些參數也由 btc-live-lock 模擬組讀取，避免模擬與實盤再次使用不同條件。
@@ -399,16 +403,28 @@ def _late_direction_plan(
     remaining_seconds: float,
     shares: float,
 ) -> dict | None:
-    """還原原始晚進場規則，只把 Binance 方向來源換成 Chainlink 60 秒 TWAP。"""
+    """BTC 5m 暫時還原 Binance 窗口漲跌訊號，供與 Chainlink 下單率做隔離比較。"""
     if (
         remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS
         or remaining_seconds < sim.LATE_DIRECTION_MIN_ENTRY_REMAINING
     ):
         return None
-    signal = sim.get_chainlink_twap_signal(LIVE_ASSET_ID)
-    if not signal:
-        return None
-    delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
+    if _LIVE_VARIANT.get("directionSignalSource") == "binance_window":
+        opening, current = sim.state.get("windowOpenSpotPrice"), sim.state.get("spotPrice")
+        if not opening or not current or opening <= 0:
+            return None
+        delta_pct = (current - opening) / opening * 100
+        signal_source = "binance_futures_window"
+        signal_observed_at = int(time.time() * 1000)
+        signal_age_seconds = 0.0
+    else:
+        signal = sim.get_chainlink_twap_signal(LIVE_ASSET_ID)
+        if not signal:
+            return None
+        delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
+        signal_source = "chainlink_twap_60s"
+        signal_observed_at = signal["observedAt"]
+        signal_age_seconds = signal["ageSeconds"]
     if abs(delta_pct) < sim.LATE_DIRECTION_MIN_DELTA_PCT:
         return None
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
@@ -420,9 +436,9 @@ def _late_direction_plan(
     if not plan or plan["limitPrice"] > LATE_DIRECTION_MAX_PRICE:
         return None
     plan["_deltaPct"] = delta_pct
-    plan["_signalSource"] = "chainlink_twap_60s"
-    plan["_signalObservedAt"] = signal["observedAt"]
-    plan["_signalAgeSeconds"] = signal["ageSeconds"]
+    plan["_signalSource"] = signal_source
+    plan["_signalObservedAt"] = signal_observed_at
+    plan["_signalAgeSeconds"] = signal_age_seconds
     return plan
 
 
@@ -440,7 +456,7 @@ async def _try_late_direction_entry(
     if not plan:
         return False
     log.info(
-        f"[LIVE] 晚進場方向性 {plan['side']} Chainlink60 Δ={plan['_deltaPct']:+.3f}% "
+        f"[LIVE] 晚進場方向性 {plan['side']} source={plan['_signalSource']} Δ={plan['_deltaPct']:+.3f}% "
         f"age={plan['_signalAgeSeconds']:.3f}s "
         f"剩餘={remaining_seconds:.1f}s"
     )
@@ -864,6 +880,10 @@ def _build_position_dict(slug: str, plan: dict, response: dict, execution: dict,
         "entryRiskFee": plan["fee"],
         "fairProbability": plan.get("fair"),
         "entryEdge": plan.get("edge"),
+        "signalSource": plan.get("_signalSource"),
+        "signalDeltaPct": plan.get("_deltaPct"),
+        "signalObservedAt": plan.get("_signalObservedAt"),
+        "signalAgeSeconds": plan.get("_signalAgeSeconds"),
         "entryTime": time.time(),
         "entryOrderId": response.get("orderID") or response.get("orderId"),
         "entryTradeIds": list(response.get("tradeIDs") or response.get("associate_trades") or []),
@@ -1633,7 +1653,7 @@ async def _run_ws_late_direction_entry(
         if not dry_run and (not up_book or not down_book or not _live_books_are_coherent(up_book, down_book)):
             return
         log.info(
-            f"[LIVE] 晚進場方向性 {plan['side']} Chainlink60 "
+            f"[LIVE] 晚進場方向性 {plan['side']} source={plan['_signalSource']} "
             f"Δ={plan['_deltaPct']:+.3f}% age={plan['_signalAgeSeconds']:.3f}s（WS 即時觸發）"
         )
         result = await _enter_position(slug, plan, dry_run)
@@ -1679,8 +1699,13 @@ def _log_startup_banner(mode: str) -> None:
         f"balance poll={EMERGENCY_UNWIND_POLL_INTERVAL:.2f}s order retry={EMERGENCY_UNWIND_ORDER_INTERVAL:.1f}s"
     )
     if ENABLE_LATE_DIRECTION:
+        direction_source = (
+            "Binance Futures 窗口漲跌"
+            if _LIVE_VARIANT.get("directionSignalSource") == "binance_window"
+            else f"Chainlink {sim.CHAINLINK_TWAP_WINDOW_SECONDS}s TWAP"
+        )
         log.warning(
-            f"  單腿方向性下注已啟用：Chainlink {sim.CHAINLINK_TWAP_WINDOW_SECONDS}s TWAP，剩餘 "
+            f"  單腿方向性下注已啟用：{direction_source}，剩餘 "
             f"{sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
             f"{sim.LATE_DIRECTION_WINDOW_SECONDS:.0f}s、偏移開盤價>={sim.LATE_DIRECTION_MIN_DELTA_PCT:.2f}%、"
             f"不要求市場同向、進場價<=${LATE_DIRECTION_MAX_PRICE}"

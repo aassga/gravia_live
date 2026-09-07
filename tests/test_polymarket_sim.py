@@ -51,6 +51,13 @@ class PolymarketSimulationTests(unittest.TestCase):
         ms["chainlinkTwapObservedAt"] = int(time.time() * 1000)
         return ms
 
+    def _set_binance_signal(self, opening=100.0, current=100.5):
+        ms = sim.markets_state["btc"]
+        ms["market"] = {"slug": "btc-window"}
+        ms["windowOpenSpotPrice"] = opening
+        ms["spotPrice"] = current
+        return ms
+
     def tearDown(self):
         if sim._sim_db is not None:
             sim._sim_db.close()
@@ -210,40 +217,48 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIs(sim.sim_state, sim.ab_states["btc-main"])
 
     def test_late_direction_skips_outside_window(self):
-        self._set_chainlink_signal()
+        self._set_binance_signal()
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": [{"price": 0.39, "size": 1_000.0}]}
-        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=30.0)
-        self.assertIsNone(sim.ab_states["btc-chainlink-late-direction"]["position"])
+        sim._try_late_direction_entry("btc-binance-late-direction", "btc-window", up_book, down_book, remaining_seconds=30.0)
+        self.assertIsNone(sim.ab_states["btc-binance-late-direction"]["position"])
 
-        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=2.0)
-        self.assertIsNone(sim.ab_states["btc-chainlink-late-direction"]["position"])
+        sim._try_late_direction_entry("btc-binance-late-direction", "btc-window", up_book, down_book, remaining_seconds=2.0)
+        self.assertIsNone(sim.ab_states["btc-binance-late-direction"]["position"])
 
     def test_late_direction_enters_favored_side_near_close(self):
-        self._set_chainlink_signal()
+        self._set_binance_signal()
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": [{"price": 0.39, "size": 1_000.0}]}
-        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
-        pos = sim.ab_states["btc-chainlink-late-direction"]["position"]
+        sim._try_late_direction_entry("btc-binance-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
+        pos = sim.ab_states["btc-binance-late-direction"]["position"]
         self.assertIsNotNone(pos)
         self.assertEqual(pos["side"], "Up")
         self.assertFalse(pos["hedged"])
+        self.assertEqual(pos["signalSource"], "binance_futures_window")
+
+    def test_btc_5m_uses_separate_binance_variant_for_clean_comparison(self):
+        ids = [v["id"] for v in sim.AB_VARIANTS if v["assetId"] == "btc"]
+        self.assertIn("btc-binance-late-direction", ids)
+        self.assertNotIn("btc-chainlink-late-direction", ids)
+        variant = sim.AB_VARIANT_BY_ID["btc-binance-late-direction"]
+        self.assertEqual(variant["directionSignalSource"], "binance_window")
 
     def test_late_direction_position_never_auto_hedges(self):
-        self._set_chainlink_signal()
+        self._set_binance_signal()
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": [{"price": 0.29, "size": 1_000.0}]}  # 便宜到能鎖利
-        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
-        self.assertFalse(sim.ab_states["btc-chainlink-late-direction"]["position"]["hedged"])
-        sim.simulate_trading("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=4.0, fair=None)
-        self.assertFalse(sim.ab_states["btc-chainlink-late-direction"]["position"]["hedged"])
+        sim._try_late_direction_entry("btc-binance-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
+        self.assertFalse(sim.ab_states["btc-binance-late-direction"]["position"]["hedged"])
+        sim.simulate_trading("btc-binance-late-direction", "btc-window", up_book, down_book, remaining_seconds=4.0, fair=None)
+        self.assertFalse(sim.ab_states["btc-binance-late-direction"]["position"]["hedged"])
 
     def test_late_direction_allows_original_market_disagreement_behavior(self):
-        self._set_chainlink_signal(opening=100.0, current=99.5)
+        self._set_binance_signal(opening=100.0, current=99.5)
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.98, "size": 1_000.0}], "bids": [{"price": 0.97, "size": 1_000.0}]}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.20, "size": 1_000.0}], "bids": []}
-        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
-        pos = sim.ab_states["btc-chainlink-late-direction"]["position"]
+        sim._try_late_direction_entry("btc-binance-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
+        pos = sim.ab_states["btc-binance-late-direction"]["position"]
         self.assertIsNotNone(pos)
         self.assertEqual(pos["side"], "Down")
 
@@ -397,6 +412,24 @@ class PolymarketSimulationTests(unittest.TestCase):
             sim.set_ws_simulation_ticks_enabled(old_enabled)
         self.assertEqual(received, ["token-a"])
         self.assertEqual(sim._ws_get_book("token-a")["quoteSource"], "websocket")
+
+    def test_binance_tick_notifies_live_listener_immediately_for_btc(self):
+        received = []
+        callback = received.append
+        ms = sim.markets_state["btc"]
+        ms["market"] = {"slug": "btc-window"}
+        ms["upTokenId"] = "btc-up-token"
+        sim.register_ws_price_listener(callback)
+        try:
+            with (
+                patch.object(sim, "get_binance_ws_price", return_value=100.5),
+                patch.object(sim, "estimate_fair_up", return_value=None),
+            ):
+                sim._on_binance_price_tick("BTCUSDT")
+        finally:
+            sim.unregister_ws_price_listener(callback)
+        self.assertEqual(received, ["btc-up-token"])
+        self.assertEqual(ms["spotPrice"], 100.5)
 
     def test_simulation_data_guard_rejects_mixed_reconnect_snapshots(self):
         now = 100.0
