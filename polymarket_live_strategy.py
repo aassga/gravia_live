@@ -96,10 +96,6 @@ PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_M
 PAIR_STABILITY_SECONDS = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.15")))
 RESCUE_LOCK_MAX_SUM = max(LOCK_MAX_SUM, min(0.99, float(os.environ.get("POLY_RESCUE_LOCK_MAX_SUM", "0.99"))))
 LATE_DIRECTION_MAX_PRICE = _LIVE_VARIANT["lateDirectionMaxPrice"]
-LATE_DIRECTION_MIN_MARKET_PROB = max(
-    0.50,
-    min(0.99, float(os.environ.get("POLY_LATE_DIRECTION_MIN_MARKET_PROB", str(sim.LATE_DIRECTION_MIN_MARKET_PROB)))),
-)
 
 
 def _new_live_state() -> dict:
@@ -403,7 +399,7 @@ def _late_direction_plan(
     remaining_seconds: float,
     shares: float,
 ) -> dict | None:
-    """只用結算同源且新鮮的 Chainlink 60 秒 TWAP 建立方向單。"""
+    """還原原始晚進場規則，只把 Binance 方向來源換成 Chainlink 60 秒 TWAP。"""
     if (
         remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS
         or remaining_seconds < sim.LATE_DIRECTION_MIN_ENTRY_REMAINING
@@ -416,12 +412,6 @@ def _late_direction_plan(
     if abs(delta_pct) < sim.LATE_DIRECTION_MIN_DELTA_PCT:
         return None
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
-    bids, asks = book.get("bids") or [], book.get("asks") or []
-    if not bids or not asks:
-        return None
-    market_probability = (max(float(x["price"]) for x in bids) + min(float(x["price"]) for x in asks)) / 2
-    if market_probability < LATE_DIRECTION_MIN_MARKET_PROB:
-        return None
     # 跟模擬版對齊：不把股數縮到「當下看得到的深度」——真正的 FOK 語意是要嘛整筆用
     # 目標股數成交、要嘛深度不夠就整筆不成交，不會自動改成「有多少吃多少」。這裡故意
     # 不呼叫 _ask_depth 縮股，讓 _buy_plan 內部的 simulate_buy_fill 用同一套全有全無
@@ -433,7 +423,6 @@ def _late_direction_plan(
     plan["_signalSource"] = "chainlink_twap_60s"
     plan["_signalObservedAt"] = signal["observedAt"]
     plan["_signalAgeSeconds"] = signal["ageSeconds"]
-    plan["_marketProbability"] = market_probability
     return plan
 
 
@@ -452,7 +441,7 @@ async def _try_late_direction_entry(
         return False
     log.info(
         f"[LIVE] 晚進場方向性 {plan['side']} Chainlink60 Δ={plan['_deltaPct']:+.3f}% "
-        f"market={plan['_marketProbability']:.3f} age={plan['_signalAgeSeconds']:.3f}s "
+        f"age={plan['_signalAgeSeconds']:.3f}s "
         f"剩餘={remaining_seconds:.1f}s"
     )
     result = await _enter_position(slug, plan, dry_run)
@@ -1643,16 +1632,11 @@ async def _run_ws_late_direction_entry(
         up_book, down_book = sim.state.get("upBook"), sim.state.get("downBook")
         if not dry_run and (not up_book or not down_book or not _live_books_are_coherent(up_book, down_book)):
             return
-        remaining = max(0.0, sim.state["windowEndsAt"] / 1000 - sim.real_now())
-        latest_plan = _late_direction_plan(up_book, down_book, remaining, float(plan["shares"]))
-        if not latest_plan or latest_plan["side"] != plan["side"]:
-            return
         log.info(
-            f"[LIVE] 晚進場方向性 {latest_plan['side']} Chainlink60 "
-            f"Δ={latest_plan['_deltaPct']:+.3f}% market={latest_plan['_marketProbability']:.3f} "
-            f"age={latest_plan['_signalAgeSeconds']:.3f}s（WS 即時觸發）"
+            f"[LIVE] 晚進場方向性 {plan['side']} Chainlink60 "
+            f"Δ={plan['_deltaPct']:+.3f}% age={plan['_signalAgeSeconds']:.3f}s（WS 即時觸發）"
         )
-        result = await _enter_position(slug, latest_plan, dry_run)
+        result = await _enter_position(slug, plan, dry_run)
         if result == "filled":
             live_state["position"]["strategy"] = "late_direction"
             save_live_state()
@@ -1699,7 +1683,7 @@ def _log_startup_banner(mode: str) -> None:
             f"  單腿方向性下注已啟用：Chainlink {sim.CHAINLINK_TWAP_WINDOW_SECONDS}s TWAP，剩餘 "
             f"{sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
             f"{sim.LATE_DIRECTION_WINDOW_SECONDS:.0f}s、偏移開盤價>={sim.LATE_DIRECTION_MIN_DELTA_PCT:.2f}%、"
-            f"市場同向機率>={LATE_DIRECTION_MIN_MARKET_PROB:.2f}、進場價<=${LATE_DIRECTION_MAX_PRICE}"
+            f"不要求市場同向、進場價<=${LATE_DIRECTION_MAX_PRICE}"
         )
     else:
         log.info("  單腿方向性下注已停用（POLY_ENABLE_LATE_DIRECTION=false）")

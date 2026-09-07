@@ -151,15 +151,13 @@ MM_REQUOTE_SECONDS        = 2.0
 MM_STOP_QUOTING_SECONDS   = 20.0
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
-# 在窗口最後 20 秒使用 window delta：不是在窗口一開始就靠模型優勢
+# 在窗口最後 10 秒使用 window delta：不是在窗口一開始就靠模型優勢
 # 賭單邊（那條退路驗證下來是 0% 勝率，2026-09 起已對其他變體關閉），而是等到窗口
 # 快結束、現價已經明顯偏離「這個窗口開盤時的價格」——這時已經沒什麼時間反轉，
 # 訊號的確定性遠比窗口剛開盤時高很多。
-LATE_DIRECTION_WINDOW_SECONDS      = 20.0  # 提早觀察，避開最後幾秒訂單簿單邊化
-LATE_DIRECTION_MIN_ENTRY_REMAINING = 5.0   # 剩不到這個秒數就別進了，怕來不及成交
+LATE_DIRECTION_WINDOW_SECONDS      = 10.0  # 還原 12:24:56 那筆所用的最後 10 秒窗口
+LATE_DIRECTION_MIN_ENTRY_REMAINING = 3.0   # 還原原策略；只替換方向價格來源為 Chainlink
 LATE_DIRECTION_MIN_DELTA_PCT       = 0.02  # Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 的最低偏移
-LATE_DIRECTION_MIN_MARKET_PROB     = 0.55  # Polymarket 自己也必須同方向，拒絕逆著近乎確定的市場下注
-
 # 2026-08-14 起 5 分鐘 crypto 市場以 Chainlink 60 秒 TWAP 的窗口起／終值結算。
 # RTDS 是 Polymarket 官方建議的免憑證 production feed。方向性策略只能使用這份來源；
 # Binance 仍保留給圖表與非結算公平價模型，不可再拿來判斷最終 Up/Down。
@@ -248,7 +246,7 @@ for _asset in ASSETS:
     AB_VARIANTS.append({
         "id":                    f"{_asset['id']}-chainlink-late-direction",
         "assetId":               _asset["id"],
-        "label":                 f"{_asset['label']} Chainlink 晚進場方向性（T-20s）",
+        "label":                 f"{_asset['label']} Chainlink 晚進場方向性（T-10s）",
         "entryMaxPrice":         None,
         "lockMaxSum":            SIM_LOCK_MAX_SUM,
         "lateDirectionOnly":     True,
@@ -1291,8 +1289,8 @@ def _try_late_direction_entry(
 ) -> None:
     """晚進場方向性策略：只依結算同源的 Chainlink 60 秒 TWAP 判斷。
 
-    Binance 與市場實際使用的 Chainlink TWAP 可能方向相反，因此不再允許 Binance
-    spot 作為替代來源；Polymarket 訂單簿也必須同意該方向，避免逆著市場下注。
+    還原 12:24:56 那筆所用的原始進場條件；唯一差異是以 Chainlink TWAP 取代
+    Binance spot 判斷方向。原策略不要求 Polymarket 訂單簿同方向。
     """
     if remaining_seconds > LATE_DIRECTION_WINDOW_SECONDS or remaining_seconds < LATE_DIRECTION_MIN_ENTRY_REMAINING:
         return
@@ -1304,12 +1302,6 @@ def _try_late_direction_entry(
     if abs(delta_pct) < LATE_DIRECTION_MIN_DELTA_PCT:
         return
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
-    bids, asks = book.get("bids") or [], book.get("asks") or []
-    if not bids or not asks:
-        return
-    market_probability = (max(float(x["price"]) for x in bids) + min(float(x["price"]) for x in asks)) / 2
-    if market_probability < LATE_DIRECTION_MIN_MARKET_PROB:
-        return
     shares, budget = _target_order_size(variant_id)
     if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
         return

@@ -298,7 +298,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(strategy.live_state["position"])
 
         filled = await strategy._try_late_direction_entry(
-            "btc-window", up_book, down_book, remaining_seconds=4.0, shares=10.0, dry_run=True
+            "btc-window", up_book, down_book, remaining_seconds=2.0, shares=10.0, dry_run=True
         )
         self.assertFalse(filled)
         self.assertIsNone(strategy.live_state["position"])
@@ -308,7 +308,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]}
         down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]}
         filled = await strategy._try_late_direction_entry(
-            "btc-window", up_book, down_book, remaining_seconds=15.0, shares=10.0, dry_run=True
+            "btc-window", up_book, down_book, remaining_seconds=5.0, shares=10.0, dry_run=True
         )
         self.assertTrue(filled)
         pos = strategy.live_state["position"]
@@ -316,11 +316,13 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pos["strategy"], "late_direction")
         self.assertFalse(pos["hedged"])
 
-    def test_late_direction_rejects_chainlink_market_disagreement(self):
+    def test_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 100}], "bids": [{"price": 0.97, "size": 100}]}
-        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.03, "size": 100}], "bids": [{"price": 0.02, "size": 100}]}
-        self.assertIsNone(strategy._late_direction_plan(up_book, down_book, 5.0, 10.0))
+        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.20, "size": 100}], "bids": []}
+        plan = strategy._late_direction_plan(up_book, down_book, 5.0, 10.0)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["side"], "Down")
 
     def test_direct_pair_checks_worst_case_limit_and_fees(self):
         up_book = {
@@ -814,7 +816,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         unwind.assert_awaited_once_with(None, "saved_single_leg")
 
     async def test_no_new_entry_after_window_closed(self):
-        # 90 秒門檻已經拿掉（鎖利不需要、晚進場方向性還得靠它才能在剩不到 20 秒時動作），
+        # 90 秒門檻已經拿掉（鎖利不需要、晚進場方向性還得靠它才能在剩不到 10 秒時動作），
         # 現在唯一會擋新倉位的是「已經沒剩餘時間」。
         with patch.object(strategy, "_strategy_cash", AsyncMock()) as cash:
             await strategy.evaluate_and_act("btc-window", None, 0.0, {"fairUp": 0.5, "fairDown": 0.5})

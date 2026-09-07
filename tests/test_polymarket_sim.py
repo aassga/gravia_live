@@ -135,10 +135,9 @@ class PolymarketSimulationTests(unittest.TestCase):
         up_book = {"tickSize": 0.01, "minOrderSize": 5.0, "asks": [{"price": 0.39, "size": 500.0}], "bids": []}
         down_book = {"tickSize": 0.01, "minOrderSize": 5.0, "asks": [{"price": 0.39, "size": 500.0}], "bids": []}
 
-        with patch.object(
-            sim.time,
-            "monotonic",
-            side_effect=[100.0, 100.0 + sim.LIVE_MIRROR_STABILITY_SECONDS + 0.01],
+        with (
+            patch.dict(sim.AB_VARIANT_BY_ID["btc-live-lock"], {"stabilitySeconds": 0.15}),
+            patch.object(sim.time, "monotonic", side_effect=[100.0, 100.16]),
         ):
             self.assertFalse(sim._try_direct_pair("btc-live-lock", "btc-window", up_book, down_book))
             self.assertTrue(sim._try_direct_pair("btc-live-lock", "btc-window", up_book, down_book))
@@ -216,14 +215,14 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=30.0)
         self.assertIsNone(sim.ab_states["btc-chainlink-late-direction"]["position"])
 
-        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=4.0)
+        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=2.0)
         self.assertIsNone(sim.ab_states["btc-chainlink-late-direction"]["position"])
 
     def test_late_direction_enters_favored_side_near_close(self):
         self._set_chainlink_signal()
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": [{"price": 0.39, "size": 1_000.0}]}
-        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=15.0)
+        sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
         pos = sim.ab_states["btc-chainlink-late-direction"]["position"]
         self.assertIsNotNone(pos)
         self.assertEqual(pos["side"], "Up")
@@ -238,12 +237,14 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=4.0, fair=None)
         self.assertFalse(sim.ab_states["btc-chainlink-late-direction"]["position"]["hedged"])
 
-    def test_late_direction_rejects_market_disagreement(self):
+    def test_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.98, "size": 1_000.0}], "bids": [{"price": 0.97, "size": 1_000.0}]}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.03, "size": 1_000.0}], "bids": [{"price": 0.02, "size": 1_000.0}]}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.20, "size": 1_000.0}], "bids": []}
         sim._try_late_direction_entry("btc-chainlink-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
-        self.assertIsNone(sim.ab_states["btc-chainlink-late-direction"]["position"])
+        pos = sim.ab_states["btc-chainlink-late-direction"]["position"]
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos["side"], "Down")
 
     def test_chainlink_signal_rejects_stale_observation(self):
         self._set_chainlink_signal()
