@@ -317,7 +317,7 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-historical-hybrid",
             "assetId":               "btc",
-            "label":                 "BTC ????????Binance T-10s?",
+            "label":                 "BTC 歷史混合（鎖利→Binance T-10s）",
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateDirectionOnly":     True,
@@ -1951,9 +1951,9 @@ def simulate_trading(
     if pos is None:
         if remaining_seconds is None or remaining_seconds <= 0:
             return
-        # ???? 2026-09-03 ????????????????????????
-        # ???????? T-3?10 ??? Binance window delta ?????????
-        # ????????????????????????????????
+        # 獨立重現 2026-09-03 的舊混合流程：整個窗口先找兩腿直接鎖利，只有沒有
+        # 合格配對時，才在 T-3～10 秒使用 Binance window delta 嘗試單腿方向進場。
+        # 報價一致性、完整深度、滑價、費用與最低淨利仍由現行模擬防護負責。
         if variant.get("historicalHybrid"):
             if _try_direct_pair(variant_id, slug, up_book, down_book):
                 return
