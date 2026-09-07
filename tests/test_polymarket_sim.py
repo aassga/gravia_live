@@ -381,6 +381,22 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual([v["id"] for v in variants], ["eth-mm"])
         self.assertTrue(variants[0]["marketMakerOnly"])
 
+    def test_altcoin_catalog_has_current_five_minute_markets(self):
+        expected = {
+            "eth-alt": ("eth-updown-5m-", "ETHUSDT"),
+            "sol": ("sol-updown-5m-", "SOLUSDT"),
+            "xrp": ("xrp-updown-5m-", "XRPUSDT"),
+            "bnb": ("bnb-updown-5m-", "BNBUSDT"),
+            "doge": ("doge-updown-5m-", "DOGEUSDT"),
+            "hype": ("hype-updown-5m-", "HYPEUSDT"),
+            "zec": ("zec-updown-5m-", "ZECUSDT"),
+        }
+        catalog = {asset["id"]: asset for asset in sim.ASSET_CATALOG}
+        for asset_id, (slug_prefix, symbol) in expected.items():
+            self.assertEqual(catalog[asset_id]["slugPrefix"], slug_prefix)
+            self.assertEqual(catalog[asset_id]["binanceSymbol"], symbol)
+            self.assertFalse(catalog[asset_id].get("marketMakerOnly", False))
+
     def test_eth_maker_waits_for_queue_ahead_before_fill(self):
         self._prepare_eth_mm()
         up_book, down_book = self._eth_mm_books()

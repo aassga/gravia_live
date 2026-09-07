@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gravia · 非 BTC 虛擬貨幣模擬盤</title>
+  <style>
+    html,body,iframe{width:100%;height:100%;margin:0;border:0;background:#080808;overflow:hidden}
+  </style>
+</head>
+<body>
+  <iframe id="dashboard" title="非 BTC 虛擬貨幣模擬盤"></iframe>
+  <script>
+    const params=new URLSearchParams(location.search);
+    params.set('port',params.get('port')||'8769');
+    document.getElementById('dashboard').src='polymarket.html?'+params.toString();
+  </script>
+</body>
+</html>

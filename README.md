@@ -98,6 +98,19 @@ VPS 上的 ETH MM 以 `deploy/gravia-eth-mm.service` 獨立執行：只載入 ET
 
 Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計費用與最大回撤。紙上結果仍不是實盤收益保證。
 
+### 本機非 BTC 虛擬貨幣模擬盤
+
+另一個頁面 `web/polymarket_altcoins.html` 追蹤 Polymarket 的 ETH、SOL、XRP、BNB、DOGE、HYPE、ZEC 5 分鐘 Up/Down 市場。用獨立資料庫與埠啟動，避免混入 BTC 紀錄：
+
+```powershell
+$env:POLY_SIM_ASSETS='eth-alt,sol,xrp,bnb,doge,hype,zec'
+$env:POLY_SIM_PORT='8769'
+$env:POLY_SIM_DB_PATH="$PWD/polymarket_altcoins.sqlite3"
+py -3.14 polymarket_server.py
+```
+
+接著開啟 `web/polymarket_altcoins.html`。這個進程不帶 `--with-live`，只做紙上模擬，不會送出真實訂單。各幣種先跑三組兩腿鎖利；因尚未逐幣接入結算同源的 Chainlink RTDS feed，不建立非 BTC 的方向性策略。
+
 ## 真實自動下單
 
 `polymarket_live_strategy.py` 已同步紙上模擬的深度 VWAP、最差限價判斷、滑點、資金預留與淨鎖利規則。直接配對進場會先預熱新市場 token 的建單 metadata 與 V2 動態費率，再把 Up／Down 兩筆 FOK 放進同一次 `POST /orders` batch，減少兩個獨立 request 的到達時間差。成交後會優先從成交紀錄回填真實均價；暫時查不到時則以送出的保守限價記帳。Batch 仍不保證兩筆原子成交，因此其中一腿失敗時仍會先補該腿，最後才嘗試緊急賣回已成交腿。

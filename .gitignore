@@ -15,9 +15,14 @@ polymarket_live_strategy_state.json.tmp
 polymarket_sim.sqlite3
 polymarket_sim.sqlite3-wal
 polymarket_sim.sqlite3-shm
+polymarket_altcoins.sqlite3
+polymarket_altcoins.sqlite3-wal
+polymarket_altcoins.sqlite3-shm
 
 # 執行期產生的 log，不進版控
 logs/
+polymarket_altcoins.out.log
+polymarket_altcoins.err.log
 
 # 測試快取
 tests/__pycache__/

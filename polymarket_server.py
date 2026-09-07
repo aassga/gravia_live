@@ -185,6 +185,13 @@ ASSET_CATALOG = [
     {"id": "btc-15m", "label": "BTC 15m",  "slugPrefix": "btc-updown-15m-", "binanceSymbol": "BTCUSDT", "windowSeconds": 900},
     {"id": "btc-4h",  "label": "BTC 4h",   "slugPrefix": "btc-updown-4h-",  "binanceSymbol": "BTCUSDT", "windowSeconds": 14400},
     {"id": "eth",     "label": "ETH MM",   "slugPrefix": "eth-updown-5m-",  "binanceSymbol": "ETHUSDT", "windowSeconds": 300, "marketMakerOnly": True},
+    {"id": "eth-alt", "label": "ETH",      "slugPrefix": "eth-updown-5m-",  "binanceSymbol": "ETHUSDT", "windowSeconds": 300},
+    {"id": "sol",     "label": "SOL",      "slugPrefix": "sol-updown-5m-",  "binanceSymbol": "SOLUSDT", "windowSeconds": 300},
+    {"id": "xrp",     "label": "XRP",      "slugPrefix": "xrp-updown-5m-",  "binanceSymbol": "XRPUSDT", "windowSeconds": 300},
+    {"id": "bnb",     "label": "BNB",      "slugPrefix": "bnb-updown-5m-",  "binanceSymbol": "BNBUSDT", "windowSeconds": 300},
+    {"id": "doge",    "label": "DOGE",     "slugPrefix": "doge-updown-5m-", "binanceSymbol": "DOGEUSDT", "windowSeconds": 300},
+    {"id": "hype",    "label": "HYPE",     "slugPrefix": "hype-updown-5m-", "binanceSymbol": "HYPEUSDT", "windowSeconds": 300},
+    {"id": "zec",     "label": "ZEC",      "slugPrefix": "zec-updown-5m-",  "binanceSymbol": "ZECUSDT", "windowSeconds": 300},
 ]
 _default_asset_ids = "btc,btc-15m,btc-4h" if WITH_LIVE else "btc,btc-15m,btc-4h,eth"
 _enabled_asset_ids = {
@@ -243,15 +250,18 @@ for _asset in ASSETS:
             "minDepthMultiplier":       LIVE_MIRROR_DEPTH_MULTIPLIER,
             "stabilitySeconds":         LIVE_MIRROR_STABILITY_SECONDS,
         })
-    AB_VARIANTS.append({
-        "id":                    f"{_asset['id']}-chainlink-late-direction",
-        "assetId":               _asset["id"],
-        "label":                 f"{_asset['label']} Chainlink 晚進場方向性（T-10s）",
-        "entryMaxPrice":         None,
-        "lockMaxSum":            SIM_LOCK_MAX_SUM,
-        "lateDirectionOnly":     True,
-        "lateDirectionMaxPrice": 0.92,
-    })
+    # 方向性策略必須使用跟市場結算同源的 RTDS feed。目前只實作 BTC/USD
+    # Chainlink 60 秒 TWAP；其他幣種先只跑兩腿鎖利，不用 Binance 冒充結算來源。
+    if _asset["binanceSymbol"] == "BTCUSDT":
+        AB_VARIANTS.append({
+            "id":                    f"{_asset['id']}-chainlink-late-direction",
+            "assetId":               _asset["id"],
+            "label":                 f"{_asset['label']} Chainlink 晚進場方向性（T-10s）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateDirectionOnly":     True,
+            "lateDirectionMaxPrice": 0.92,
+        })
 del _asset
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
 MARKET_MAKER_VARIANTS = [v for v in AB_VARIANTS if v.get("marketMakerOnly")]
