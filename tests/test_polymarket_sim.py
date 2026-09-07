@@ -261,10 +261,10 @@ class PolymarketSimulationTests(unittest.TestCase):
             "type": "subscribe",
             "payload": {
                 "symbol": "btc/usd",
+                "window_s": 60,
                 "data": [{
                     "timestamp": start * 1000,
                     "full_accuracy_value": "100500000000000000000",
-                    "window_s": 60,
                 }],
             },
         })

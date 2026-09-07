@@ -895,7 +895,12 @@ def _apply_chainlink_twap_message(message: dict) -> int:
     rows = payload.get("data") if isinstance(payload.get("data"), list) else [payload]
     applied = 0
     for row in rows:
-        if not isinstance(row, dict) or int(row.get("window_s", 0) or 0) != CHAINLINK_TWAP_WINDOW_SECONDS:
+        if not isinstance(row, dict):
+            continue
+        # RTDS 的即時 update 把 window_s 放在單筆 payload；初始 subscribe history
+        # 則放在外層 payload，data 內的每筆 observation 不會重複帶這個欄位。
+        window_seconds = row.get("window_s", payload.get("window_s", 0))
+        if int(window_seconds or 0) != CHAINLINK_TWAP_WINDOW_SECONDS:
             continue
         try:
             observed_ms = int(row["timestamp"])
