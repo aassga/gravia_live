@@ -114,8 +114,8 @@ LIVE_MIRROR_ASSET_ID            = os.environ.get("POLY_LIVE_ASSET_ID", "btc")
 LIVE_MIRROR_STAKE_PCT           = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
 LIVE_MIRROR_MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 LIVE_MIRROR_MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
-LIVE_MIRROR_LOCK_MAX_SUM        = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM", "0.92"))))
-LIVE_MIRROR_DEPTH_MULTIPLIER    = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "2.0")))
+LIVE_MIRROR_LOCK_MAX_SUM        = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM", "0.95"))))
+LIVE_MIRROR_DEPTH_MULTIPLIER    = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "1.0")))
 LIVE_MIRROR_STABILITY_SECONDS   = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.15")))
 # 股數封頂在「當下看得到的深度」的這個比例。2026-09：實盤好幾次撞到「模擬盤跟實盤在
 # 同一秒看到同一個機會，模擬盤保證吃得到、實盤卻因為深度不夠被拒」——這不是 bug，是
