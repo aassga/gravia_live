@@ -308,6 +308,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual(pos["side"], "Down")
 
     def test_btc_15m_uses_only_dedicated_lock_and_adaptive_direction_variants(self):
+        self.assertNotIn("btc-4h", [asset["id"] for asset in sim.ASSETS])
         variants = [v for v in sim.AB_VARIANTS if v["assetId"] == "btc-15m"]
         self.assertEqual(
             [v["id"] for v in variants],

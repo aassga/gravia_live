@@ -213,7 +213,7 @@ ASSET_CATALOG = [
     {"id": "hype",    "label": "HYPE",     "slugPrefix": "hype-updown-5m-", "binanceSymbol": "HYPEUSDT", "windowSeconds": 300},
     {"id": "zec",     "label": "ZEC",      "slugPrefix": "zec-updown-5m-",  "binanceSymbol": "ZECUSDT", "windowSeconds": 300},
 ]
-_default_asset_ids = "btc,btc-15m,btc-4h" if WITH_LIVE else "btc,btc-15m,btc-4h,eth"
+_default_asset_ids = "btc,btc-15m" if WITH_LIVE else "btc,btc-15m,eth"
 _enabled_asset_ids = {
     value.strip() for value in os.environ.get("POLY_SIM_ASSETS", _default_asset_ids).split(",") if value.strip()
 }
