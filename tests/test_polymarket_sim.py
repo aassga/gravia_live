@@ -58,6 +58,13 @@ class PolymarketSimulationTests(unittest.TestCase):
         ms["spotPrice"] = current
         return ms
 
+    def _fresh_ws_book(self, book: dict) -> dict:
+        return {
+            **book,
+            "quoteSource": "websocket",
+            "receivedAtMonotonic": time.monotonic(),
+        }
+
     def tearDown(self):
         if sim._sim_db is not None:
             sim._sim_db.close()
@@ -228,8 +235,8 @@ class PolymarketSimulationTests(unittest.TestCase):
 
     def test_late_direction_enters_favored_side_near_close(self):
         self._set_binance_signal()
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": [{"price": 0.39, "size": 1_000.0}]}
+        up_book = self._fresh_ws_book({"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]})
+        down_book = {"quoteSource": "rest_fallback", "tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": [{"price": 0.39, "size": 1_000.0}]}
         sim._try_late_direction_entry("btc-binance-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
         pos = sim.ab_states["btc-binance-late-direction"]["position"]
         self.assertIsNotNone(pos)
@@ -250,8 +257,9 @@ class PolymarketSimulationTests(unittest.TestCase):
 
     def test_historical_hybrid_prioritizes_direct_pair(self):
         self._set_binance_signal()
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+        received_at = time.monotonic()
+        up_book = {"quoteSource": "websocket", "receivedAtMonotonic": received_at, "tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+        down_book = {"quoteSource": "websocket", "receivedAtMonotonic": received_at, "tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
 
         sim.simulate_trading("btc-historical-hybrid", "btc-window", up_book, down_book, 5.0, None)
 
@@ -262,8 +270,8 @@ class PolymarketSimulationTests(unittest.TestCase):
 
     def test_historical_hybrid_falls_back_to_chainlink_late_direction(self):
         self._set_chainlink_signal(opening=100.0, current=100.5)
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": []}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+        up_book = self._fresh_ws_book({"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": []})
+        down_book = {"quoteSource": "rest_fallback", "tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
 
         sim.simulate_trading("btc-historical-hybrid", "btc-window", up_book, down_book, 5.0, None)
 
@@ -291,7 +299,7 @@ class PolymarketSimulationTests(unittest.TestCase):
 
     def test_late_direction_position_never_auto_hedges(self):
         self._set_binance_signal()
-        up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]}
+        up_book = self._fresh_ws_book({"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": [{"price": 0.60, "size": 1_000.0}]})
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": [{"price": 0.29, "size": 1_000.0}]}  # 便宜到能鎖利
         sim._try_late_direction_entry("btc-binance-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
         self.assertFalse(sim.ab_states["btc-binance-late-direction"]["position"]["hedged"])
@@ -301,7 +309,7 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_binance_signal(opening=100.0, current=99.5)
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.98, "size": 1_000.0}], "bids": [{"price": 0.97, "size": 1_000.0}]}
-        down_book = {"tickSize": 0.01, "asks": [{"price": 0.20, "size": 1_000.0}], "bids": []}
+        down_book = self._fresh_ws_book({"tickSize": 0.01, "asks": [{"price": 0.20, "size": 1_000.0}], "bids": []})
         sim._try_late_direction_entry("btc-binance-late-direction", "btc-window", up_book, down_book, remaining_seconds=5.0)
         pos = sim.ab_states["btc-binance-late-direction"]["position"]
         self.assertIsNotNone(pos)

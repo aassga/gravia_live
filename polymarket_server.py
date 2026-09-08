@@ -1633,6 +1633,8 @@ def _try_late_direction_entry(
     if abs(delta_pct) < LATE_DIRECTION_MIN_DELTA_PCT:
         return
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
+    if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
+        return
     shares, budget = _target_order_size(variant_id)
     if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
         return
@@ -1968,7 +1970,10 @@ def simulate_trading(
         # 合格配對時，才在 T-3～10 秒使用指定的方向訊號嘗試單腿方向進場。
         # 報價一致性、完整深度、滑價、費用與最低淨利仍由現行模擬防護負責。
         if variant.get("historicalHybrid"):
-            if _try_direct_pair(variant_id, slug, up_book, down_book):
+            if (
+                _simulation_books_are_coherent(variant["assetId"], up_book, down_book)
+                and _try_direct_pair(variant_id, slug, up_book, down_book)
+            ):
                 return
             _try_late_direction_entry(variant_id, slug, up_book, down_book, remaining_seconds)
             return
@@ -2234,6 +2239,39 @@ def _simulation_book_guard_reason(
     return None
 
 
+def _simulation_single_book_guard_reason(book: dict, now: float | None = None) -> str | None:
+    """Return why one directional BUY book is unsafe, without requiring the opposite leg."""
+    if book.get("quoteSource") != "websocket":
+        return "方向腿不是來自 WebSocket 完整快照"
+    received_at = book.get("receivedAtMonotonic")
+    if not isinstance(received_at, (int, float)):
+        return "方向腿缺少接收時間"
+    current = time.monotonic() if now is None else float(now)
+    age = current - float(received_at)
+    if age < -0.05:
+        return f"方向腿接收時間異常 age={age:.3f}s"
+    if age > SIM_BOOK_MAX_AGE_SECONDS:
+        return f"方向腿報價過舊 age={age:.3f}s"
+    return None
+
+
+def _simulation_direction_book_is_fresh(
+    asset_id: str,
+    side: str,
+    book: dict,
+    now: float | None = None,
+) -> bool:
+    reason = _simulation_single_book_guard_reason(book, now)
+    if reason is None:
+        return True
+    current = time.monotonic() if now is None else float(now)
+    log_key = f"{asset_id}:direction:{side.lower()}"
+    if current - _sim_data_guard_log_at.get(log_key, 0.0) >= SIM_DATA_GUARD_LOG_SECONDS:
+        _sim_data_guard_log_at[log_key] = current
+        log.info(f"[SIM-DATA-GUARD:{log_key}] 跳過模擬成交：{reason}")
+    return False
+
+
 def _simulation_books_are_coherent(
     asset_id: str,
     up_book: dict,
@@ -2252,8 +2290,13 @@ def _simulation_books_are_coherent(
 
 
 def _variant_books_are_coherent(asset_id: str, variant: dict, up_book: dict, down_book: dict) -> bool:
-    """15 分鐘方向組可接受稍大的雙腿更新差；鎖利組仍維持全域限制。"""
+    """Dispatch each strategy only after the data it actually uses is safe."""
     is_15m_direction = variant.get("directionProfile") == "btc-15m-adaptive"
+    # BTC 5m direction variants validate only their selected BUY leg after the
+    # signal determines the side. Pair strategies still require both legs. The
+    # 15m adaptive direction retains both because it uses both market mids.
+    if variant.get("lateDirectionOnly") and not is_15m_direction:
+        return True
     max_skew = (
         BTC_15M_DIRECTION_BOOK_MAX_SKEW_SECONDS
         if is_15m_direction

@@ -439,6 +439,8 @@ def _late_direction_plan(
     if abs(delta_pct) < sim.LATE_DIRECTION_MIN_DELTA_PCT:
         return None
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
+    if not _live_direction_book_is_fresh(side, book):
+        return None
     # 跟模擬版對齊：不把股數縮到「當下看得到的深度」——真正的 FOK 語意是要嘛整筆用
     # 目標股數成交、要嘛深度不夠就整筆不成交，不會自動改成「有多少吃多少」。這裡故意
     # 不呼叫 _ask_depth 縮股，讓 _buy_plan 內部的 simulate_buy_fill 用同一套全有全無
@@ -450,6 +452,8 @@ def _late_direction_plan(
     plan["_signalSource"] = signal_source
     plan["_signalObservedAt"] = signal_observed_at
     plan["_signalAgeSeconds"] = signal_age_seconds
+    plan["_bookQuoteSource"] = book.get("quoteSource")
+    plan["_bookReceivedAtMonotonic"] = book.get("receivedAtMonotonic")
     return plan
 
 
@@ -652,6 +656,19 @@ def _live_books_are_coherent(up_book: dict, down_book: dict) -> bool:
     if now - _live_data_guard_log_at >= sim.SIM_DATA_GUARD_LOG_SECONDS:
         _live_data_guard_log_at = now
         log.warning(f"[LIVE-DATA-GUARD] 跳過真實下單：{reason}")
+    return False
+
+
+def _live_direction_book_is_fresh(side: str, book: dict) -> bool:
+    """Direction orders only need a fresh WebSocket snapshot for the selected BUY leg."""
+    global _live_data_guard_log_at
+    reason = sim._simulation_single_book_guard_reason(book)
+    if reason is None:
+        return True
+    now = time.monotonic()
+    if now - _live_data_guard_log_at >= sim.SIM_DATA_GUARD_LOG_SECONDS:
+        _live_data_guard_log_at = now
+        log.warning(f"[LIVE-DATA-GUARD] 跳過方向性下單 {side}：{reason}")
     return False
 
 
@@ -922,7 +939,14 @@ def _warn_if_shares_corrected(label: str, plan: dict, execution: dict, dry_run: 
 
 
 async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
-    if not dry_run:
+    if plan.get("_signalSource"):
+        selected_snapshot = {
+            "quoteSource": plan.get("_bookQuoteSource"),
+            "receivedAtMonotonic": plan.get("_bookReceivedAtMonotonic"),
+        }
+        if not _live_direction_book_is_fresh(plan["side"], selected_snapshot):
+            return "not_filled"
+    elif not dry_run:
         up_book, down_book = sim.state.get("upBook"), sim.state.get("downBook")
         if not up_book or not down_book or not _live_books_are_coherent(up_book, down_book):
             return "not_filled"
@@ -1370,8 +1394,6 @@ async def evaluate_and_act(
         if remaining_seconds is None or remaining_seconds <= 0:
             return
         dry_run = not REAL_EXECUTION_ENABLED
-        if not dry_run and not _live_books_are_coherent(up_book, down_book):
-            return
         if not dry_run and live_state.get("preflightSlug") != slug:
             if not await _ensure_no_unmanaged_current_position():
                 return
@@ -1397,10 +1419,13 @@ async def evaluate_and_act(
 
         if DIRECT_PAIR_ENABLED:
             # 股數先按可見深度封頂；純方向性模式完全略過這段，不會先建立鎖利部位。
-            depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
-            depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
-            paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
-            direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
+            direct = None
+            paired_shares = 0.0
+            if _live_books_are_coherent(up_book, down_book):
+                depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
+                depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
+                paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
+                direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
             if direct:
                 if not sim.pair_candidate_is_stable(
                     "live:pair",
@@ -1546,8 +1571,6 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
         if remaining <= 0:
             return
         dry_run = not REAL_EXECUTION_ENABLED
-        if not dry_run and not _live_books_are_coherent(up_book, down_book):
-            return
         if not dry_run and live_state.get("preflightSlug") != slug:
             # 真實模式每個窗口第一次要做的 preflight 檢查需要真的等網路 I/O，不屬於這條
             # 零延遲路徑該做的事，留給 3 秒輪詢那條路（原本的 evaluate_and_act）處理。
@@ -1564,10 +1587,13 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
             return
 
         if DIRECT_PAIR_ENABLED:
-            depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
-            depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
-            paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
-            direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
+            direct = None
+            paired_shares = 0.0
+            if _live_books_are_coherent(up_book, down_book):
+                depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
+                depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
+                paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
+                direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
             if direct:
                 if not sim.pair_candidate_is_stable(
                     "live:pair",

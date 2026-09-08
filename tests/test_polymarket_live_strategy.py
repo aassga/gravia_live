@@ -57,6 +57,13 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "chainlinkTwapObservedAt": now_ms,
         })
 
+    def _fresh_ws_book(self, book: dict) -> dict:
+        return {
+            **book,
+            "quoteSource": "websocket",
+            "receivedAtMonotonic": time.monotonic(),
+        }
+
     def tearDown(self):
         strategy.STATE_FILE = self._old_state_file
         self._tmpdir.cleanup()
@@ -330,8 +337,8 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             if strategy._LIVE_VARIANT.get("directionSignalSource") == "binance_window"
             else "chainlink_twap_60s"
         )
-        up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]}
-        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]}
+        up_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]})
+        down_book = {"quoteSource": "rest_fallback", "tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]}
         filled = await strategy._try_late_direction_entry(
             "btc-window", up_book, down_book, remaining_seconds=5.0, shares=10.0, dry_run=True
         )
@@ -350,7 +357,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             else "chainlink_twap_60s"
         )
         up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 100}], "bids": [{"price": 0.97, "size": 100}]}
-        down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.20, "size": 100}], "bids": []}
+        down_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.20, "size": 100}], "bids": []})
         plan = strategy._late_direction_plan(up_book, down_book, 5.0, 10.0)
         self.assertIsNotNone(plan)
         self.assertEqual(plan["side"], "Down")
@@ -867,18 +874,18 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "outcomes": json.dumps(["Up", "Down"]),
             "clobTokenIds": json.dumps(["up-token", "down-token"]),
         }
-        strategy.sim.state["upBook"] = {
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
             "tickSize": 0.01,
             "minOrderSize": 1,
             "asks": [{"price": 0.39, "size": 100}],
             "bids": [{"price": 0.38, "size": 100}],
-        }
-        strategy.sim.state["downBook"] = {
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
             "tickSize": 0.01,
             "minOrderSize": 1,
             "asks": [{"price": 0.39, "size": 100}],
             "bids": [{"price": 0.38, "size": 100}],
-        }
+        })
         with (
             patch.object(strategy, "DIRECT_PAIR_ENABLED", True),
             patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
@@ -973,6 +980,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             patch.object(strategy.sim, "_ws_last_message_at", time.monotonic()),
             patch.object(strategy.sim, "_ws_snapshot_tokens", {"up-token", "down-token"}),
             patch.object(strategy.sim, "_ws_books", books),
+            patch.object(strategy.sim, "_ws_book_updated_at", {"up-token": time.monotonic(), "down-token": time.monotonic()}),
             patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
             patch.object(trader, "build_order", side_effect=AssertionError("dry-run must not sign")),
         ):
@@ -1001,14 +1009,14 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         }
         depth = 40  # 深度防護封頂後仍高於最低下單金額，且低於資金可買的股數
                     # 換算出的股數上限，才能確定是深度、不是資金，在限制最終股數。
-        strategy.sim.state["upBook"] = {
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
             "tickSize": 0.01, "minOrderSize": 1,
             "asks": [{"price": 0.10, "size": depth}], "bids": [],
-        }
-        strategy.sim.state["downBook"] = {
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
             "tickSize": 0.01, "minOrderSize": 1,
             "asks": [{"price": 0.10, "size": depth}], "bids": [],
-        }
+        })
         # 現金給大一點，確保是深度（不是資金）在限制股數，跟本機 .env 的 STAKE_PCT 設多少無關。
         with (
             patch.object(strategy, "DIRECT_PAIR_ENABLED", True),
