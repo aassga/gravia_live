@@ -1,4 +1,4 @@
-# Polymarket BTC/ETH Up/Down Dashboard
+# Polymarket BTC Up/Down Dashboard
 
 ## 實盤報價來源
 
@@ -12,7 +12,7 @@ REST 訂單簿仍可供畫面與風險退出參考，但禁止用來建立新的
 `source=rest_fallback` 代表畫面正在使用備援，並不代表允許實盤進場。這項變更不會略過
 `LIVE_TRADING` 與 `POLY_STRATEGY_ARMED` 兩道真實送單開關。
 
-使用 Polymarket 真實市場資料執行 BTC/ETH 5 分鐘 Up/Down 紙上交易模擬，
+使用 Polymarket 真實市場資料執行 BTC 5／15 分鐘 Up/Down 紙上交易模擬，
 並提供獨立、預設停用的真實下單工具。
 
 ## 資料夾結構
@@ -73,7 +73,7 @@ Windows 上如果 `python` 指令沒反應（跳出 Microsoft Store），請改�
 |------|------|---------|
 | Up/Down 報價、訂單簿 | Polymarket CLOB API | 每 3 秒 |
 | 市場窗口、結算結果 | Polymarket Gamma API | 每 3 秒 |
-| BTC/ETH 參考價、K 線 | Binance Futures API | 每 3 秒 |
+| BTC 參考價、K 線 | Binance Futures API | 每 3 秒 |
 | BTC 5m 方向性實驗訊號 | Binance Futures 即時價 | WebSocket 即時 |
 | BTC 15m／4h 方向性結算訊號 | Polymarket RTDS（Chainlink 60 秒 TWAP） | 每秒 |
 
@@ -94,11 +94,7 @@ Windows 上如果 `python` 指令沒反應（跳出 Microsoft Store），請改�
 - 每次下注百分比是「完整兩腿配對」的資金上限，會預留第二腿與費用。
 - 紙上模擬與實盤預設每組都使用資產組合的 15%；實盤仍會套用單組金額上限與現金保留額。
 - 持倉、已結算交易、費用與報價會寫入 `polymarket_sim.sqlite3`，服務重啟後可續跑。
-- `ETH MM` 是獨立的純模擬 maker 策略：同時維護 Up／Down 被動 BUY 報價，價差至少兩格時改善 best bid 一格，否則加入 best bid。成交採保守 queue-ahead 模型，必須先由真實市場成交量消耗掛價當下看到的前方深度，再完整吃到模擬股數才記為成交；不假設排在隊首、不計 maker rebate，距結算 20 秒停止新掛價。
-- ETH maker 逐腿記錄成交；兩腿完成才記為鎖利。只成交首腿時最多等待 15 秒，之後依序嘗試正收益 taker 配對及 taker 平倉，不再刻意把方向性曝險留到結算。Dashboard 顯示掛價、成交、配對、救援與目前虛擬掛價。
 - 所有紙上成交都受雙腿資料一致性防護：Up／Down 必須同時來自 WebSocket 完整快照、各自不超過 2 秒，且接收時間差不超過 0.5 秒。重連期間或 REST fallback 報價仍可顯示，但禁止用來建立模擬交易。
-
-VPS 上的 ETH MM 以 `deploy/gravia-eth-mm.service` 獨立執行：只載入 ETH、使用 8768 與獨立的 `polymarket_eth_mm.sqlite3`，且不帶 `--with-live`，因此不可能啟動真實策略。CPU quota 與較低排程優先級可避免干擾 BTC 實盤。首腿 maker 掛價最高為 `$0.60`；首腿成交後若 15 秒仍未配對，模擬器會先嘗試以 taker 買入另一腿鎖住至少 1¢/股淨利，沒有正收益配對時則立即按持有腿 bid 模擬平倉。Dashboard 的 `makerStats` 會統計救援嘗試、成功配對、平倉與失敗次數。用 SSH 將 8768 轉發到本機後，開啟 `web/polymarket.html?asset=eth&port=8768` 監控。
 
 Dashboard 會分開顯示鎖利交易、方向性交易、提早退出、累計費用與最大回撤。紙上結果仍不是實盤收益保證。
 
@@ -116,19 +112,6 @@ BTC 5 分鐘方向性策略只要求準備買入的方向腿具備新鮮 WebSock
 - `BTC 15m Chainlink 自適應方向性`：只在 T-20～60 秒評估，必須有精確窗口開盤 Chainlink TWAP 與 2.5 秒內的最新值。方向偏移至少 `0.04%`，並用最近 5 分鐘、不重疊 10 秒區間的 Chainlink TWAP 波動按剩餘時間估算維持方向機率；估計機率至少 `75%`、所選方向腿 mid 至少 `55%`、spread 最多 `5¢`、保守買價最多 `$0.88`，且扣費後模型 edge 至少 `3¢/股`。訊號及全部風控需同方向連續成立 `0.75s`，限價內深度至少 `1.25x`。方向組只要求實際買入腿具備新鮮 WebSocket Bid/Ask，不再因未使用的對向腿缺少報價而跳過；鎖利組仍要求兩腿更新時間差最多 `0.50s`。單腿每次使用資產 `7%`、最多 `$10`，並保留 `$10` 現金。
 
 方向組的下注股數直接以單腿實際決策成本和費用反推，不再錯用兩腿預算公式。這些門檻是保守的紙上驗證起點，必須累積足夠樣本、分別檢查勝率、期望值、最大回撤與訊號拒絕原因後，才適合討論實盤。
-
-### 本機非 BTC 虛擬貨幣模擬盤
-
-另一個頁面 `web/polymarket_altcoins.html` 追蹤 Polymarket 的 ETH、SOL、XRP、BNB、DOGE、HYPE、ZEC 5 分鐘 Up/Down 市場。用獨立資料庫與埠啟動，避免混入 BTC 紀錄：
-
-```powershell
-$env:POLY_SIM_ASSETS='eth-alt,sol,xrp,bnb,doge,hype,zec'
-$env:POLY_SIM_PORT='8769'
-$env:POLY_SIM_DB_PATH="$PWD/polymarket_altcoins.sqlite3"
-py -3.14 polymarket_server.py
-```
-
-接著開啟 `web/polymarket_altcoins.html`。這個進程不帶 `--with-live`，只做紙上模擬，不會送出真實訂單。各幣種先跑三組兩腿鎖利；因尚未逐幣接入結算同源的 Chainlink RTDS feed，不建立非 BTC 的方向性策略。
 
 ## 真實自動下單
 
