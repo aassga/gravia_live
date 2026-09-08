@@ -194,6 +194,7 @@ def _fetch_state() -> dict:
             "minNetLockPerShare": strategy.sim.SIM_MIN_NET_LOCK_PER_SHARE,
             "lateDirectionMaxPrice": strategy.LATE_DIRECTION_MAX_PRICE,
             "lateDirectionEnabled": strategy.ENABLE_LATE_DIRECTION,
+            "directPairEnabled": strategy.DIRECT_PAIR_ENABLED,
             "lateDirectionSignal": (
                 "Binance Futures 窗口漲跌（比較實驗）"
                 if strategy._LIVE_VARIANT.get("directionSignalSource") == "binance_window"

@@ -78,9 +78,16 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.LIVE_VARIANT_ID, expected)
         self.assertEqual(strategy._LIVE_DIRECTION_VARIANT_ID, expected)
         self.assertEqual(strategy._LIVE_VARIANT["assetId"], strategy.LIVE_ASSET_ID)
+        expected_direct_pair = not strategy._LIVE_VARIANT.get("lateDirectionOnly") or bool(
+            strategy._LIVE_VARIANT.get("historicalHybrid")
+        )
+        self.assertEqual(strategy.DIRECT_PAIR_ENABLED, expected_direct_pair)
         if expected == "btc-loose":
             self.assertEqual(strategy._LIVE_VARIANT["lockMaxSum"], 0.98)
             self.assertFalse(strategy.ENABLE_LATE_DIRECTION)
+        if expected == "btc-binance-late-direction":
+            self.assertTrue(strategy.ENABLE_LATE_DIRECTION)
+            self.assertFalse(strategy.DIRECT_PAIR_ENABLED)
 
     def test_sdk_transaction_hash_polling_is_disabled_without_changing_initial_response(self):
         class FakeClient:
@@ -318,6 +325,11 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_late_direction_enters_favored_side_near_close(self):
         self._set_chainlink_signal()
+        expected_source = (
+            "binance_futures_window"
+            if strategy._LIVE_VARIANT.get("directionSignalSource") == "binance_window"
+            else "chainlink_twap_60s"
+        )
         up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]}
         down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]}
         filled = await strategy._try_late_direction_entry(
@@ -327,17 +339,22 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         pos = strategy.live_state["position"]
         self.assertEqual(pos["side"], "Up")
         self.assertEqual(pos["strategy"], "late_direction")
-        self.assertEqual(pos["signalSource"], "chainlink_twap_60s")
+        self.assertEqual(pos["signalSource"], expected_source)
         self.assertFalse(pos["hedged"])
 
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
+        expected_source = (
+            "binance_futures_window"
+            if strategy._LIVE_VARIANT.get("directionSignalSource") == "binance_window"
+            else "chainlink_twap_60s"
+        )
         up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 100}], "bids": [{"price": 0.97, "size": 100}]}
         down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.20, "size": 100}], "bids": []}
         plan = strategy._late_direction_plan(up_book, down_book, 5.0, 10.0)
         self.assertIsNotNone(plan)
         self.assertEqual(plan["side"], "Down")
-        self.assertEqual(plan["_signalSource"], "chainlink_twap_60s")
+        self.assertEqual(plan["_signalSource"], expected_source)
 
     def test_direct_pair_checks_worst_case_limit_and_fees(self):
         up_book = {
@@ -863,6 +880,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "bids": [{"price": 0.38, "size": 100}],
         }
         with (
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", True),
             patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
             patch.object(trader, "build_order", side_effect=AssertionError("dry-run must not sign")),
         ):
@@ -950,6 +968,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         }
         decision_lock = asyncio.Lock()
         with (
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", True),
             patch.object(strategy.sim, "_ws_connected", True),
             patch.object(strategy.sim, "_ws_last_message_at", time.monotonic()),
             patch.object(strategy.sim, "_ws_snapshot_tokens", {"up-token", "down-token"}),
@@ -992,6 +1011,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         }
         # 現金給大一點，確保是深度（不是資金）在限制股數，跟本機 .env 的 STAKE_PCT 設多少無關。
         with (
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", True),
             patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
             patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100_000.0)),
         ):

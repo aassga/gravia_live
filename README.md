@@ -133,6 +133,7 @@ py -3.14 polymarket_server.py
 - `POLY_VALIDATE_ORDER_PATH=true`：安全驗證模式。每個新市場預熱並簽署兩筆 FOK，但硬性禁止 `POST /orders`；即使另外兩個開關誤設為 `true` 也不會真實執行。
 - `POLY_ENABLE_LATE_DIRECTION=false`：預設禁止窗口末端的單腿方向性下注；只有明確改成 `true` 才會啟用。BTC 5m 啟用後會在剩餘 3–10 秒內使用 Polymarket RTDS Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 判斷方向，不要求 Polymarket 訂單簿同方向。
 - `POLY_LIVE_VARIANT_ID=btc-historical-hybrid`：選擇實盤要對齊的模擬策略。測試 `btc-loose` 時是兩腿鎖利、合計上限 `$0.98`；名稱中的 `$0.45` 是舊單腿欄位，現行兩腿專用流程不使用它。
+- 設為 `POLY_LIVE_VARIANT_ID=btc-binance-late-direction` 並開啟 `POLY_ENABLE_LATE_DIRECTION=true` 時，實盤會成為純 `BTC Binance 晚進場方向性（T-10s）`：不先嘗試兩腿鎖利，只在剩餘 3–10 秒按 Binance Futures 窗口漲跌訊號評估單腿進場。
 - `POLY_MAX_PAIR_BUDGET_USD=25`：每組兩腿最多 25 USDC。
 - `POLY_MIN_CASH_RESERVE_USD=5`：至少保留 5 USDC 現金。
 - `POLY_STAKE_PCT=15`：每組兩腿預算為可用現金的 15%。

@@ -98,6 +98,11 @@ if _LIVE_VARIANT["assetId"] != LIVE_ASSET_ID:
 # btc-loose 等兩腿策略即使環境殘留 true，也不會意外啟用方向性下注。
 _LIVE_DIRECTION_VARIANT_ID = LIVE_VARIANT_ID
 ENABLE_LATE_DIRECTION = _LATE_DIRECTION_REQUESTED and bool(_LIVE_VARIANT.get("lateDirectionOnly"))
+# 純晚進場方向性變體不能先被兩腿鎖利部位占用；歷史混合變體則保留「先鎖利、
+# 找不到才方向性」的既有流程。
+DIRECT_PAIR_ENABLED = not bool(_LIVE_VARIANT.get("lateDirectionOnly")) or bool(
+    _LIVE_VARIANT.get("historicalHybrid")
+)
 # 2026-09-07 實盤再次出現「快照上兩腿合計 0.92，但 346ms 後只成交一腿」。公開 API
 # 的 batch 不是原子交易，因此把門檻收緊、要求限價內有數倍深度，並只接受持續存在的機會。
 # 這些參數也由 btc-live-lock 模擬組讀取，避免模擬與實盤再次使用不同條件。
@@ -1390,28 +1395,26 @@ async def evaluate_and_act(
         if budget < 1.0 or shares < 1.0:
             return
 
-        # 先試鎖利（找不到就空手，不賭單邊——這條退路模擬盤驗證下來是 0% 勝率，
-        # 詳見對話紀錄）；鎖不到才在窗口快結束時改用晚進場方向性當備案。
-        # 股數先按可見深度的 sim.SIM_DEPTH_CAP_FRACTION 封頂，跟模擬版 sim._try_direct_pair
-        # 對齊（見該常數註解）；封頂後再無條件捨去到整數，對應真實下單實際能送出的精度。
-        depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
-        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
-        paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
-        direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
-        if direct:
-            if not sim.pair_candidate_is_stable(
-                "live:pair",
-                slug,
-                paired_shares,
-                direct[0]["limitPrice"],
-                direct[1]["limitPrice"],
-                PAIR_STABILITY_SECONDS,
-            ):
+        if DIRECT_PAIR_ENABLED:
+            # 股數先按可見深度封頂；純方向性模式完全略過這段，不會先建立鎖利部位。
+            depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
+            depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
+            paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
+            direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
+            if direct:
+                if not sim.pair_candidate_is_stable(
+                    "live:pair",
+                    slug,
+                    paired_shares,
+                    direct[0]["limitPrice"],
+                    direct[1]["limitPrice"],
+                    PAIR_STABILITY_SECONDS,
+                ):
+                    return
+                sim.clear_pair_candidate("live:pair")
+                await _execute_direct_pair(session, slug, direct[0], direct[1], fair, dry_run)
                 return
             sim.clear_pair_candidate("live:pair")
-            await _execute_direct_pair(session, slug, direct[0], direct[1], fair, dry_run)
-            return
-        sim.clear_pair_candidate("live:pair")
         if ENABLE_LATE_DIRECTION:
             await _try_late_direction_entry(slug, up_book, down_book, remaining_seconds, shares, dry_run)
         return
@@ -1560,27 +1563,28 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
         if budget < 1.0 or shares < 1.0:
             return
 
-        depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
-        depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
-        paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
-        direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
-        if direct:
-            if not sim.pair_candidate_is_stable(
-                "live:pair",
-                slug,
-                paired_shares,
-                direct[0]["limitPrice"],
-                direct[1]["limitPrice"],
-                PAIR_STABILITY_SECONDS,
-            ):
+        if DIRECT_PAIR_ENABLED:
+            depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
+            depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
+            paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
+            direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
+            if direct:
+                if not sim.pair_candidate_is_stable(
+                    "live:pair",
+                    slug,
+                    paired_shares,
+                    direct[0]["limitPrice"],
+                    direct[1]["limitPrice"],
+                    PAIR_STABILITY_SECONDS,
+                ):
+                    return
+                sim.clear_pair_candidate("live:pair")
+                _ws_action_in_flight["v"] = True
+                asyncio.get_running_loop().create_task(
+                    _run_ws_pair_entry(session, slug, direct[0], direct[1], fair, dry_run, decision_lock)
+                )
                 return
             sim.clear_pair_candidate("live:pair")
-            _ws_action_in_flight["v"] = True
-            asyncio.get_running_loop().create_task(
-                _run_ws_pair_entry(session, slug, direct[0], direct[1], fair, dry_run, decision_lock)
-            )
-            return
-        sim.clear_pair_candidate("live:pair")
 
         plan = _late_direction_plan(up_book, down_book, remaining, shares) if ENABLE_LATE_DIRECTION else None
         if plan:
@@ -1695,6 +1699,9 @@ def _log_startup_banner(mode: str) -> None:
         f"and unchanged opportunity >= {PAIR_STABILITY_SECONDS:.2f}s"
     )
     log.info(f"  one-leg rescue lock sum <= ${RESCUE_LOCK_MAX_SUM}")
+    log.info(
+        f"  active variant={LIVE_VARIANT_ID} · direct pair={'enabled' if DIRECT_PAIR_ENABLED else 'disabled'}"
+    )
     backend = live.signing_backend_name()
     if backend == "CoinCurveECCBackend":
         log.info(f"  signing backend={backend} (libsecp256k1 accelerated)")
