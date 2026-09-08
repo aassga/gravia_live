@@ -295,7 +295,7 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-15m-chainlink-late-direction",
             "assetId":               "btc-15m",
-            "label":                 "BTC 15m Chainlink 自適應方向性（T-12~30s）",
+            "label":                 "BTC 15m Chainlink 自適應方向性（T-20~60s）",
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateDirectionOnly":     True,
