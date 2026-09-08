@@ -441,6 +441,42 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored["totalTrades"], 7)
         self.assertEqual(restored["position"]["windowSlug"], "btc-window")
 
+    def test_live_window_diagnostics_record_rejection_and_persist(self):
+        up_book = self._fresh_ws_book({
+            "tickSize": 0.01,
+            "minOrderSize": 1,
+            "asks": [{"price": 0.48, "size": 100}],
+            "bids": [],
+        })
+        down_book = self._fresh_ws_book({
+            "tickSize": 0.01,
+            "minOrderSize": 1,
+            "asks": [{"price": 0.49, "size": 100}],
+            "bids": [],
+        })
+        strategy.record_live_window_observation(
+            "btc-window", up_book, down_book, 120.0, "ws"
+        )
+        self.assertIsNone(
+            strategy._direct_pair_plans(
+                up_book, down_book, 10, 100, diagnostic_slug="btc-window"
+            )
+        )
+        strategy.finalize_live_window_diagnostic("btc-window")
+        strategy.flush_live_window_diagnostics()
+
+        restored = strategy._load_live_state()
+        diagnostic = restored["windowDiagnostics"][0]
+        self.assertEqual(diagnostic["windowSlug"], "btc-window")
+        self.assertEqual(diagnostic["executionMode"], "DRY-RUN")
+        self.assertEqual(diagnostic["status"], "no_entry")
+        self.assertEqual(diagnostic["evaluations"], 1)
+        self.assertEqual(diagnostic["evaluationSources"]["ws"], 1)
+        self.assertGreater(
+            diagnostic["reasonCounts"]["pair_price_sum_above_maximum"], 0
+        )
+        self.assertAlmostEqual(diagnostic["bestRawPairAskSum"], 0.97)
+
     async def test_submit_fok_requires_matched_response(self):
         plan = {"limitPrice": 0.40, "shares": 5.0}
         with patch.object(trader, "place_limit_order", return_value={"success": True, "status": "unmatched"}):

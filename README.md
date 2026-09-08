@@ -106,6 +106,8 @@ BTC 5 分鐘方向性策略只要求準備買入的方向腿具備新鮮 WebSock
 
 每個模擬市場窗口都會在 `sim_window_diagnostics` 留下一筆按策略區分的摘要，包括實際訊號偏移、選定方向、ask／深度、最佳兩腿價格、評估次數、各項拒絕原因、是否進場及結算損益。資料每 3 秒批次寫入 SQLite，最近 20 筆也會隨 Dashboard WebSocket payload 的 `windowDiagnostics` 提供，避免逐 tick 寫入拖慢報價處理。
 
+真實下單管線也會在 `polymarket_live_strategy_state.json` 的 `windowDiagnostics` 保留最近 50 個窗口，並由實盤狀態 WebSocket 提供最近 20 個。每筆會標示 `REAL`／`DRY-RUN`、實際使用的策略、兩腿報價與深度、保守限價、Chainlink／Binance 訊號、拒絕原因、候選消失、batch／單腿結果及結算損益；高頻事件只在記憶體聚合，最多每 3 秒寫檔一次。
+
 ### BTC 15 分鐘專用模擬策略
 
 `btc-15m` 不再套用 5 分鐘的三組固定門檻，而是跑兩個專用且獨立記帳的策略：

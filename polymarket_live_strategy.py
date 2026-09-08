@@ -118,6 +118,7 @@ def _new_live_state() -> dict:
         "position": None,
         "pendingSettlements": [],
         "trades": [],
+        "windowDiagnostics": [],
         "totalPnlEstimate": 0.0,
         "totalFeesEstimate": 0.0,
         "totalTrades": 0,
@@ -153,9 +154,11 @@ def _load_live_state() -> dict:
 
 
 live_state = _load_live_state()
+_live_window_diag_dirty = False
 
 
 def save_live_state() -> None:
+    global _live_window_diag_dirty
     live_state["updatedAt"] = time.time()
     tmp_path = STATE_FILE + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -166,6 +169,7 @@ def save_live_state() -> None:
     for attempt in range(5):
         try:
             os.replace(tmp_path, STATE_FILE)
+            _live_window_diag_dirty = False
             return
         except PermissionError:
             if attempt == 4:
@@ -175,10 +179,131 @@ def save_live_state() -> None:
 
 def reset_live_state_for_tests() -> None:
     """只供單元測試在記憶體中清狀態；不會刪除實際狀態檔。"""
-    global _validated_order_path_slug
+    global _validated_order_path_slug, _live_window_diag_dirty
     _validated_order_path_slug = None
     live_state.clear()
     live_state.update(_new_live_state())
+    _live_window_diag_dirty = False
+
+
+def _live_window_diagnostic(slug: str) -> dict:
+    """Return one bounded, persistent diagnostic summary for a live market window."""
+    global _live_window_diag_dirty
+    items = live_state.setdefault("windowDiagnostics", [])
+    execution_mode = "REAL" if REAL_EXECUTION_ENABLED else "DRY-RUN"
+    for item in items:
+        if (
+            item.get("windowSlug") == slug
+            and item.get("strategyVariant") == LIVE_VARIANT_ID
+            and item.get("executionMode") == execution_mode
+        ):
+            return item
+    now = time.time()
+    item = {
+        "windowSlug": slug,
+        "strategyVariant": LIVE_VARIANT_ID,
+        "strategyLabel": _LIVE_VARIANT["label"],
+        "executionMode": execution_mode,
+        "firstSeenAt": now,
+        "lastSeenAt": now,
+        "status": "observing",
+        "evaluations": 0,
+        "diagnosticEvents": 0,
+        "reasonCounts": {},
+        "lastReason": None,
+    }
+    items.insert(0, item)
+    del items[50:]
+    _live_window_diag_dirty = True
+    return item
+
+
+def record_live_window_diagnostic(slug: str, reason: str | None = None, **details) -> dict:
+    """Aggregate live-path evidence in memory; the 3-second loop persists it in one write."""
+    global _live_window_diag_dirty
+    item = _live_window_diagnostic(slug)
+    item["lastSeenAt"] = time.time()
+    if reason is None:
+        item["evaluations"] = int(item.get("evaluations", 0)) + 1
+        source = details.get("evaluationSource")
+        if source:
+            sources = item.setdefault("evaluationSources", {})
+            sources[source] = int(sources.get(source, 0)) + 1
+    else:
+        item["diagnosticEvents"] = int(item.get("diagnosticEvents", 0)) + 1
+        counts = item.setdefault("reasonCounts", {})
+        counts[reason] = int(counts.get(reason, 0)) + 1
+        item["lastReason"] = reason
+    for key, value in details.items():
+        if value is not None:
+            item[key] = value
+    for detail_key, best_key in (
+        ("rawPairAskSum", "bestRawPairAskSum"),
+        ("pairDecisionSum", "bestPairDecisionSum"),
+    ):
+        value = details.get(detail_key)
+        if isinstance(value, (int, float)):
+            prior = item.get(best_key)
+            if prior is None or float(value) < float(prior):
+                item[best_key] = float(value)
+    delta = details.get("signalDeltaPct")
+    if isinstance(delta, (int, float)):
+        prior = item.get("maxAbsSignalDeltaPct")
+        if prior is None or abs(float(delta)) > float(prior):
+            item["maxAbsSignalDeltaPct"] = abs(float(delta))
+    remaining = details.get("remainingSeconds")
+    if isinstance(remaining, (int, float)):
+        item["minRemainingSeconds"] = min(float(remaining), float(item.get("minRemainingSeconds", remaining)))
+        item["maxRemainingSeconds"] = max(float(remaining), float(item.get("maxRemainingSeconds", remaining)))
+    _live_window_diag_dirty = True
+    return item
+
+
+def record_live_window_observation(
+    slug: str,
+    up_book: dict,
+    down_book: dict,
+    remaining_seconds: float | None,
+    evaluation_source: str,
+) -> None:
+    up_asks = up_book.get("asks") or []
+    down_asks = down_book.get("asks") or []
+    up_ask = float(up_asks[0]["price"]) if up_asks else None
+    down_ask = float(down_asks[0]["price"]) if down_asks else None
+    record_live_window_diagnostic(
+        slug,
+        remainingSeconds=remaining_seconds,
+        evaluationSource=evaluation_source,
+        upAsk=up_ask,
+        downAsk=down_ask,
+        upAskDepth=sum(float(level.get("size", 0)) for level in up_asks),
+        downAskDepth=sum(float(level.get("size", 0)) for level in down_asks),
+        rawPairAskSum=(up_ask + down_ask) if up_ask is not None and down_ask is not None else None,
+        upQuoteSource=up_book.get("quoteSource"),
+        downQuoteSource=down_book.get("quoteSource"),
+    )
+
+
+def flush_live_window_diagnostics() -> None:
+    if _live_window_diag_dirty:
+        save_live_state()
+
+
+def finalize_live_window_diagnostic(slug: str) -> None:
+    global _live_window_diag_dirty
+    matching = [
+        item
+        for item in live_state.setdefault("windowDiagnostics", [])
+        if item.get("windowSlug") == slug
+    ]
+    if not matching:
+        matching = [_live_window_diagnostic(slug)]
+    finalized_at = time.time()
+    for item in matching:
+        if not item.get("entryCount"):
+            item["status"] = "no_entry"
+        item["finalizedAt"] = finalized_at
+    _live_window_diag_dirty = True
 
 
 def _set_halt(reason: str, order: dict | None = None) -> None:
@@ -265,6 +390,17 @@ def _record_trade(pos: dict, pnl: float, outcome: str, trade_type: str) -> None:
         live_state["earlyExits"] += 1
     else:
         live_state["directionalTrades"] += 1
+    diagnostic = record_live_window_diagnostic(
+        pos["windowSlug"],
+        "settled",
+        status="settled",
+        outcome=outcome,
+        tradeType=trade_type,
+        pnlEstimate=pnl,
+        feesEstimate=fees,
+        settledAt=trade["exitTime"],
+    )
+    diagnostic["settlementCount"] = int(diagnostic.get("settlementCount", 0)) + 1
     save_live_state()
 
 
@@ -413,16 +549,25 @@ def _late_direction_plan(
     down_book: dict,
     remaining_seconds: float,
     shares: float,
+    diagnostic_slug: str | None = None,
 ) -> dict | None:
     """依實盤選定變體的價格來源建立最後 3～10 秒方向單計畫。"""
     if (
         remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS
         or remaining_seconds < sim.LATE_DIRECTION_MIN_ENTRY_REMAINING
     ):
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug, "outside_direction_window", remainingSeconds=remaining_seconds
+            )
         return None
     if _LIVE_VARIANT.get("directionSignalSource") == "binance_window":
         opening, current = sim.state.get("windowOpenSpotPrice"), sim.state.get("spotPrice")
         if not opening or not current or opening <= 0:
+            if diagnostic_slug:
+                record_live_window_diagnostic(
+                    diagnostic_slug, "missing_binance_signal", remainingSeconds=remaining_seconds
+                )
             return None
         delta_pct = (current - opening) / opening * 100
         signal_source = "binance_futures_window"
@@ -431,22 +576,75 @@ def _late_direction_plan(
     else:
         signal = sim.get_chainlink_twap_signal(LIVE_ASSET_ID)
         if not signal:
+            if diagnostic_slug:
+                record_live_window_diagnostic(
+                    diagnostic_slug, "missing_chainlink_signal", remainingSeconds=remaining_seconds
+                )
             return None
         delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
         signal_source = "chainlink_twap_60s"
         signal_observed_at = signal["observedAt"]
         signal_age_seconds = signal["ageSeconds"]
     if abs(delta_pct) < sim.LATE_DIRECTION_MIN_DELTA_PCT:
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug,
+                "direction_delta_below_minimum",
+                remainingSeconds=remaining_seconds,
+                signalSource=signal_source,
+                signalDeltaPct=delta_pct,
+                signalAgeSeconds=signal_age_seconds,
+                minimumSignalDeltaPct=sim.LATE_DIRECTION_MIN_DELTA_PCT,
+            )
         return None
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
     if not _live_direction_book_is_fresh(side, book):
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug,
+                "direction_book_not_fresh",
+                remainingSeconds=remaining_seconds,
+                signalSource=signal_source,
+                signalDeltaPct=delta_pct,
+                selectedSide=side,
+                dataGuardReason=sim._simulation_single_book_guard_reason(book),
+            )
         return None
     # 跟模擬版對齊：不把股數縮到「當下看得到的深度」——真正的 FOK 語意是要嘛整筆用
     # 目標股數成交、要嘛深度不夠就整筆不成交，不會自動改成「有多少吃多少」。這裡故意
     # 不呼叫 _ask_depth 縮股，讓 _buy_plan 內部的 simulate_buy_fill 用同一套全有全無
     # 判斷，深度不足就直接放棄這次機會，跟模擬版的驗證結果一致。
     plan = _buy_plan(side, book, shares)
-    if not plan or plan["limitPrice"] > LATE_DIRECTION_MAX_PRICE:
+    if not plan:
+        if diagnostic_slug:
+            asks = book.get("asks") or []
+            record_live_window_diagnostic(
+                diagnostic_slug,
+                "direction_insufficient_depth_or_minimum",
+                remainingSeconds=remaining_seconds,
+                signalSource=signal_source,
+                signalDeltaPct=delta_pct,
+                selectedSide=side,
+                selectedAsk=float(asks[0]["price"]) if asks else None,
+                selectedAskDepth=sum(float(level.get("size", 0)) for level in asks),
+                targetShares=shares,
+            )
+        return None
+    if plan["limitPrice"] > LATE_DIRECTION_MAX_PRICE:
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug,
+                "direction_price_above_maximum",
+                remainingSeconds=remaining_seconds,
+                signalSource=signal_source,
+                signalDeltaPct=delta_pct,
+                selectedSide=side,
+                selectedAsk=float((book.get("asks") or [{}])[0].get("price", 0)),
+                pairDecisionSum=None,
+                directionLimitPrice=plan["limitPrice"],
+                directionMaxPrice=LATE_DIRECTION_MAX_PRICE,
+                targetShares=shares,
+            )
         return None
     plan["_deltaPct"] = delta_pct
     plan["_signalSource"] = signal_source
@@ -454,6 +652,19 @@ def _late_direction_plan(
     plan["_signalAgeSeconds"] = signal_age_seconds
     plan["_bookQuoteSource"] = book.get("quoteSource")
     plan["_bookReceivedAtMonotonic"] = book.get("receivedAtMonotonic")
+    if diagnostic_slug:
+        record_live_window_diagnostic(
+            diagnostic_slug,
+            "direction_candidate",
+            status="candidate",
+            remainingSeconds=remaining_seconds,
+            signalSource=signal_source,
+            signalDeltaPct=delta_pct,
+            signalAgeSeconds=signal_age_seconds,
+            selectedSide=side,
+            directionLimitPrice=plan["limitPrice"],
+            targetShares=shares,
+        )
     return plan
 
 
@@ -467,7 +678,9 @@ async def _try_late_direction_entry(
 ) -> bool:
     """3 秒輪詢路徑用的原本介面：判斷＋送單一起做。跟 _on_ws_tick_sync 快速路徑共用
     同一個 _late_direction_plan 判斷邏輯，兩條路不會長歪成不同標準。"""
-    plan = _late_direction_plan(up_book, down_book, remaining_seconds, shares)
+    plan = _late_direction_plan(
+        up_book, down_book, remaining_seconds, shares, diagnostic_slug=slug
+    )
     if not plan:
         return False
     log.info(
@@ -488,20 +701,59 @@ def _target_pair_order(cash: float) -> tuple[float, float]:
     return sim.target_pair_order(cash, STAKE_PCT, LOCK_MAX_SUM, MAX_PAIR_BUDGET_USD, MIN_CASH_RESERVE_USD)
 
 
-def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: float) -> tuple[dict, dict] | None:
+def _direct_pair_plans(
+    up_book: dict,
+    down_book: dict,
+    shares: float,
+    cash: float,
+    diagnostic_slug: str | None = None,
+) -> tuple[dict, dict] | None:
     up = _buy_plan("Up", up_book, shares)
     down = _buy_plan("Down", down_book, shares)
     if not up or not down:
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug,
+                "pair_incomplete_fill_or_minimum",
+                targetShares=shares,
+                upAskDepth=sum(float(level.get("size", 0)) for level in (up_book.get("asks") or [])),
+                downAskDepth=sum(float(level.get("size", 0)) for level in (down_book.get("asks") or [])),
+            )
         return None
     total_cost = up["riskNotional"] + up["fee"] + down["riskNotional"] + down["fee"]
     net_per_share = (shares - total_cost) / shares
-    if up["limitPrice"] + down["limitPrice"] > LOCK_MAX_SUM:
+    decision_sum = up["limitPrice"] + down["limitPrice"]
+    common = {
+        "targetShares": shares,
+        "pairDecisionSum": decision_sum,
+        "pairNetPerShare": net_per_share,
+        "upLimitPrice": up["limitPrice"],
+        "downLimitPrice": down["limitPrice"],
+    }
+    if decision_sum > LOCK_MAX_SUM:
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug, "pair_price_sum_above_maximum", lockMaxSum=LOCK_MAX_SUM, **common
+            )
         return None
     # 跟模擬版 sim._try_direct_pair 對齊：這裡只比對 cash 本身，不再扣一次
     # MIN_CASH_RESERVE_USD——保留額已經在 _target_pair_order／target_pair_order
     # 算股數預算時扣過了，這裡如果再扣一次會變成保留額重複計算，讓實盤比模擬更早
     # 放棄本可成立的鎖利機會。
-    if net_per_share < sim.SIM_MIN_NET_LOCK_PER_SHARE or total_cost > cash:
+    if net_per_share < sim.SIM_MIN_NET_LOCK_PER_SHARE:
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug,
+                "pair_net_edge_below_minimum",
+                minimumNetLockPerShare=sim.SIM_MIN_NET_LOCK_PER_SHARE,
+                **common,
+            )
+        return None
+    if total_cost > cash:
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug, "pair_insufficient_cash", totalRiskCost=total_cost, cashUsd=cash, **common
+            )
         return None
     if not sim.pair_depth_is_safe(
         up_book,
@@ -511,7 +763,18 @@ def _direct_pair_plans(up_book: dict, down_book: dict, shares: float, cash: floa
         shares,
         PAIR_MIN_DEPTH_MULTIPLIER,
     ):
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug,
+                "pair_depth_multiplier_not_met",
+                minimumDepthMultiplier=PAIR_MIN_DEPTH_MULTIPLIER,
+                **common,
+            )
         return None
+    if diagnostic_slug:
+        record_live_window_diagnostic(
+            diagnostic_slug, "pair_candidate", status="candidate", totalRiskCost=total_cost, **common
+        )
     return up, down
 
 
@@ -945,6 +1208,12 @@ async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
             "receivedAtMonotonic": plan.get("_bookReceivedAtMonotonic"),
         }
         if not _live_direction_book_is_fresh(plan["side"], selected_snapshot):
+            record_live_window_diagnostic(
+                slug,
+                "direction_book_stale_at_submit",
+                selectedSide=plan["side"],
+                dataGuardReason=sim._simulation_single_book_guard_reason(selected_snapshot),
+            )
             return "not_filled"
     elif not dry_run:
         up_book, down_book = sim.state.get("upBook"), sim.state.get("downBook")
@@ -952,6 +1221,17 @@ async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
             return "not_filled"
     token_id = _token_id(plan["side"])
     result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
+    record_live_window_diagnostic(
+        slug,
+        f"entry_order_{result}",
+        status="entry_submitted" if result != "filled" else "entered",
+        entryMode="DRY-RUN" if dry_run else "REAL",
+        entrySide=plan["side"],
+        entryLimitPrice=plan["limitPrice"],
+        entryShares=plan["shares"],
+        orderStatus=response.get("status"),
+        orderError=response.get("error") or response.get("errorMsg"),
+    )
     if result == "unconfirmed":
         await _halt_for_unconfirmed(
             f"entry_order_unconfirmed side={plan['side']}",
@@ -967,6 +1247,8 @@ async def _enter_position(slug: str, plan: dict, dry_run: bool) -> str:
     _warn_if_shares_corrected("進場", plan, execution, dry_run)
 
     live_state["position"] = _build_position_dict(slug, plan, response, execution, dry_run)
+    diagnostic = _live_window_diagnostic(slug)
+    diagnostic["entryCount"] = int(diagnostic.get("entryCount", 0)) + 1
     save_live_state()
     tag = "DRY-RUN" if dry_run else "REAL"
     log.warning(
@@ -1020,6 +1302,16 @@ async def _hedge_position(plan: dict, dry_run: bool) -> str:
     pos = live_state["position"]
     token_id = _token_id(plan["side"])
     result, response = await _submit_fok(token_id, "BUY", plan, dry_run)
+    record_live_window_diagnostic(
+        pos["windowSlug"],
+        f"hedge_order_{result}",
+        hedgeMode="DRY-RUN" if dry_run else "REAL",
+        hedgeSide=plan["side"],
+        hedgeLimitPrice=plan["limitPrice"],
+        hedgeShares=plan["shares"],
+        orderStatus=response.get("status"),
+        orderError=response.get("error") or response.get("errorMsg"),
+    )
     if result == "unconfirmed":
         await _halt_for_unconfirmed(
             f"hedge_order_unconfirmed side={plan['side']}",
@@ -1033,6 +1325,10 @@ async def _hedge_position(plan: dict, dry_run: bool) -> str:
 
     execution = await _resolved_execution(plan, response, dry_run)
     _apply_hedge_fields(pos, plan, response, execution)
+    diagnostic = _live_window_diagnostic(pos["windowSlug"])
+    diagnostic["status"] = "entered_locked"
+    diagnostic["hedgeCount"] = int(diagnostic.get("hedgeCount", 0)) + 1
+    diagnostic["lockedPnlEstimate"] = pos.get("lockedPnlEstimate")
     save_live_state()
     tag = "DRY-RUN" if dry_run else "REAL"
     log.warning(
@@ -1221,6 +1517,11 @@ async def _execute_direct_pair(
     dry_run: bool,
 ) -> None:
     if not dry_run and not _live_books_are_coherent(up["book"], down["book"]):
+        record_live_window_diagnostic(
+            slug,
+            "pair_books_stale_at_submit",
+            dataGuardReason=_live_book_guard_reason(up["book"], down["book"]),
+        )
         return
     if fair:
         for plan in (up, down):
@@ -1234,12 +1535,32 @@ async def _execute_direct_pair(
     # 繼續沿用下方的補鎖利／緊急平倉救援。
     up_token = _token_id("Up")
     down_token = _token_id("Down")
+    record_live_window_diagnostic(
+        slug,
+        "pair_batch_submitted",
+        status="pair_submitted",
+        submissionMode="DRY-RUN" if dry_run else "REAL",
+        pairedShares=min(float(up["shares"]), float(down["shares"])),
+        pairDecisionSum=float(up["limitPrice"]) + float(down["limitPrice"]),
+        upLimitPrice=up["limitPrice"],
+        downLimitPrice=down["limitPrice"],
+    )
     (up_result, up_response), (down_result, down_response) = await _submit_fok_pair(
         up_token,
         up,
         down_token,
         down,
         dry_run,
+    )
+    record_live_window_diagnostic(
+        slug,
+        "pair_batch_result",
+        upResult=up_result,
+        downResult=down_result,
+        upOrderStatus=up_response.get("status"),
+        downOrderStatus=down_response.get("status"),
+        upOrderError=up_response.get("error") or up_response.get("errorMsg"),
+        downOrderError=down_response.get("error") or down_response.get("errorMsg"),
     )
 
     unconfirmed_legs = [
@@ -1251,6 +1572,9 @@ async def _execute_direct_pair(
         if result == "unconfirmed"
     ]
     if unconfirmed_legs:
+        record_live_window_diagnostic(
+            slug, "pair_batch_unconfirmed", status="halted_unconfirmed"
+        )
         # 若另一腿已明確 matched，必須先留下已知持倉，不能讓狀態頁顯示空倉。
         known_filled = None
         if up_result == "filled":
@@ -1293,6 +1617,7 @@ async def _execute_direct_pair(
     down_filled = down_result == "filled"
 
     if not up_filled and not down_filled:
+        record_live_window_diagnostic(slug, "pair_batch_not_filled", status="observing")
         log.info("[LIVE] 兩腿 batch 皆未成交，不建立持倉")
         return
 
@@ -1305,6 +1630,14 @@ async def _execute_direct_pair(
         pos = _build_position_dict(slug, up, up_response, up_execution, dry_run)
         live_state["position"] = pos
         _apply_hedge_fields(pos, down, down_response, down_execution)
+        diagnostic = record_live_window_diagnostic(
+            slug,
+            "pair_batch_filled",
+            status="entered_locked",
+            lockedPnlEstimate=pos.get("lockedPnlEstimate"),
+        )
+        diagnostic["entryCount"] = int(diagnostic.get("entryCount", 0)) + 1
+        diagnostic["hedgeCount"] = int(diagnostic.get("hedgeCount", 0)) + 1
         save_live_state()
         tag = "DRY-RUN" if dry_run else "REAL"
         log.warning(
@@ -1321,6 +1654,16 @@ async def _execute_direct_pair(
     _warn_if_shares_corrected("進場", filled_plan, execution, dry_run)
 
     live_state["position"] = _build_position_dict(slug, filled_plan, filled_response, execution, dry_run)
+    diagnostic = record_live_window_diagnostic(
+        slug,
+        "pair_batch_single_leg_filled",
+        status="single_leg_exposure",
+        filledSide=filled_side,
+        failedSide=failed_side,
+        filledLimitPrice=filled_plan["limitPrice"],
+        filledShares=execution["shares"],
+    )
+    diagnostic["entryCount"] = int(diagnostic.get("entryCount", 0)) + 1
     save_live_state()
     tag = "DRY-RUN" if dry_run else "REAL"
     log.warning(
@@ -1361,11 +1704,12 @@ async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:
 
 
 def queue_settlement(slug: str) -> None:
+    finalize_live_window_diagnostic(slug)
     pos = live_state.get("position")
     if pos is not None and pos.get("windowSlug") == slug:
         live_state["pendingSettlements"].append(pos)
         live_state["position"] = None
-        save_live_state()
+    save_live_state()
 
 
 async def evaluate_and_act(
@@ -1376,9 +1720,13 @@ async def evaluate_and_act(
     allow_early_exit: bool = True,
 ) -> None:
     if live_state.get("halted"):
+        record_live_window_diagnostic(
+            slug, "strategy_halted", haltReason=live_state.get("haltReason")
+        )
         return
 
     up_book, down_book = sim.state["upBook"], sim.state["downBook"]
+    record_live_window_observation(slug, up_book, down_book, remaining_seconds, "poll")
     sim.log_price_sum_diagnostic("live-btc", up_book, down_book, LOCK_MAX_SUM)
     pos = live_state.get("position")
 
@@ -1425,7 +1773,28 @@ async def evaluate_and_act(
                 depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
                 depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
                 paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
-                direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
+                direct = (
+                    _direct_pair_plans(
+                        up_book, down_book, paired_shares, cash, diagnostic_slug=slug
+                    )
+                    if paired_shares >= 1.0
+                    else None
+                )
+                if paired_shares < 1.0:
+                    record_live_window_diagnostic(
+                        slug,
+                        "pair_no_common_depth",
+                        targetShares=shares,
+                        pairedShares=paired_shares,
+                        upAskDepth=_ask_depth(up_book),
+                        downAskDepth=_ask_depth(down_book),
+                    )
+            else:
+                record_live_window_diagnostic(
+                    slug,
+                    "pair_books_not_coherent",
+                    dataGuardReason=_live_book_guard_reason(up_book, down_book),
+                )
             if direct:
                 if not sim.pair_candidate_is_stable(
                     "live:pair",
@@ -1435,6 +1804,12 @@ async def evaluate_and_act(
                     direct[1]["limitPrice"],
                     PAIR_STABILITY_SECONDS,
                 ):
+                    record_live_window_diagnostic(
+                        slug,
+                        "pair_stability_wait",
+                        pairedShares=paired_shares,
+                        stabilitySeconds=PAIR_STABILITY_SECONDS,
+                    )
                     return
                 sim.clear_pair_candidate("live:pair")
                 await _execute_direct_pair(session, slug, direct[0], direct[1], fair, dry_run)
@@ -1559,6 +1934,7 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
     remaining = max(0.0, sim.state["windowEndsAt"] / 1000 - sim.real_now())
     fair = sim.estimate_fair_up(LIVE_ASSET_ID)
     _set_quote_status(source_for_status)
+    record_live_window_observation(slug, up_book, down_book, remaining, "ws")
 
     if decision_lock.locked() or _ws_action_in_flight["v"]:
         return
@@ -1593,7 +1969,28 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
                 depth_fraction = min(sim.SIM_DEPTH_CAP_FRACTION, 1.0 / PAIR_MIN_DEPTH_MULTIPLIER)
                 depth_cap = min(_ask_depth(up_book), _ask_depth(down_book)) * depth_fraction
                 paired_shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
-                direct = _direct_pair_plans(up_book, down_book, paired_shares, cash) if paired_shares >= 1.0 else None
+                direct = (
+                    _direct_pair_plans(
+                        up_book, down_book, paired_shares, cash, diagnostic_slug=slug
+                    )
+                    if paired_shares >= 1.0
+                    else None
+                )
+                if paired_shares < 1.0:
+                    record_live_window_diagnostic(
+                        slug,
+                        "pair_no_common_depth",
+                        targetShares=shares,
+                        pairedShares=paired_shares,
+                        upAskDepth=_ask_depth(up_book),
+                        downAskDepth=_ask_depth(down_book),
+                    )
+            else:
+                record_live_window_diagnostic(
+                    slug,
+                    "pair_books_not_coherent",
+                    dataGuardReason=_live_book_guard_reason(up_book, down_book),
+                )
             if direct:
                 if not sim.pair_candidate_is_stable(
                     "live:pair",
@@ -1603,6 +2000,12 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
                     direct[1]["limitPrice"],
                     PAIR_STABILITY_SECONDS,
                 ):
+                    record_live_window_diagnostic(
+                        slug,
+                        "pair_stability_wait",
+                        pairedShares=paired_shares,
+                        stabilitySeconds=PAIR_STABILITY_SECONDS,
+                    )
                     return
                 sim.clear_pair_candidate("live:pair")
                 _ws_action_in_flight["v"] = True
@@ -1612,7 +2015,13 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
                 return
             sim.clear_pair_candidate("live:pair")
 
-        plan = _late_direction_plan(up_book, down_book, remaining, shares) if ENABLE_LATE_DIRECTION else None
+        plan = (
+            _late_direction_plan(
+                up_book, down_book, remaining, shares, diagnostic_slug=slug
+            )
+            if ENABLE_LATE_DIRECTION
+            else None
+        )
         if plan:
             _ws_action_in_flight["v"] = True
             asyncio.get_running_loop().create_task(
@@ -1666,12 +2075,25 @@ async def _run_ws_pair_entry(
         latest_up = sim.state.get("upBook") or up["book"]
         latest_down = sim.state.get("downBook") or down["book"]
         if not dry_run and not _live_books_are_coherent(latest_up, latest_down):
+            record_live_window_diagnostic(
+                slug,
+                "pair_books_stale_at_submit",
+                dataGuardReason=_live_book_guard_reason(latest_up, latest_down),
+            )
             return
         cash = _strategy_cash_sync(dry_run)
         if cash is None:
+            record_live_window_diagnostic(slug, "cash_cache_unavailable_at_submit")
             return
-        latest = _direct_pair_plans(latest_up, latest_down, float(up["shares"]), cash)
+        latest = _direct_pair_plans(
+            latest_up,
+            latest_down,
+            float(up["shares"]),
+            cash,
+            diagnostic_slug=slug,
+        )
         if not latest:
+            record_live_window_diagnostic(slug, "pair_candidate_vanished_before_submit")
             return
         await _execute_direct_pair(session, slug, latest[0], latest[1], fair, dry_run)
 
@@ -1687,6 +2109,15 @@ async def _run_ws_late_direction_entry(
             return
         up_book, down_book = sim.state.get("upBook"), sim.state.get("downBook")
         if not dry_run and (not up_book or not down_book or not _live_books_are_coherent(up_book, down_book)):
+            record_live_window_diagnostic(
+                slug,
+                "direction_books_stale_at_submit",
+                dataGuardReason=(
+                    _live_book_guard_reason(up_book, down_book)
+                    if up_book and down_book
+                    else "missing current book"
+                ),
+            )
             return
         log.info(
             f"[LIVE] 晚進場方向性 {plan['side']} source={plan['_signalSource']} "
@@ -1851,6 +2282,8 @@ async def strategy_loop() -> None:
                 await retry_pending_settlements(session)
             except Exception as exc:
                 log.exception(f"策略迴圈錯誤：{exc}")
+            finally:
+                flush_live_window_diagnostics()
             await asyncio.sleep(POLL_INTERVAL)
 
 
@@ -1909,6 +2342,8 @@ async def run_embedded() -> None:
                     await retry_pending_settlements(session)
                 except Exception as exc:
                     log.exception(f"[LIVE-embedded] 策略迴圈錯誤：{exc}")
+                finally:
+                    flush_live_window_diagnostics()
                 await asyncio.sleep(POLL_INTERVAL)
         finally:
             sim.unregister_ws_price_listener(on_ws_tick)
