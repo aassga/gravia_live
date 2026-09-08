@@ -358,7 +358,8 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertTrue(variants[0]["executionSafePair"])
         self.assertEqual(variants[0]["minDepthMultiplier"], 2.0)
         self.assertEqual(variants[1]["directionProfile"], "btc-15m-adaptive")
-        self.assertEqual(variants[1]["stakePct"], 5.0)
+        self.assertEqual(variants[0]["lockMaxSum"], 0.98)
+        self.assertEqual(variants[1]["stakePct"], 7.0)
 
     def test_btc_15m_lock_requires_continuous_deep_pair(self):
         up_book = {
@@ -392,6 +393,8 @@ class PolymarketSimulationTests(unittest.TestCase):
             "minOrderSize": 5.0,
             "asks": [{"price": 0.80, "size": 1_000.0}],
             "bids": [{"price": 0.79, "size": 1_000.0}],
+            "quoteSource": "websocket",
+            "receivedAtMonotonic": 100.0,
         }
         down_book = {
             "tickSize": 0.01,
@@ -399,7 +402,7 @@ class PolymarketSimulationTests(unittest.TestCase):
             "asks": [{"price": 0.20, "size": 1_000.0}],
             "bids": [{"price": 0.19, "size": 1_000.0}],
         }
-        with patch.object(sim.time, "monotonic", side_effect=[100.0, 101.6]):
+        with patch.object(sim.time, "monotonic", side_effect=[100.0, 100.0, 101.6, 101.6]):
             sim._try_late_direction_entry(
                 "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
             )
@@ -422,12 +425,12 @@ class PolymarketSimulationTests(unittest.TestCase):
         self._set_chainlink_signal(
             opening=100.0, current=100.20, asset_id="btc-15m", slug=slug
         )
-        up_book = {
+        up_book = self._fresh_ws_book({
             "tickSize": 0.01,
             "minOrderSize": 5.0,
             "asks": [{"price": 0.41, "size": 1_000.0}],
             "bids": [{"price": 0.40, "size": 1_000.0}],
-        }
+        })
         down_book = {
             "tickSize": 0.01,
             "minOrderSize": 5.0,
@@ -438,6 +441,31 @@ class PolymarketSimulationTests(unittest.TestCase):
             "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
         )
         self.assertIsNone(sim.ab_states["btc-15m-chainlink-late-direction"]["position"])
+
+    def test_btc_15m_direction_does_not_require_unused_opposite_book(self):
+        slug = "btc-updown-15m-selected-leg-only"
+        self._set_chainlink_signal(
+            opening=100.0, current=100.15, asset_id="btc-15m", slug=slug
+        )
+        up_book = {
+            "tickSize": 0.01,
+            "minOrderSize": 5.0,
+            "asks": [{"price": 0.80, "size": 1_000.0}],
+            "bids": [{"price": 0.79, "size": 1_000.0}],
+            "quoteSource": "websocket",
+            "receivedAtMonotonic": 100.0,
+        }
+        down_book = {"asks": [], "bids": [], "quoteSource": "rest_fallback"}
+        with patch.object(sim.time, "monotonic", side_effect=[100.0, 100.0, 101.6, 101.6]):
+            sim._try_late_direction_entry(
+                "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
+            )
+            sim._try_late_direction_entry(
+                "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
+            )
+        pos = sim.ab_states["btc-15m-chainlink-late-direction"]["position"]
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos["side"], "Up")
 
     def test_btc_15m_signal_scales_confidence_with_remaining_volatility(self):
         now_ms = int(time.time() * 1000)
@@ -556,7 +584,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNone(sim._simulation_book_guard_reason(up, down, now))
         self.assertTrue(sim._simulation_books_are_coherent("btc", up, down, now))
 
-    def test_btc_15m_direction_allows_075s_skew_without_relaxing_lock_variants(self):
+    def test_btc_15m_direction_ignores_opposite_leg_without_relaxing_lock_variants(self):
         now = 100.0
         up = {"quoteSource": "websocket", "receivedAtMonotonic": now - 0.10}
         down = {"quoteSource": "websocket", "receivedAtMonotonic": now - 0.75}

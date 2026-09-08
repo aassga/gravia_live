@@ -176,8 +176,7 @@ BTC_15M_DIRECTION_MAX_SPREAD          = 0.05
 BTC_15M_DIRECTION_MAX_PRICE           = 0.88
 BTC_15M_DIRECTION_DEPTH_MULTIPLIER     = 1.25
 BTC_15M_DIRECTION_STABILITY_SECONDS    = 0.75
-BTC_15M_DIRECTION_BOOK_MAX_SKEW_SECONDS = 0.75
-BTC_15M_DIRECTION_STAKE_PCT            = 5.0
+BTC_15M_DIRECTION_STAKE_PCT            = 7.0
 BTC_15M_DIRECTION_MAX_BUDGET_USD       = 10.0
 BTC_15M_DIRECTION_MIN_CASH_RESERVE_USD = 10.0
 # Chainlink RTDS 仍供 15m／4h 方向性策略與結算觀察使用。BTC 5m 這次刻意改回 Binance
@@ -255,7 +254,7 @@ for _asset in ASSETS:
             "assetId":             "btc-15m",
             "label":               "BTC 15m 深度確認兩腿鎖利",
             "entryMaxPrice":       None,
-            "lockMaxSum":          0.95,
+            "lockMaxSum":          0.98,
             "executionSafePair":   True,
             "stakePct":            10.0,
             "maxPairBudgetUsd":    20.0,
@@ -1637,22 +1636,15 @@ def estimate_btc_15m_direction_signal(
     }
 
 
-def _two_sided_market_probability(up_book: dict, down_book: dict, side: str) -> tuple[float, float] | None:
-    """回傳所選方向的正規化 mid probability 與該腿 spread；缺少雙邊報價就拒絕。"""
-    values = []
-    for book in (up_book, down_book):
-        bids, asks = book.get("bids") or [], book.get("asks") or []
-        if not bids or not asks:
-            return None
-        bid, ask = float(bids[0]["price"]), float(asks[0]["price"])
-        if bid <= 0 or ask <= 0 or ask < bid:
-            return None
-        values.append(((bid + ask) / 2, ask - bid))
-    total_mid = values[0][0] + values[1][0]
-    if total_mid <= 0:
+def _selected_leg_market_probability(book: dict) -> tuple[float, float] | None:
+    """Return the selected token midpoint and spread without requiring the unused opposite leg."""
+    bids, asks = book.get("bids") or [], book.get("asks") or []
+    if not bids or not asks:
         return None
-    index = 0 if side == "Up" else 1
-    return values[index][0] / total_mid, values[index][1]
+    bid, ask = float(bids[0]["price"]), float(asks[0]["price"])
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return None
+    return (bid + ask) / 2, ask - bid
 
 
 def _direction_fill_with_budget(variant_id: str, book: dict) -> tuple[dict, float] | None:
@@ -1726,9 +1718,23 @@ def _try_btc_15m_adaptive_direction_entry(
         reject(reason, signalDeltaPct=metrics["deltaPct"], modelProbability=metrics["probability"])
         return
     side, book = ("Up", up_book) if metrics["deltaPct"] > 0 else ("Down", down_book)
-    market = _two_sided_market_probability(up_book, down_book, side)
+    if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
+        reject(
+            "selected_book_not_fresh",
+            signalDeltaPct=metrics["deltaPct"],
+            modelProbability=metrics["probability"],
+            selectedSide=side,
+            dataGuardReason=_simulation_single_book_guard_reason(book),
+        )
+        return
+    market = _selected_leg_market_probability(book)
     if not market:
-        reject("missing_two_sided_market", signalDeltaPct=metrics["deltaPct"], selectedSide=side)
+        reject(
+            "missing_selected_market",
+            signalDeltaPct=metrics["deltaPct"],
+            modelProbability=metrics["probability"],
+            selectedSide=side,
+        )
         return
     market_probability, spread = market
     if (
@@ -2576,18 +2582,12 @@ def _simulation_books_are_coherent(
 
 def _variant_books_are_coherent(asset_id: str, variant: dict, up_book: dict, down_book: dict) -> bool:
     """Dispatch each strategy only after the data it actually uses is safe."""
-    is_15m_direction = variant.get("directionProfile") == "btc-15m-adaptive"
-    # BTC 5m direction variants validate only their selected BUY leg after the
-    # signal determines the side. Pair strategies still require both legs. The
-    # 15m adaptive direction retains both because it uses both market mids.
-    if variant.get("lateDirectionOnly") and not is_15m_direction:
+    # Every direction-only variant validates its selected BUY leg after the
+    # signal determines the side. Pair strategies still require both legs.
+    if variant.get("lateDirectionOnly"):
         return True
-    max_skew = (
-        BTC_15M_DIRECTION_BOOK_MAX_SKEW_SECONDS
-        if is_15m_direction
-        else SIM_BOOK_MAX_SKEW_SECONDS
-    )
-    log_key = f"{asset_id}:direction" if is_15m_direction else asset_id
+    max_skew = SIM_BOOK_MAX_SKEW_SECONDS
+    log_key = asset_id
     coherent = _simulation_books_are_coherent(
         log_key, up_book, down_book, max_skew_seconds=max_skew
     )
