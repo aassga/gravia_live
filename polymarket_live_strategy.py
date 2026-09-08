@@ -50,7 +50,7 @@ STAKE_PCT = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
 STRATEGY_ARMED = os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
 # Validation mode is a hard safety interlock: it can never submit real orders.
 REAL_EXECUTION_ENABLED = live.LIVE_TRADING and STRATEGY_ARMED and not live.VALIDATE_ORDER_PATH
-ENABLE_LATE_DIRECTION = os.environ.get("POLY_ENABLE_LATE_DIRECTION", "false").strip().lower() == "true"
+_LATE_DIRECTION_REQUESTED = os.environ.get("POLY_ENABLE_LATE_DIRECTION", "false").strip().lower() == "true"
 MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
 DRY_RUN_BALANCE_USD = max(1.0, float(os.environ.get("POLY_DRY_RUN_BALANCE_USD", "100.0")))
@@ -79,19 +79,25 @@ LIVE_ASSET_ID = os.environ.get("POLY_LIVE_ASSET_ID", "btc")
 if LIVE_ASSET_ID != "btc":
     sim.state = sim.markets_state[LIVE_ASSET_ID]  # 重新指向對應資產的市場狀態（見 sim.state 的定義）
 
-# 真實版套用模擬版 A/B 測試裡「LIVE_ASSET_ID 晚進場方向性」這組
-# （BTC 5m 為 btc-historical-hybrid，其餘窗口仍是 Chainlink variant）。這裡引用 AB_VARIANT_BY_ID
-# 而不是直接寫死數字，是為了跟模擬版共用同一個真實來源，模擬版調整這組門檻時真實版會
-# 自動跟著同步。
-# 2026-09：BTC 5m 採歷史混合流程，先嘗試實盤防護下的兩腿鎖利，找不到才在最後
-# 3～10 秒使用 Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 的方向訊號。
-# 晚進場方向性參數取自這個變體；兩腿鎖利的實盤防護仍由下方獨立環境變數控制。
-_LIVE_DIRECTION_VARIANT_ID = (
+# 真實版可用環境變數選擇模擬盤的同資產策略，讓兩邊共用同一組策略定義。
+# 未設定時保留原本的歷史混合策略；VPS 測試其他策略時不需要再修改程式碼。
+_DEFAULT_LIVE_VARIANT_ID = (
     "btc-historical-hybrid"
     if LIVE_ASSET_ID == "btc"
     else f"{LIVE_ASSET_ID}-chainlink-late-direction"
 )
-_LIVE_VARIANT = sim.AB_VARIANT_BY_ID[_LIVE_DIRECTION_VARIANT_ID]
+LIVE_VARIANT_ID = os.environ.get("POLY_LIVE_VARIANT_ID", _DEFAULT_LIVE_VARIANT_ID).strip()
+if LIVE_VARIANT_ID not in sim.AB_VARIANT_BY_ID:
+    raise RuntimeError(f"未知的 POLY_LIVE_VARIANT_ID: {LIVE_VARIANT_ID}")
+_LIVE_VARIANT = sim.AB_VARIANT_BY_ID[LIVE_VARIANT_ID]
+if _LIVE_VARIANT["assetId"] != LIVE_ASSET_ID:
+    raise RuntimeError(
+        f"POLY_LIVE_VARIANT_ID={LIVE_VARIANT_ID} 不屬於 POLY_LIVE_ASSET_ID={LIVE_ASSET_ID}"
+    )
+# 保留舊名稱供既有工具／測試相容。只有明確屬於晚進場方向性的變體才能開啟單腿交易；
+# btc-loose 等兩腿策略即使環境殘留 true，也不會意外啟用方向性下注。
+_LIVE_DIRECTION_VARIANT_ID = LIVE_VARIANT_ID
+ENABLE_LATE_DIRECTION = _LATE_DIRECTION_REQUESTED and bool(_LIVE_VARIANT.get("lateDirectionOnly"))
 # 2026-09-07 實盤再次出現「快照上兩腿合計 0.92，但 346ms 後只成交一腿」。公開 API
 # 的 batch 不是原子交易，因此把門檻收緊、要求限價內有數倍深度，並只接受持續存在的機會。
 # 這些參數也由 btc-live-lock 模擬組讀取，避免模擬與實盤再次使用不同條件。
@@ -99,7 +105,7 @@ LOCK_MAX_SUM = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM"
 PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "1.0")))
 PAIR_STABILITY_SECONDS = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.15")))
 RESCUE_LOCK_MAX_SUM = max(LOCK_MAX_SUM, min(0.99, float(os.environ.get("POLY_RESCUE_LOCK_MAX_SUM", "0.99"))))
-LATE_DIRECTION_MAX_PRICE = _LIVE_VARIANT["lateDirectionMaxPrice"]
+LATE_DIRECTION_MAX_PRICE = float(_LIVE_VARIANT.get("lateDirectionMaxPrice", 0.92))
 
 
 def _new_live_state() -> dict:

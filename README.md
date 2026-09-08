@@ -88,7 +88,7 @@ Windows 上如果 `python` 指令沒反應（跳出 Microsoft Store），請改�
 - 第二腿成交前清楚標為方向性曝險；策略會依模型公平價決定是否提早退出。
 - 公平價使用 Binance Futures 短期波動作為 Chainlink TWAP 的代理，再與 Polymarket 市場隱含機率混合校準；它不是真實 Chainlink feed。
 - `BTC Binance 晚進場方向性` 是獨立的 5 分鐘純方向性實驗組，不再先建立兩腿鎖利部位；它在 T-3～10 秒使用 Binance Futures 即時價相對窗口首次觀察價的偏移判斷方向。這次使用新的 variant id，避免績效混入舊 Chainlink 組。Binance 並非市場結算來源，因此此組只適合比較訊號來源對下單率與損益的影響。
-- `BTC 歷史混合（鎖利→Chainlink T-10s）` 是獨立記帳的模擬組，也是目前 BTC 5 分鐘實盤所對齊的策略：整個窗口先嘗試兩腿直接鎖利，沒有合格配對才在 T-3～10 秒使用 Polymarket RTDS Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 的方向訊號。模擬與實盤都保留現行 WebSocket 報價同步、完整深度、滑價、費用與最低淨利防護；實盤另外套用深度倍數、穩定時間、資金上限與雙開關。
+- `BTC 歷史混合（鎖利→Chainlink T-10s）` 是獨立記帳的模擬組。實盤可用 `POLY_LIVE_VARIANT_ID` 選擇同資產的模擬策略；設定 `btc-loose` 時會對齊 `BTC 寬鬆 0.45/0.98` 的兩腿鎖利流程，並停用單腿方向性。模擬與實盤都保留現行 WebSocket 報價同步、完整深度、滑價、費用與最低淨利防護；實盤另外套用深度倍數、穩定時間、資金上限與雙開關。
 - 每次下注百分比是「完整兩腿配對」的資金上限，會預留第二腿與費用。
 - 紙上模擬與實盤預設每組都使用資產組合的 15%；實盤仍會套用單組金額上限與現金保留額。
 - 持倉、已結算交易、費用與報價會寫入 `polymarket_sim.sqlite3`，服務重啟後可續跑。
@@ -132,11 +132,12 @@ py -3.14 polymarket_server.py
 - `POLY_STRATEGY_ARMED=false`：新增的第二道武裝開關。只有它與 `LIVE_TRADING` 同時為 `true` 才會送出真實策略訂單。
 - `POLY_VALIDATE_ORDER_PATH=true`：安全驗證模式。每個新市場預熱並簽署兩筆 FOK，但硬性禁止 `POST /orders`；即使另外兩個開關誤設為 `true` 也不會真實執行。
 - `POLY_ENABLE_LATE_DIRECTION=false`：預設禁止窗口末端的單腿方向性下注；只有明確改成 `true` 才會啟用。BTC 5m 啟用後會在剩餘 3–10 秒內使用 Polymarket RTDS Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 判斷方向，不要求 Polymarket 訂單簿同方向。
+- `POLY_LIVE_VARIANT_ID=btc-historical-hybrid`：選擇實盤要對齊的模擬策略。測試 `btc-loose` 時是兩腿鎖利、合計上限 `$0.98`；名稱中的 `$0.45` 是舊單腿欄位，現行兩腿專用流程不使用它。
 - `POLY_MAX_PAIR_BUDGET_USD=25`：每組兩腿最多 25 USDC。
 - `POLY_MIN_CASH_RESERVE_USD=5`：至少保留 5 USDC 現金。
 - `POLY_STAKE_PCT=15`：每組兩腿預算為可用現金的 15%。
-- `POLY_LIVE_LOCK_MAX_SUM=0.92`：實盤兩腿保守可成交限價合計上限；門檻越低，理論緩衝越大、機會越少。
-- `POLY_PAIR_MIN_DEPTH_MULTIPLIER=2`：每腿在實際送出限價內的可成交深度，至少要是下單股數的 2 倍。
+- `POLY_LIVE_LOCK_MAX_SUM=0.95`：實盤兩腿保守可成交限價合計上限；測試 `btc-loose` 時設為 `0.98`。門檻越低，理論緩衝越大、機會越少。
+- `POLY_PAIR_MIN_DEPTH_MULTIPLIER=1`：每腿在實際送出限價內的可成交深度，至少要覆蓋下單股數。
 - `POLY_PAIR_STABILITY_SECONDS=0.15`：同一市場的鎖利條件必須連續成立至少 0.15 秒才送單；期間允許價格與股數更新，但每個 tick 都會用最新訂單簿重新驗證。
 - `POLY_RESCUE_LOCK_MAX_SUM=0.99`：已經單腿成交後，只要補腿仍能保住最低淨利，就允許用較寬門檻優先消除曝險。
 - `POLY_ACTION_COOLDOWN_SECONDS=10`：下單嘗試間隔至少 10 秒。

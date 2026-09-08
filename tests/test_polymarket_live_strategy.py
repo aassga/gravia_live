@@ -73,10 +73,14 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(trader.order_response_filled({"status": "matched"}))
         self.assertTrue(trader.order_response_filled({"id": "order-1", "status": "ORDER_STATUS_MATCHED"}))
 
-    def test_btc_live_strategy_uses_historical_chainlink_hybrid(self):
-        self.assertEqual(strategy._LIVE_DIRECTION_VARIANT_ID, "btc-historical-hybrid")
-        self.assertTrue(strategy._LIVE_VARIANT["historicalHybrid"])
-        self.assertEqual(strategy._LIVE_VARIANT["directionSignalSource"], "chainlink_twap")
+    def test_live_strategy_variant_matches_environment(self):
+        expected = os.environ.get("POLY_LIVE_VARIANT_ID", "btc-historical-hybrid")
+        self.assertEqual(strategy.LIVE_VARIANT_ID, expected)
+        self.assertEqual(strategy._LIVE_DIRECTION_VARIANT_ID, expected)
+        self.assertEqual(strategy._LIVE_VARIANT["assetId"], strategy.LIVE_ASSET_ID)
+        if expected == "btc-loose":
+            self.assertEqual(strategy._LIVE_VARIANT["lockMaxSum"], 0.98)
+            self.assertFalse(strategy.ENABLE_LATE_DIRECTION)
 
     def test_sdk_transaction_hash_polling_is_disabled_without_changing_initial_response(self):
         class FakeClient:

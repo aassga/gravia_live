@@ -183,11 +183,8 @@ def _fetch_state() -> dict:
         "trades": trades,
         "strategyState": strategy_state,
         "strategyConfig": {
-            "label": (
-                strategy._LIVE_VARIANT["label"]
-                if strategy.ENABLE_LATE_DIRECTION
-                else f"{strategy.LIVE_ASSET_ID.upper()} 兩腿鎖利（方向性停用）"
-            ),
+            "label": strategy._LIVE_VARIANT["label"],
+            "variantId": strategy.LIVE_VARIANT_ID,
             "assetId": strategy.LIVE_ASSET_ID,
             "stakePct": strategy.STAKE_PCT,
             "lockMaxSum": strategy.LOCK_MAX_SUM,
