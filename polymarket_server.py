@@ -264,6 +264,9 @@ for _asset in ASSETS:
         })
     else:
         for _cfg in _VARIANT_CONFIGS:
+            # BTC 5m 的保守 0.30/0.90 組已停止觀察；其他資產仍保留同組作橫向比較。
+            if _asset["id"] == "btc" and _cfg["key"] == "conservative":
+                continue
             AB_VARIANTS.append({
                 "id":            f"{_asset['id']}-{_cfg['key']}",
                 "assetId":       _asset["id"],

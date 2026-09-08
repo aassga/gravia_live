@@ -239,6 +239,7 @@ class PolymarketSimulationTests(unittest.TestCase):
 
     def test_btc_5m_uses_separate_binance_variant_for_clean_comparison(self):
         ids = [v["id"] for v in sim.AB_VARIANTS if v["assetId"] == "btc"]
+        self.assertNotIn("btc-conservative", ids)
         self.assertIn("btc-binance-late-direction", ids)
         self.assertIn("btc-historical-hybrid", ids)
         self.assertNotIn("btc-chainlink-late-direction", ids)
