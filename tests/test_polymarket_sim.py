@@ -244,6 +244,8 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertNotIn("btc-chainlink-late-direction", ids)
         variant = sim.AB_VARIANT_BY_ID["btc-binance-late-direction"]
         self.assertEqual(variant["directionSignalSource"], "binance_window")
+        hybrid = sim.AB_VARIANT_BY_ID["btc-historical-hybrid"]
+        self.assertEqual(hybrid["directionSignalSource"], "chainlink_twap")
 
     def test_historical_hybrid_prioritizes_direct_pair(self):
         self._set_binance_signal()
@@ -257,8 +259,8 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertTrue(pos["hedged"])
         self.assertGreater(pos["lockedPnl"], 0)
 
-    def test_historical_hybrid_falls_back_to_binance_late_direction(self):
-        self._set_binance_signal(opening=100.0, current=100.5)
+    def test_historical_hybrid_falls_back_to_chainlink_late_direction(self):
+        self._set_chainlink_signal(opening=100.0, current=100.5)
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": []}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
 
@@ -268,7 +270,23 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertFalse(pos["hedged"])
         self.assertEqual(pos["side"], "Up")
-        self.assertEqual(pos["signalSource"], "binance_futures_window")
+        self.assertEqual(pos["signalSource"], "chainlink_twap_60s")
+
+    def test_chainlink_tick_drives_historical_hybrid_but_not_binance_variant(self):
+        ms = self._set_chainlink_signal(opening=100.0, current=100.5)
+        ms["windowEndsAt"] = (time.time() + 5.0) * 1000
+        ms["upBook"] = {"tickSize": 0.01, "asks": [{"price": 0.61, "size": 1_000.0}], "bids": []}
+        ms["downBook"] = {"tickSize": 0.01, "asks": [{"price": 0.40, "size": 1_000.0}], "bids": []}
+
+        with (
+            patch.object(sim, "_simulation_books_are_coherent", return_value=True),
+            patch.object(sim, "simulate_trading") as simulate,
+        ):
+            sim._on_chainlink_twap_tick()
+
+        triggered = [call.args[0] for call in simulate.call_args_list]
+        self.assertIn("btc-historical-hybrid", triggered)
+        self.assertNotIn("btc-binance-late-direction", triggered)
 
     def test_late_direction_position_never_auto_hedges(self):
         self._set_binance_signal()

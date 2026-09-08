@@ -317,12 +317,12 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-historical-hybrid",
             "assetId":               "btc",
-            "label":                 "BTC 歷史混合（鎖利→Binance T-10s）",
+            "label":                 "BTC 歷史混合（鎖利→Chainlink T-10s）",
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateDirectionOnly":     True,
             "historicalHybrid":      True,
-            "directionSignalSource": "binance_window",
+            "directionSignalSource": "chainlink_twap",
             "lateDirectionMaxPrice": 0.92,
         })
     elif _asset["binanceSymbol"] == "BTCUSDT":
@@ -946,7 +946,7 @@ def chainlink_twap_status() -> dict:
 
 
 def _on_chainlink_twap_tick() -> None:
-    """Drive the pure directional simulation and embedded live listener."""
+    """Drive Chainlink directional/hybrid simulations and the embedded live listener."""
     for asset in ASSETS:
         if asset.get("binanceSymbol") != "BTCUSDT":
             continue
@@ -959,9 +959,16 @@ def _on_chainlink_twap_tick() -> None:
             continue
         remaining = None if ms.get("windowEndsAt") is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
         if _simulation_books_are_coherent(aid, up_book, down_book):
-            variant_id = f"{aid}-chainlink-late-direction"
-            if variant_id in AB_VARIANT_BY_ID:
-                simulate_trading(variant_id, market["slug"], up_book, down_book, remaining, ms.get("fair"), False)
+            for variant_id, variant in AB_VARIANT_BY_ID.items():
+                if (
+                    variant["assetId"] == aid
+                    and variant.get("lateDirectionOnly")
+                    and variant.get("directionSignalSource") != "binance_window"
+                ):
+                    simulate_trading(
+                        variant_id, market["slug"], up_book, down_book,
+                        remaining, ms.get("fair"), False,
+                    )
         if aid == "btc" and ms.get("upTokenId"):
             _notify_ws_price_listeners(ms["upTokenId"])
 
@@ -1952,7 +1959,7 @@ def simulate_trading(
         if remaining_seconds is None or remaining_seconds <= 0:
             return
         # 獨立重現 2026-09-03 的舊混合流程：整個窗口先找兩腿直接鎖利，只有沒有
-        # 合格配對時，才在 T-3～10 秒使用 Binance window delta 嘗試單腿方向進場。
+        # 合格配對時，才在 T-3～10 秒使用指定的方向訊號嘗試單腿方向進場。
         # 報價一致性、完整深度、滑價、費用與最低淨利仍由現行模擬防護負責。
         if variant.get("historicalHybrid"):
             if _try_direct_pair(variant_id, slug, up_book, down_book):
