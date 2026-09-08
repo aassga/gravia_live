@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import time
@@ -38,6 +39,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim._sim_data_guard_log_at.clear()
         sim._pair_stability_candidates.clear()
         sim._direction_stability_candidates.clear()
+        sim._window_diag_dirty.clear()
         sim._chainlink_twap_history.clear()
         sim._chainlink_twap_latest.clear()
 
@@ -222,6 +224,37 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.load_sim_state()
         self.assertEqual(sim.ab_states["btc-main"]["totalPnl"], 12.34)
         self.assertIs(sim.sim_state, sim.ab_states["btc-main"])
+
+    def test_window_diagnostics_persist_each_window_and_rejection_reason(self):
+        slug = "btc-updown-5m-diagnostic"
+        sim.start_window_diagnostics("btc", slug, 123_000.0)
+        self._set_binance_signal(opening=100.0, current=100.01)
+        sim.markets_state["btc"]["market"] = {"slug": slug}
+        up_book = self._fresh_ws_book({
+            "tickSize": 0.01,
+            "asks": [{"price": 0.61, "size": 1_000.0}],
+            "bids": [],
+        })
+        down_book = {"quoteSource": "rest_fallback", "asks": [], "bids": []}
+
+        sim._try_late_direction_entry(
+            "btc-binance-late-direction", slug, up_book, down_book, remaining_seconds=5.0
+        )
+        sim.finalize_window_diagnostics(slug)
+        db = sim._get_sim_db()
+        sim.flush_window_diagnostics(db)
+        db.commit()
+
+        row = db.execute(
+            """SELECT diagnostic_json FROM sim_window_diagnostics
+               WHERE run_id=? AND variant_id=? AND window_slug=?""",
+            (1, "btc-binance-late-direction", slug),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        diagnostic = json.loads(row[0])
+        self.assertEqual(diagnostic["status"], "no_entry")
+        self.assertGreater(diagnostic["reasonCounts"]["delta_below_minimum"], 0)
+        self.assertAlmostEqual(diagnostic["maxAbsSignalDeltaPct"], 0.01)
 
     def test_late_direction_skips_outside_window(self):
         self._set_binance_signal()

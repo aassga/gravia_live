@@ -386,6 +386,7 @@ def _new_variant_state() -> dict:
         "peakPortfolio":       SIM_DEFAULT_BALANCE,
         "maxDrawdown":         0.0,
         "makerQuotes":         None,
+        "windowDiagnostics":   [],
         "makerStats": {
             "quotesPlaced": 0,
             "fills": 0,
@@ -401,6 +402,7 @@ def _new_variant_state() -> dict:
 
 ab_states = {v["id"]: _new_variant_state() for v in AB_VARIANTS}
 DEFAULT_VARIANT_ID = "btc-main" if "btc-main" in ab_states else AB_VARIANTS[0]["id"]
+_window_diag_dirty: set[tuple[str, str]] = set()
 
 # 下注比例／起始資產是所有 A/B 組共用的設定，刻意保持一致，
 # 這樣比較結果的差異只來自「進場/鎖利門檻」本身，不會被其他變因干擾。
@@ -411,6 +413,90 @@ shared_config = {
 }
 
 sim_state = ab_states[DEFAULT_VARIANT_ID]
+
+
+def _window_diagnostic(variant_id: str, slug: str) -> dict:
+    """Return the bounded per-window strategy record, creating it on first sight."""
+    items = ab_states[variant_id].setdefault("windowDiagnostics", [])
+    for item in items:
+        if item.get("windowSlug") == slug:
+            return item
+    item = {
+        "windowSlug": slug,
+        "firstSeenAt": time.time(),
+        "lastSeenAt": time.time(),
+        "status": "observing",
+        "evaluations": 0,
+        "reasonCounts": {},
+        "lastReason": None,
+    }
+    items.insert(0, item)
+    del items[50:]
+    _window_diag_dirty.add((variant_id, slug))
+    return item
+
+
+def record_window_diagnostic(
+    variant_id: str,
+    slug: str,
+    reason: str | None = None,
+    **details,
+) -> dict:
+    """Aggregate useful entry evidence without writing one database row per WS tick."""
+    item = _window_diagnostic(variant_id, slug)
+    item["lastSeenAt"] = time.time()
+    if reason is None:
+        item["evaluations"] = int(item.get("evaluations", 0)) + 1
+    else:
+        item["diagnosticEvents"] = int(item.get("diagnosticEvents", 0)) + 1
+    if reason:
+        counts = item.setdefault("reasonCounts", {})
+        counts[reason] = int(counts.get(reason, 0)) + 1
+        item["lastReason"] = reason
+    for key, value in details.items():
+        if value is not None:
+            item[key] = value
+    delta = details.get("signalDeltaPct")
+    if isinstance(delta, (int, float)):
+        prior = item.get("maxAbsSignalDeltaPct")
+        if prior is None or abs(float(delta)) > float(prior):
+            item["maxAbsSignalDeltaPct"] = abs(float(delta))
+    pair_sum = details.get("pairDecisionSum")
+    if isinstance(pair_sum, (int, float)):
+        prior = item.get("bestPairDecisionSum")
+        if prior is None or float(pair_sum) < float(prior):
+            item["bestPairDecisionSum"] = float(pair_sum)
+    raw_pair_sum = details.get("rawPairAskSum")
+    if isinstance(raw_pair_sum, (int, float)):
+        prior = item.get("bestRawPairAskSum")
+        if prior is None or float(raw_pair_sum) < float(prior):
+            item["bestRawPairAskSum"] = float(raw_pair_sum)
+    remaining = details.get("remainingSeconds")
+    if isinstance(remaining, (int, float)):
+        item["minRemainingSeconds"] = min(float(remaining), float(item.get("minRemainingSeconds", remaining)))
+        item["maxRemainingSeconds"] = max(float(remaining), float(item.get("maxRemainingSeconds", remaining)))
+    _window_diag_dirty.add((variant_id, slug))
+    return item
+
+
+def start_window_diagnostics(asset_id: str, slug: str, ends_at_ms: float | None) -> None:
+    for variant in AB_VARIANTS:
+        if variant["assetId"] != asset_id:
+            continue
+        item = _window_diagnostic(variant["id"], slug)
+        item["windowEndsAt"] = ends_at_ms
+        _window_diag_dirty.add((variant["id"], slug))
+
+
+def finalize_window_diagnostics(slug: str) -> None:
+    for variant_id, st in ab_states.items():
+        for item in st.get("windowDiagnostics", []):
+            if item.get("windowSlug") != slug:
+                continue
+            if item.get("status") == "observing":
+                item["status"] = "no_entry"
+            item["finalizedAt"] = time.time()
+            _window_diag_dirty.add((variant_id, slug))
 
 def set_stake_pct(pct: float) -> None:
     shared_config["stakePct"] = max(SIM_MIN_STAKE_PCT, min(SIM_MAX_STAKE_PCT, float(pct)))
@@ -424,6 +510,7 @@ def reset_with_balance(start_balance: float) -> None:
     for vid in ab_states:
         ab_states[vid] = _new_variant_state()
         ab_states[vid]["peakPortfolio"] = shared_config["startBalance"]
+    _window_diag_dirty.clear()
     global sim_state
     sim_state = ab_states[DEFAULT_VARIANT_ID]
     save_sim_state()
@@ -683,12 +770,53 @@ def _get_sim_db() -> sqlite3.Connection:
                 fair_up REAL,
                 spot_price REAL
             );
+            CREATE TABLE IF NOT EXISTS sim_window_diagnostics (
+                run_id INTEGER NOT NULL,
+                variant_id TEXT NOT NULL,
+                window_slug TEXT NOT NULL,
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                diagnostic_json TEXT NOT NULL,
+                PRIMARY KEY(run_id, variant_id, window_slug)
+            );
             CREATE INDEX IF NOT EXISTS idx_sim_quotes_asset_ts ON sim_quotes(asset_id, ts);
             CREATE INDEX IF NOT EXISTS idx_sim_trades_variant_time ON sim_trades(variant_id, exit_time);
+            CREATE INDEX IF NOT EXISTS idx_sim_window_diag_variant_time
+                ON sim_window_diagnostics(variant_id, last_seen);
             """
         )
         _sim_db.commit()
     return _sim_db
+
+
+def flush_window_diagnostics(db: sqlite3.Connection | None = None, asset_id: str | None = None) -> None:
+    target = _get_sim_db() if db is None else db
+    run_id = int(shared_config["runId"])
+    for variant_id, slug in list(_window_diag_dirty):
+        variant = AB_VARIANT_BY_ID.get(variant_id)
+        if not variant or (asset_id is not None and variant["assetId"] != asset_id):
+            continue
+        item = next(
+            (row for row in ab_states[variant_id].get("windowDiagnostics", []) if row.get("windowSlug") == slug),
+            None,
+        )
+        if item is None:
+            _window_diag_dirty.discard((variant_id, slug))
+            continue
+        target.execute(
+            """INSERT OR REPLACE INTO sim_window_diagnostics(
+                   run_id, variant_id, window_slug, first_seen, last_seen, diagnostic_json
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                run_id,
+                variant_id,
+                slug,
+                float(item.get("firstSeenAt", time.time())),
+                float(item.get("lastSeenAt", time.time())),
+                json.dumps(item),
+            ),
+        )
+        _window_diag_dirty.discard((variant_id, slug))
 
 
 def save_sim_state() -> None:
@@ -704,6 +832,7 @@ def save_sim_state() -> None:
             "INSERT OR REPLACE INTO sim_state(variant_id, run_id, state_json, updated_at) VALUES(?,?,?,?)",
             (variant_id, run_id, json.dumps(st), now),
         )
+    flush_window_diagnostics(db)
     db.commit()
 
 
@@ -728,6 +857,21 @@ def load_sim_state() -> None:
             ab_states[variant_id] = defaults
         except Exception as exc:
             log.warning(f"[SIM:{variant_id}] 無法載入狀態，改用空白狀態：{exc}")
+    run_id = int(shared_config["runId"])
+    for variant_id in ab_states:
+        diag_rows = db.execute(
+            """SELECT diagnostic_json FROM sim_window_diagnostics
+               WHERE run_id=? AND variant_id=? ORDER BY last_seen DESC LIMIT 50""",
+            (run_id, variant_id),
+        ).fetchall()
+        if diag_rows:
+            loaded_diagnostics = []
+            for row in diag_rows:
+                try:
+                    loaded_diagnostics.append(json.loads(row[0]))
+                except (TypeError, json.JSONDecodeError) as exc:
+                    log.warning(f"[SIM:{variant_id}] skipping corrupt window diagnostic: {exc}")
+            ab_states[variant_id]["windowDiagnostics"] = loaded_diagnostics
     sim_state = ab_states[DEFAULT_VARIANT_ID]
 
 
@@ -746,7 +890,8 @@ def persist_quote(asset_id: str, fair: dict | None) -> None:
     up_bids, up_asks = ms["upBook"].get("bids") or [], ms["upBook"].get("asks") or []
     down_bids, down_asks = ms["downBook"].get("bids") or [], ms["downBook"].get("asks") or []
     remaining = None if ms.get("windowEndsAt") is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
-    _get_sim_db().execute(
+    db = _get_sim_db()
+    db.execute(
         """INSERT INTO sim_quotes(
                run_id, ts, asset_id, window_slug, remaining_seconds,
                up_bid, up_ask, down_bid, down_ask, fair_up, spot_price
@@ -758,7 +903,8 @@ def persist_quote(asset_id: str, fair: dict | None) -> None:
             fair.get("fairUp") if fair else None, ms.get("spotPrice"),
         ),
     )
-    _get_sim_db().commit()
+    flush_window_diagnostics(db, asset_id)
+    db.commit()
 
 # ── Polymarket API ─────────────────────────────────────────────────────────
 
@@ -1269,6 +1415,18 @@ def enter_position(
         "hedgeFee":        0.0,
         "lockedPnl":       None,
     }
+    item = record_window_diagnostic(
+        variant_id,
+        slug,
+        "entered",
+        status="entered",
+        entrySide=side,
+        entryDecisionPrice=fill["decisionPrice"],
+        entryVwap=fill["vwap"],
+        entryShares=fill["shares"],
+        entryTime=st["position"]["entryTime"],
+    )
+    item["entryCount"] = int(item.get("entryCount", 0)) + 1
     save_sim_state()
     log.info(
         f"[SIM:{variant_id}] 進場 {side} VWAP=${fill['vwap']:.4f} decision=${fill['decisionPrice']:.4f} "
@@ -1291,6 +1449,15 @@ def hedge_position(variant_id: str, side: str, fill: dict) -> None:
     pos["hedgeDecisionFee"] = fill["decisionFee"]
     pos["stakeUsd"] = _position_paid_cost(pos)
     pos["lockedPnl"] = pos["shares"] - _position_paid_cost(pos)
+    record_window_diagnostic(
+        variant_id,
+        pos["windowSlug"],
+        "hedged",
+        status="entered_locked",
+        hedgeSide=side,
+        hedgeDecisionPrice=fill["decisionPrice"],
+        lockedPnl=pos["lockedPnl"],
+    )
     save_sim_state()
     log.info(
         f"[SIM:{variant_id}] 配對鎖利 {side} VWAP=${fill['vwap']:.4f} decision=${fill['decisionPrice']:.4f} "
@@ -1338,14 +1505,15 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
 
     execution_safe = bool(variant.get("liveMirrorOnly") or variant.get("executionSafePair"))
 
-    def reject() -> bool:
+    def reject(reason: str, **details) -> bool:
+        record_window_diagnostic(variant_id, slug, reason, **details)
         if execution_safe:
             clear_pair_candidate(stability_key)
         return False
 
     shares, budget = _target_order_size(variant_id)
     if shares <= 0:
-        return reject()
+        return reject("pair_insufficient_budget", targetShares=shares, budgetUsd=budget)
     up_depth = sum(float(a.get("size", 0)) for a in (up_book.get("asks") or []))
     down_depth = sum(float(a.get("size", 0)) for a in (down_book.get("asks") or []))
     depth_fraction = SIM_DEPTH_CAP_FRACTION
@@ -1354,7 +1522,7 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     depth_cap = min(up_depth, down_depth) * depth_fraction
     shares = float(Decimal(str(min(shares, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
     if shares <= 0:
-        return reject()
+        return reject("pair_no_common_depth", upAskDepth=up_depth, downAskDepth=down_depth)
     up_fill = simulate_buy_fill(up_book, shares)
     down_fill = simulate_buy_fill(down_book, shares)
     if (
@@ -1366,7 +1534,12 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
         or up_fill["shares"] < float(up_book.get("minOrderSize", 1) or 1)
         or down_fill["shares"] < float(down_book.get("minOrderSize", 1) or 1)
     ):
-        return reject()
+        return reject(
+            "pair_incomplete_fill_or_minimum",
+            targetShares=shares,
+            upAskDepth=up_depth,
+            downAskDepth=down_depth,
+        )
     price_sum = up_fill["decisionPrice"] + down_fill["decisionPrice"]
     total_decision_cost = (
         up_fill["decisionNotional"] + up_fill["decisionFee"]
@@ -1374,12 +1547,18 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     )
     net_per_share = (shares - total_decision_cost) / shares
     cash, _ = compute_cash_and_portfolio(variant_id)
-    if (
-        price_sum > variant["lockMaxSum"]
-        or net_per_share < SIM_MIN_NET_LOCK_PER_SHARE
-        or total_decision_cost > cash
-    ):
-        return reject()
+    pair_details = {
+        "pairDecisionSum": price_sum,
+        "pairNetPerShare": net_per_share,
+        "pairDecisionCost": total_decision_cost,
+        "targetShares": shares,
+    }
+    if price_sum > variant["lockMaxSum"]:
+        return reject("pair_price_sum_above_maximum", **pair_details)
+    if net_per_share < SIM_MIN_NET_LOCK_PER_SHARE:
+        return reject("pair_net_edge_below_minimum", **pair_details)
+    if total_decision_cost > cash:
+        return reject("pair_insufficient_cash", cashUsd=cash, **pair_details)
     if execution_safe:
         if not pair_depth_is_safe(
             up_book,
@@ -1389,7 +1568,7 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
             shares,
             float(variant["minDepthMultiplier"]),
         ):
-            return reject()
+            return reject("pair_depth_multiplier_not_met", **pair_details)
         if not pair_candidate_is_stable(
             stability_key,
             slug,
@@ -1398,6 +1577,7 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
             down_fill["decisionPrice"],
             float(variant["stabilitySeconds"]),
         ):
+            record_window_diagnostic(variant_id, slug, "pair_stability_wait", **pair_details)
             return False
         clear_pair_candidate(stability_key)
     # 深度封頂後實際成交金額可能比原本算的目標預算小，記錄實際花費的金額，
@@ -1518,7 +1698,8 @@ def _try_btc_15m_adaptive_direction_entry(
     variant = AB_VARIANT_BY_ID[variant_id]
     stability_key = f"sim-direction:{variant_id}"
 
-    def reject() -> None:
+    def reject(reason: str, **details) -> None:
+        record_window_diagnostic(variant_id, slug, reason, remainingSeconds=remaining_seconds, **details)
         clear_direction_candidate(stability_key)
 
     if not (
@@ -1526,51 +1707,76 @@ def _try_btc_15m_adaptive_direction_entry(
         <= remaining_seconds
         <= BTC_15M_DIRECTION_MAX_REMAINING
     ):
-        reject()
+        reject("outside_entry_window")
         return
     signal = get_chainlink_twap_signal(variant["assetId"])
     if not signal:
-        reject()
+        reject("missing_chainlink_signal")
         return
     metrics = estimate_btc_15m_direction_signal(signal, remaining_seconds)
     if (
         abs(metrics["deltaPct"]) < BTC_15M_DIRECTION_MIN_DELTA_PCT
         or metrics["probability"] < BTC_15M_DIRECTION_MIN_PROBABILITY
     ):
-        reject()
+        reason = (
+            "delta_below_minimum"
+            if abs(metrics["deltaPct"]) < BTC_15M_DIRECTION_MIN_DELTA_PCT
+            else "model_probability_below_minimum"
+        )
+        reject(reason, signalDeltaPct=metrics["deltaPct"], modelProbability=metrics["probability"])
         return
     side, book = ("Up", up_book) if metrics["deltaPct"] > 0 else ("Down", down_book)
     market = _two_sided_market_probability(up_book, down_book, side)
     if not market:
-        reject()
+        reject("missing_two_sided_market", signalDeltaPct=metrics["deltaPct"], selectedSide=side)
         return
     market_probability, spread = market
     if (
         market_probability < BTC_15M_DIRECTION_MIN_MARKET_PROBABILITY
         or spread > BTC_15M_DIRECTION_MAX_SPREAD
     ):
-        reject()
+        reason = (
+            "market_probability_below_minimum"
+            if market_probability < BTC_15M_DIRECTION_MIN_MARKET_PROBABILITY
+            else "spread_above_maximum"
+        )
+        reject(
+            reason,
+            signalDeltaPct=metrics["deltaPct"],
+            modelProbability=metrics["probability"],
+            marketProbability=market_probability,
+            spread=spread,
+            selectedSide=side,
+        )
         return
     planned = _direction_fill_with_budget(variant_id, book)
     if not planned:
-        reject()
+        reject("insufficient_budget_or_ask_depth", selectedSide=side)
         return
     fill, budget = planned
     min_order_size = float(book.get("minOrderSize", 1) or 1)
     if fill["shares"] < min_order_size or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
-        reject()
+        reject("below_minimum_order", selectedSide=side, filledShares=fill["shares"], minOrderSize=min_order_size)
         return
     if fill["decisionPrice"] > float(variant["lateDirectionMaxPrice"]):
-        reject()
+        reject("price_above_maximum", selectedSide=side, decisionPrice=fill["decisionPrice"])
         return
     required_depth = fill["shares"] * float(variant.get("minDepthMultiplier", 1.0))
     if executable_ask_depth(book, fill["decisionPrice"]) + 1e-9 < required_depth:
-        reject()
+        reject("depth_multiplier_not_met", selectedSide=side, decisionPrice=fill["decisionPrice"])
         return
     decision_cost_per_share = (fill["decisionNotional"] + fill["decisionFee"]) / fill["shares"]
     entry_edge = metrics["probability"] - decision_cost_per_share
     if entry_edge < BTC_15M_DIRECTION_MIN_EDGE_PER_SHARE:
-        reject()
+        reject(
+            "edge_below_minimum",
+            selectedSide=side,
+            signalDeltaPct=metrics["deltaPct"],
+            modelProbability=metrics["probability"],
+            marketProbability=market_probability,
+            decisionPrice=fill["decisionPrice"],
+            entryEdge=entry_edge,
+        )
         return
     if not direction_candidate_is_stable(
         stability_key,
@@ -1578,6 +1784,18 @@ def _try_btc_15m_adaptive_direction_entry(
         side,
         float(variant.get("stabilitySeconds", 0.0)),
     ):
+        record_window_diagnostic(
+            variant_id,
+            slug,
+            "direction_stability_wait",
+            remainingSeconds=remaining_seconds,
+            selectedSide=side,
+            signalDeltaPct=metrics["deltaPct"],
+            modelProbability=metrics["probability"],
+            marketProbability=market_probability,
+            decisionPrice=fill["decisionPrice"],
+            entryEdge=entry_edge,
+        )
         return
     clear_direction_candidate(stability_key)
     enter_position(
@@ -1616,35 +1834,70 @@ def _try_late_direction_entry(
         )
         return
     if remaining_seconds > LATE_DIRECTION_WINDOW_SECONDS or remaining_seconds < LATE_DIRECTION_MIN_ENTRY_REMAINING:
+        record_window_diagnostic(variant_id, slug, "outside_entry_window", remainingSeconds=remaining_seconds)
         return
     if variant.get("directionSignalSource") == "binance_window":
         ms = markets_state[variant["assetId"]]
         opening, current = ms.get("windowOpenSpotPrice"), ms.get("spotPrice")
         if not opening or not current or opening <= 0:
+            record_window_diagnostic(variant_id, slug, "missing_binance_signal", remainingSeconds=remaining_seconds)
             return
         delta_pct = (current - opening) / opening * 100
         signal_source = "binance_futures_window"
     else:
         signal = get_chainlink_twap_signal(variant["assetId"])
         if not signal:
+            record_window_diagnostic(variant_id, slug, "missing_chainlink_signal", remainingSeconds=remaining_seconds)
             return
         delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
         signal_source = "chainlink_twap_60s"
     if abs(delta_pct) < LATE_DIRECTION_MIN_DELTA_PCT:
+        record_window_diagnostic(
+            variant_id, slug, "delta_below_minimum",
+            remainingSeconds=remaining_seconds, signalSource=signal_source, signalDeltaPct=delta_pct,
+        )
         return
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
+    asks = book.get("asks") or []
+    selected_ask = float(asks[0]["price"]) if asks else None
+    selected_depth = sum(float(level.get("size", 0)) for level in asks)
+    common = {
+        "remainingSeconds": remaining_seconds,
+        "signalSource": signal_source,
+        "signalDeltaPct": delta_pct,
+        "selectedSide": side,
+        "selectedAsk": selected_ask,
+        "selectedAskDepth": selected_depth,
+    }
     if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
+        record_window_diagnostic(
+            variant_id,
+            slug,
+            "selected_book_not_fresh",
+            dataGuardReason=_simulation_single_book_guard_reason(book),
+            **common,
+        )
         return
     shares, budget = _target_order_size(variant_id)
     if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_budget", targetShares=shares, budgetUsd=budget, **common)
         return
     fill = simulate_buy_fill(book, shares)
     if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_ask_depth", targetShares=shares, budgetUsd=budget, **common)
         return
     # 真正的下限是「股數」不是金額：查證過真實 API 回傳的 minOrderSize 是 5 股，不是 $5。
     if fill["shares"] < float(book.get("minOrderSize", 1) or 1):
+        record_window_diagnostic(
+            variant_id, slug, "below_minimum_shares",
+            targetShares=shares, filledShares=fill["shares"], minOrderSize=book.get("minOrderSize"), **common,
+        )
         return
     if fill["decisionPrice"] > variant["lateDirectionMaxPrice"]:
+        record_window_diagnostic(
+            variant_id, slug, "price_above_maximum",
+            decisionPrice=fill["decisionPrice"], maxPrice=variant["lateDirectionMaxPrice"], **common,
+        )
         return
     enter_position(variant_id, slug, side, fill, budget, None, None)
     ab_states[variant_id]["position"]["signalSource"] = signal_source
@@ -1958,6 +2211,20 @@ def simulate_trading(
     variant = AB_VARIANT_BY_ID[variant_id]
     st = ab_states[variant_id]
     pos = st["position"]
+    up_asks = up_book.get("asks") or []
+    down_asks = down_book.get("asks") or []
+    up_ask = float(up_asks[0]["price"]) if up_asks else None
+    down_ask = float(down_asks[0]["price"]) if down_asks else None
+    record_window_diagnostic(
+        variant_id,
+        slug,
+        remainingSeconds=remaining_seconds,
+        upAsk=up_ask,
+        downAsk=down_ask,
+        rawPairAskSum=(up_ask + down_ask) if up_ask is not None and down_ask is not None else None,
+        upQuoteSource=up_book.get("quoteSource"),
+        downQuoteSource=down_book.get("quoteSource"),
+    )
 
     if variant.get("marketMakerOnly"):
         update_market_maker_quotes(variant_id, slug, up_book, down_book, remaining_seconds)
@@ -1970,11 +2237,17 @@ def simulate_trading(
         # 合格配對時，才在 T-3～10 秒使用指定的方向訊號嘗試單腿方向進場。
         # 報價一致性、完整深度、滑價、費用與最低淨利仍由現行模擬防護負責。
         if variant.get("historicalHybrid"):
-            if (
-                _simulation_books_are_coherent(variant["assetId"], up_book, down_book)
-                and _try_direct_pair(variant_id, slug, up_book, down_book)
-            ):
-                return
+            pair_books_ok = _simulation_books_are_coherent(variant["assetId"], up_book, down_book)
+            if pair_books_ok:
+                if _try_direct_pair(variant_id, slug, up_book, down_book):
+                    return
+            else:
+                record_window_diagnostic(
+                    variant_id,
+                    slug,
+                    "pair_books_not_coherent",
+                    dataGuardReason=_simulation_book_guard_reason(up_book, down_book),
+                )
             _try_late_direction_entry(variant_id, slug, up_book, down_book, remaining_seconds)
             return
         # 這一組是純方向性驗證，不能先被兩腿鎖利部位占用；否則 Dashboard 顯示的
@@ -2116,6 +2389,17 @@ def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
         st["wins"] += 1
     if AB_VARIANT_BY_ID[variant_id].get("marketMakerOnly") and not pos.get("hedged"):
         _maker_stats(st)["singleLegSettlements"] += 1
+    record_window_diagnostic(
+        variant_id,
+        pos["windowSlug"],
+        "settled",
+        status="settled",
+        outcome=outcome,
+        tradeType=trade_type,
+        pnl=pnl,
+        fees=fees,
+        settledAt=trade["exitTime"],
+    )
     persist_trade(variant_id, trade)
     save_sim_state()
 
@@ -2150,6 +2434,7 @@ async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:
 def queue_settlement(slug: str) -> None:
     """窗口換了：每一組 A/B 如果上一個窗口還有沒結算的倉位，各自丟進自己的待結算佇列，
     換一個乾淨的位置開始追蹤新窗口。"""
+    finalize_window_diagnostics(slug)
     for st in ab_states.values():
         pos = st["position"]
         if pos is not None and pos["windowSlug"] == slug:
@@ -2303,7 +2588,22 @@ def _variant_books_are_coherent(asset_id: str, variant: dict, up_book: dict, dow
         else SIM_BOOK_MAX_SKEW_SECONDS
     )
     log_key = f"{asset_id}:direction" if is_15m_direction else asset_id
-    return _simulation_books_are_coherent(log_key, up_book, down_book, max_skew_seconds=max_skew)
+    coherent = _simulation_books_are_coherent(
+        log_key, up_book, down_book, max_skew_seconds=max_skew
+    )
+    if not coherent:
+        market = markets_state.get(asset_id, {}).get("market") or {}
+        slug = market.get("slug")
+        if slug:
+            record_window_diagnostic(
+                variant["id"],
+                slug,
+                "pair_books_not_coherent",
+                dataGuardReason=_simulation_book_guard_reason(
+                    up_book, down_book, max_skew_seconds=max_skew
+                ),
+            )
+    return coherent
 
 
 def _notify_ws_price_listeners(token_id: str) -> None:
@@ -2625,6 +2925,7 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
         ms["windowOpenChainlinkTwapObservedAt"] = None
         ms["windowOpenChainlinkTwapSlug"] = None
         _capture_window_open_chainlink_twap(ms)
+        start_window_diagnostics(aid, new_market["slug"], ms["windowEndsAt"])
         log.info(f"[MARKET:{aid}] 切換到新窗口 {new_market['slug']}　結束於 {new_market['endDate']}")
 
     if not ms["market"]:
@@ -2770,6 +3071,7 @@ def build_ab_leaderboard() -> list:
             "maxDrawdown":   st.get("maxDrawdown", 0.0),
             "makerQuotes":   st.get("makerQuotes"),
             "makerStats":    _maker_stats(st) if v.get("marketMakerOnly") else None,
+            "windowDiagnostics": st.get("windowDiagnostics", [])[:20],
             "trades":        st["trades"],  # 這組自己的成交紀錄，前端獨立顯示，方便看個別下注金額
         })
     return rows
