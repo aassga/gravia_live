@@ -1,7 +1,7 @@
 """
 Polymarket BTC 5 分鐘 Up/Down · 真實自動下單策略
 
-真實版與紙上模擬共用同一套核心判斷（BTC 5m 暫用 "btc-binance-late-direction" 實驗組）：
+真實版與紙上模擬共用同一套核心判斷（BTC 5m 使用 "btc-historical-hybrid"）：
     - 使用 Ask/Bid 深度計算 VWAP，再以含滑點、向不利 tick 取整的最差限價作決策。
     - 優先鎖利：當下兩邊同時買得到、扣費用後淨賺達門檻才配對進場，這是唯一的
       無方向曝險進場路徑。
@@ -80,14 +80,14 @@ if LIVE_ASSET_ID != "btc":
     sim.state = sim.markets_state[LIVE_ASSET_ID]  # 重新指向對應資產的市場狀態（見 sim.state 的定義）
 
 # 真實版套用模擬版 A/B 測試裡「LIVE_ASSET_ID 晚進場方向性」這組
-# （BTC 5m 為 btc-binance-late-direction，其餘窗口仍是 Chainlink variant）。這裡引用 AB_VARIANT_BY_ID
+# （BTC 5m 為 btc-historical-hybrid，其餘窗口仍是 Chainlink variant）。這裡引用 AB_VARIANT_BY_ID
 # 而不是直接寫死數字，是為了跟模擬版共用同一個真實來源，模擬版調整這組門檻時真實版會
 # 自動跟著同步。
-# 2026-09：方向組只在窗口剩不到 10 秒、價格已明顯偏離開盤價時才賭方向；本次為了
-# 隔離測試訊號來源是否影響下單率，BTC 5m 暫時從 Chainlink 改回 Binance window delta。
-# 晚進場方向性參數仍取自這個變體；兩腿鎖利的實盤防護則由下方獨立環境變數控制。
+# 2026-09：BTC 5m 採歷史混合流程，先嘗試實盤防護下的兩腿鎖利，找不到才在最後
+# 3～10 秒使用 Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 的方向訊號。
+# 晚進場方向性參數取自這個變體；兩腿鎖利的實盤防護仍由下方獨立環境變數控制。
 _LIVE_DIRECTION_VARIANT_ID = (
-    "btc-binance-late-direction"
+    "btc-historical-hybrid"
     if LIVE_ASSET_ID == "btc"
     else f"{LIVE_ASSET_ID}-chainlink-late-direction"
 )
@@ -403,7 +403,7 @@ def _late_direction_plan(
     remaining_seconds: float,
     shares: float,
 ) -> dict | None:
-    """BTC 5m 暫時還原 Binance 窗口漲跌訊號，供與 Chainlink 下單率做隔離比較。"""
+    """依實盤選定變體的價格來源建立最後 3～10 秒方向單計畫。"""
     if (
         remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS
         or remaining_seconds < sim.LATE_DIRECTION_MIN_ENTRY_REMAINING

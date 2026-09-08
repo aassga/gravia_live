@@ -88,7 +88,7 @@ Windows 上如果 `python` 指令沒反應（跳出 Microsoft Store），請改�
 - 第二腿成交前清楚標為方向性曝險；策略會依模型公平價決定是否提早退出。
 - 公平價使用 Binance Futures 短期波動作為 Chainlink TWAP 的代理，再與 Polymarket 市場隱含機率混合校準；它不是真實 Chainlink feed。
 - `BTC Binance 晚進場方向性` 是獨立的 5 分鐘純方向性實驗組，不再先建立兩腿鎖利部位；它在 T-3～10 秒使用 Binance Futures 即時價相對窗口首次觀察價的偏移判斷方向。這次使用新的 variant id，避免績效混入舊 Chainlink 組。Binance 並非市場結算來源，因此此組只適合比較訊號來源對下單率與損益的影響。
-- `BTC 歷史混合（鎖利→Chainlink T-10s）` 是另一個從零記帳的純模擬組：整個窗口先嘗試兩腿直接鎖利，沒有合格配對才在 T-3～10 秒使用 Polymarket RTDS Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 的方向訊號。它保留現行 WebSocket 報價同步、完整深度、滑價、費用與最低淨利防護，且不會被實盤策略引用。
+- `BTC 歷史混合（鎖利→Chainlink T-10s）` 是獨立記帳的模擬組，也是目前 BTC 5 分鐘實盤所對齊的策略：整個窗口先嘗試兩腿直接鎖利，沒有合格配對才在 T-3～10 秒使用 Polymarket RTDS Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 的方向訊號。模擬與實盤都保留現行 WebSocket 報價同步、完整深度、滑價、費用與最低淨利防護；實盤另外套用深度倍數、穩定時間、資金上限與雙開關。
 - 每次下注百分比是「完整兩腿配對」的資金上限，會預留第二腿與費用。
 - 紙上模擬與實盤預設每組都使用資產組合的 15%；實盤仍會套用單組金額上限與現金保留額。
 - 持倉、已結算交易、費用與報價會寫入 `polymarket_sim.sqlite3`，服務重啟後可續跑。
@@ -131,7 +131,7 @@ py -3.14 polymarket_server.py
 - `LIVE_TRADING=false`：只跑 dry-run，不簽名、不送單。
 - `POLY_STRATEGY_ARMED=false`：新增的第二道武裝開關。只有它與 `LIVE_TRADING` 同時為 `true` 才會送出真實策略訂單。
 - `POLY_VALIDATE_ORDER_PATH=true`：安全驗證模式。每個新市場預熱並簽署兩筆 FOK，但硬性禁止 `POST /orders`；即使另外兩個開關誤設為 `true` 也不會真實執行。
-- `POLY_ENABLE_LATE_DIRECTION=false`：預設禁止窗口末端的單腿方向性下注；只有明確改成 `true` 才會啟用。BTC 5m 啟用後會在剩餘 3–10 秒內使用 Binance Futures 窗口漲跌判斷，不要求 Polymarket 訂單簿同方向；這是為比較下單率而暫時恢復的實驗設定，不代表 Binance 與市場結算來源一致。
+- `POLY_ENABLE_LATE_DIRECTION=false`：預設禁止窗口末端的單腿方向性下注；只有明確改成 `true` 才會啟用。BTC 5m 啟用後會在剩餘 3–10 秒內使用 Polymarket RTDS Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 判斷方向，不要求 Polymarket 訂單簿同方向。
 - `POLY_MAX_PAIR_BUDGET_USD=25`：每組兩腿最多 25 USDC。
 - `POLY_MIN_CASH_RESERVE_USD=5`：至少保留 5 USDC 現金。
 - `POLY_STAKE_PCT=15`：每組兩腿預算為可用現金的 15%。

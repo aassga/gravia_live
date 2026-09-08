@@ -73,6 +73,11 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(trader.order_response_filled({"status": "matched"}))
         self.assertTrue(trader.order_response_filled({"id": "order-1", "status": "ORDER_STATUS_MATCHED"}))
 
+    def test_btc_live_strategy_uses_historical_chainlink_hybrid(self):
+        self.assertEqual(strategy._LIVE_DIRECTION_VARIANT_ID, "btc-historical-hybrid")
+        self.assertTrue(strategy._LIVE_VARIANT["historicalHybrid"])
+        self.assertEqual(strategy._LIVE_VARIANT["directionSignalSource"], "chainlink_twap")
+
     def test_sdk_transaction_hash_polling_is_disabled_without_changing_initial_response(self):
         class FakeClient:
             def __init__(self):
@@ -318,17 +323,17 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         pos = strategy.live_state["position"]
         self.assertEqual(pos["side"], "Up")
         self.assertEqual(pos["strategy"], "late_direction")
-        self.assertEqual(pos["signalSource"], "binance_futures_window")
+        self.assertEqual(pos["signalSource"], "chainlink_twap_60s")
         self.assertFalse(pos["hedged"])
 
-    def test_binance_late_direction_allows_original_market_disagreement_behavior(self):
+    def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 100}], "bids": [{"price": 0.97, "size": 100}]}
         down_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.20, "size": 100}], "bids": []}
         plan = strategy._late_direction_plan(up_book, down_book, 5.0, 10.0)
         self.assertIsNotNone(plan)
         self.assertEqual(plan["side"], "Down")
-        self.assertEqual(plan["_signalSource"], "binance_futures_window")
+        self.assertEqual(plan["_signalSource"], "chainlink_twap_60s")
 
     def test_direct_pair_checks_worst_case_limit_and_fees(self):
         up_book = {

@@ -184,7 +184,7 @@ def _fetch_state() -> dict:
         "strategyState": strategy_state,
         "strategyConfig": {
             "label": (
-                f"{strategy.LIVE_ASSET_ID.upper()} 兩腿鎖利＋晚進場方向性"
+                strategy._LIVE_VARIANT["label"]
                 if strategy.ENABLE_LATE_DIRECTION
                 else f"{strategy.LIVE_ASSET_ID.upper()} 兩腿鎖利（方向性停用）"
             ),
