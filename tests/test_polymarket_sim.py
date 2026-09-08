@@ -364,7 +364,7 @@ class PolymarketSimulationTests(unittest.TestCase):
             )
             self.assertIsNone(sim.ab_states["btc-15m-chainlink-late-direction"]["position"])
             sim._try_late_direction_entry(
-                "btc-15m-chainlink-late-direction", slug, up_book, down_book, 19.0
+                "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
             )
         pos = sim.ab_states["btc-15m-chainlink-late-direction"]["position"]
         self.assertIsNotNone(pos)
@@ -514,6 +514,16 @@ class PolymarketSimulationTests(unittest.TestCase):
         down = {"quoteSource": "websocket", "receivedAtMonotonic": now - 0.15}
         self.assertIsNone(sim._simulation_book_guard_reason(up, down, now))
         self.assertTrue(sim._simulation_books_are_coherent("btc", up, down, now))
+
+    def test_btc_15m_direction_allows_075s_skew_without_relaxing_lock_variants(self):
+        now = 100.0
+        up = {"quoteSource": "websocket", "receivedAtMonotonic": now - 0.10}
+        down = {"quoteSource": "websocket", "receivedAtMonotonic": now - 0.75}
+        direction = sim.AB_VARIANT_BY_ID["btc-15m-chainlink-late-direction"]
+        lock = sim.AB_VARIANT_BY_ID["btc-15m-adaptive-lock"]
+        with patch.object(sim.time, "monotonic", return_value=now):
+            self.assertTrue(sim._variant_books_are_coherent("btc-15m", direction, up, down))
+            self.assertFalse(sim._variant_books_are_coherent("btc-15m", lock, up, down))
 
     def test_ws_tick_does_not_trade_until_both_reconnect_snapshots_arrive(self):
         ms = sim.markets_state["btc"]

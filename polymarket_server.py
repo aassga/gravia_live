@@ -162,20 +162,21 @@ LATE_DIRECTION_MIN_DELTA_PCT       = 0.02  # Chainlink 60 秒 TWAP 相對窗口�
 # BTC 15 分鐘專用方向策略。15 分鐘市場雖然同樣由 Chainlink BTC/USD 決勝，價格在窗口
 # 內有更長時間累積偏移，不能沿用 5 分鐘的固定 0.02%／最後 3–10 秒門檻。這裡用最近
 # 5 分鐘的 60 秒 TWAP 實現波動估計，再按剩餘秒數換算反轉風險；所有門檻先只跑紙上盤。
-BTC_15M_DIRECTION_MAX_REMAINING       = 30.0
-BTC_15M_DIRECTION_MIN_REMAINING       = 12.0
+BTC_15M_DIRECTION_MAX_REMAINING       = 60.0
+BTC_15M_DIRECTION_MIN_REMAINING       = 20.0
 BTC_15M_DIRECTION_MIN_DELTA_PCT       = 0.04
 BTC_15M_DIRECTION_VOL_LOOKBACK_SECONDS = 300.0
 BTC_15M_DIRECTION_VOL_BUCKET_SECONDS  = 10.0
 BTC_15M_DIRECTION_MIN_SIGMA_PCT       = 0.02
 BTC_15M_DIRECTION_VOL_SAFETY_MULTIPLIER = 1.35
-BTC_15M_DIRECTION_MIN_PROBABILITY     = 0.78
+BTC_15M_DIRECTION_MIN_PROBABILITY     = 0.75
 BTC_15M_DIRECTION_MIN_EDGE_PER_SHARE  = 0.03
 BTC_15M_DIRECTION_MIN_MARKET_PROBABILITY = 0.55
 BTC_15M_DIRECTION_MAX_SPREAD          = 0.05
 BTC_15M_DIRECTION_MAX_PRICE           = 0.88
-BTC_15M_DIRECTION_DEPTH_MULTIPLIER     = 2.0
-BTC_15M_DIRECTION_STABILITY_SECONDS    = 1.5
+BTC_15M_DIRECTION_DEPTH_MULTIPLIER     = 1.25
+BTC_15M_DIRECTION_STABILITY_SECONDS    = 0.75
+BTC_15M_DIRECTION_BOOK_MAX_SKEW_SECONDS = 0.75
 BTC_15M_DIRECTION_STAKE_PCT            = 5.0
 BTC_15M_DIRECTION_MAX_BUDGET_USD       = 10.0
 BTC_15M_DIRECTION_MIN_CASH_RESERVE_USD = 10.0
@@ -961,13 +962,13 @@ def _on_chainlink_twap_tick() -> None:
         if not market or not up_book or not down_book:
             continue
         remaining = None if ms.get("windowEndsAt") is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
-        if _simulation_books_are_coherent(aid, up_book, down_book):
-            for variant_id, variant in AB_VARIANT_BY_ID.items():
-                if (
-                    variant["assetId"] == aid
-                    and variant.get("lateDirectionOnly")
-                    and variant.get("directionSignalSource") != "binance_window"
-                ):
+        for variant_id, variant in AB_VARIANT_BY_ID.items():
+            if (
+                variant["assetId"] == aid
+                and variant.get("lateDirectionOnly")
+                and variant.get("directionSignalSource") != "binance_window"
+            ):
+                if _variant_books_are_coherent(aid, variant, up_book, down_book):
                     simulate_trading(
                         variant_id, market["slug"], up_book, down_book,
                         remaining, ms.get("fair"), False,
@@ -1090,9 +1091,11 @@ def _on_binance_price_tick(symbol: str) -> None:
             None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
         )
         up_book, down_book = ms.get("upBook"), ms.get("downBook")
-        if up_book and down_book and _simulation_books_are_coherent(aid, up_book, down_book):
+        if up_book and down_book:
             for variant_id, variant in AB_VARIANT_BY_ID.items():
-                if variant["assetId"] == aid:
+                if variant["assetId"] == aid and _variant_books_are_coherent(
+                    aid, variant, up_book, down_book
+                ):
                     simulate_trading(
                         variant_id, slug, up_book, down_book, remaining_seconds, fair,
                         allow_early_exit=False,
@@ -2205,7 +2208,12 @@ def ws_feed_status() -> dict:
     }
 
 
-def _simulation_book_guard_reason(up_book: dict, down_book: dict, now: float | None = None) -> str | None:
+def _simulation_book_guard_reason(
+    up_book: dict,
+    down_book: dict,
+    now: float | None = None,
+    max_skew_seconds: float = SIM_BOOK_MAX_SKEW_SECONDS,
+) -> str | None:
     """Return why a two-leg paper fill is unsafe, or ``None`` when coherent."""
     if up_book.get("quoteSource") != "websocket" or down_book.get("quoteSource") != "websocket":
         return "兩腿並非都來自 WebSocket 完整快照"
@@ -2221,7 +2229,7 @@ def _simulation_book_guard_reason(up_book: dict, down_book: dict, now: float | N
     if max(up_age, down_age) > SIM_BOOK_MAX_AGE_SECONDS:
         return f"兩腿報價過舊 age={max(up_age, down_age):.3f}s"
     skew = abs(float(up_at) - float(down_at))
-    if skew > SIM_BOOK_MAX_SKEW_SECONDS:
+    if skew > max_skew_seconds:
         return f"兩腿更新時間差過大 skew={skew:.3f}s"
     return None
 
@@ -2231,8 +2239,9 @@ def _simulation_books_are_coherent(
     up_book: dict,
     down_book: dict,
     now: float | None = None,
+    max_skew_seconds: float = SIM_BOOK_MAX_SKEW_SECONDS,
 ) -> bool:
-    reason = _simulation_book_guard_reason(up_book, down_book, now)
+    reason = _simulation_book_guard_reason(up_book, down_book, now, max_skew_seconds)
     if reason is None:
         return True
     current = time.monotonic() if now is None else float(now)
@@ -2240,6 +2249,18 @@ def _simulation_books_are_coherent(
         _sim_data_guard_log_at[asset_id] = current
         log.info(f"[SIM-DATA-GUARD:{asset_id}] 跳過模擬成交：{reason}")
     return False
+
+
+def _variant_books_are_coherent(asset_id: str, variant: dict, up_book: dict, down_book: dict) -> bool:
+    """15 分鐘方向組可接受稍大的雙腿更新差；鎖利組仍維持全域限制。"""
+    is_15m_direction = variant.get("directionProfile") == "btc-15m-adaptive"
+    max_skew = (
+        BTC_15M_DIRECTION_BOOK_MAX_SKEW_SECONDS
+        if is_15m_direction
+        else SIM_BOOK_MAX_SKEW_SECONDS
+    )
+    log_key = f"{asset_id}:direction" if is_15m_direction else asset_id
+    return _simulation_books_are_coherent(log_key, up_book, down_book, max_skew_seconds=max_skew)
 
 
 def _notify_ws_price_listeners(token_id: str) -> None:
@@ -2424,8 +2445,6 @@ def _on_ws_price_tick(token_id: str) -> None:
             if up_book is None or down_book is None:
                 break
             ms["upBook"], ms["downBook"] = up_book, down_book
-            if not _simulation_books_are_coherent(aid, up_book, down_book):
-                break
             slug = market["slug"]
             remaining_seconds = (
                 None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
@@ -2434,7 +2453,9 @@ def _on_ws_price_tick(token_id: str) -> None:
             if aid == "btc":
                 log_price_sum_diagnostic(f"sim-ws-{aid}", up_book, down_book, SIM_LOCK_MAX_SUM)
             for variant_id, variant in AB_VARIANT_BY_ID.items():
-                if variant["assetId"] == aid:
+                if variant["assetId"] == aid and _variant_books_are_coherent(
+                    aid, variant, up_book, down_book
+                ):
                     simulate_trading(
                         variant_id, slug, up_book, down_book, remaining_seconds, fair,
                         allow_early_exit=False,
@@ -2612,12 +2633,13 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     remaining_seconds = None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
     fair = estimate_fair_up(aid)
     ms["fair"] = fair  # WS 觸發的即時評估（_on_ws_price_tick）沿用這份，不用每個 tick 都重算
-    if _simulation_books_are_coherent(aid, ms["upBook"], ms["downBook"]):
-        if aid == "btc":
-            log_price_sum_diagnostic(f"sim-poll-{aid}", ms["upBook"], ms["downBook"], SIM_LOCK_MAX_SUM)
-        for variant_id, variant in AB_VARIANT_BY_ID.items():
-            if variant["assetId"] == aid:
-                simulate_trading(variant_id, slug, ms["upBook"], ms["downBook"], remaining_seconds, fair)
+    if aid == "btc" and _simulation_books_are_coherent(aid, ms["upBook"], ms["downBook"]):
+        log_price_sum_diagnostic(f"sim-poll-{aid}", ms["upBook"], ms["downBook"], SIM_LOCK_MAX_SUM)
+    for variant_id, variant in AB_VARIANT_BY_ID.items():
+        if variant["assetId"] == aid and _variant_books_are_coherent(
+            aid, variant, ms["upBook"], ms["downBook"]
+        ):
+            simulate_trading(variant_id, slug, ms["upBook"], ms["downBook"], remaining_seconds, fair)
 
     ms["connected"] = True
     persist_quote(aid, fair)
