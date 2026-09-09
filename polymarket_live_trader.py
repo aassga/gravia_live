@@ -442,6 +442,96 @@ def validate_batch_order_path(token_ids: list[str]) -> dict:
     return result
 
 
+def prepare_limit_orders_batch(
+    orders: list[dict],
+    order_type: str = "FOK",
+) -> dict:
+    """Build and sign a real batch without sending it to the CLOB.
+
+    The caller can yield back to the market-data event loop after this returns,
+    validate the latest order book against the already-signed limits, and only
+    then call :func:`post_prepared_limit_orders_batch`.
+    """
+    if not 1 <= len(orders) <= 15:
+        raise ValueError("POST /orders 每次必須包含 1 到 15 筆訂單")
+
+    _assert_real_order_enabled("prepare POST /orders")
+
+    from py_clob_client_v2.clob_types import OrderType, PostOrdersV2Args
+
+    normalized = [
+        {
+            "token_id": str(order["token_id"]),
+            "side": str(order["side"]).upper(),
+            "price": float(order["price"]),
+            "size": float(order["size"]),
+        }
+        for order in orders
+    ]
+    client = get_client()
+    order_type_value = getattr(OrderType, order_type.upper())
+    sign_started = time.perf_counter()
+    signed_orders = []
+    per_order_sign_ms = []
+    for order in normalized:
+        order_started = time.perf_counter()
+        signed_orders.append(build_order(order["token_id"], order["side"], order["price"], order["size"]))
+        per_order_sign_ms.append(round((time.perf_counter() - order_started) * 1000, 3))
+    sign_ms = (time.perf_counter() - sign_started) * 1000
+    payload = [PostOrdersV2Args(order=signed, orderType=order_type_value) for signed in signed_orders]
+
+    log.warning(
+        "[LIVE] batch 已簽名但尚未送出：%d 筆 %s（建單＋簽名 %.1fms，per_order=%s，backend=%s）",
+        len(normalized),
+        order_type.upper(),
+        sign_ms,
+        per_order_sign_ms,
+        signing_backend_name(),
+    )
+    return {
+        "client": client,
+        "payload": payload,
+        "orders": normalized,
+        "orderType": order_type.upper(),
+        "signMs": sign_ms,
+        "perOrderSignMs": per_order_sign_ms,
+    }
+
+
+def post_prepared_limit_orders_batch(prepared: dict) -> list[dict]:
+    """Send a batch returned by prepare_limit_orders_batch exactly once."""
+    _assert_real_order_enabled("POST /orders")
+    client = prepared["client"]
+    payload = prepared["payload"]
+    normalized = prepared["orders"]
+    log.warning(
+        "[LIVE] 通過簽名後深度驗證，單次 batch 送出 %d 筆 %s 訂單：%s",
+        len(normalized),
+        prepared["orderType"],
+        [
+            {
+                "side": order["side"],
+                "token_id": order["token_id"],
+                "price": order["price"],
+                "size": order["size"],
+            }
+            for order in normalized
+        ],
+    )
+    post_started = time.perf_counter()
+    responses = client.post_orders(payload)
+    post_ms = (time.perf_counter() - post_started) * 1000
+    if not isinstance(responses, (list, tuple)) or len(responses) != len(normalized):
+        raise RuntimeError(f"POST /orders 回應筆數異常：{responses!r}")
+    responses = list(responses)
+    log.warning(
+        "[LIVE] batch 初始撮合回應 %.1fms（未等待 transaction hash）：%s",
+        post_ms,
+        responses,
+    )
+    return responses
+
+
 def place_limit_orders_batch(
     orders: list[dict],
     dry_run: bool | None = None,
@@ -486,51 +576,8 @@ def place_limit_orders_batch(
             for order in normalized
         ]
 
-    _assert_real_order_enabled("POST /orders")
-
-    from py_clob_client_v2.clob_types import OrderType, PostOrdersV2Args
-
-    client = get_client()
-    order_type_value = getattr(OrderType, order_type.upper())
-    sign_started = time.perf_counter()
-    signed_orders = []
-    per_order_sign_ms = []
-    for order in normalized:
-        order_started = time.perf_counter()
-        signed_orders.append(build_order(order["token_id"], order["side"], order["price"], order["size"]))
-        per_order_sign_ms.append(round((time.perf_counter() - order_started) * 1000, 3))
-    sign_ms = (time.perf_counter() - sign_started) * 1000
-    payload = [PostOrdersV2Args(order=signed, orderType=order_type_value) for signed in signed_orders]
-
-    log.warning(
-        "[LIVE] 單次 batch 送出 %d 筆 %s 訂單（建單＋簽名 %.1fms，per_order=%s，backend=%s）：%s",
-        len(normalized),
-        order_type.upper(),
-        sign_ms,
-        per_order_sign_ms,
-        signing_backend_name(),
-        [
-            {
-                "side": order["side"],
-                "token_id": order["token_id"],
-                "price": order["price"],
-                "size": order["size"],
-            }
-            for order in normalized
-        ],
-    )
-    post_started = time.perf_counter()
-    responses = client.post_orders(payload)
-    post_ms = (time.perf_counter() - post_started) * 1000
-    if not isinstance(responses, (list, tuple)) or len(responses) != len(normalized):
-        raise RuntimeError(f"POST /orders 回應筆數異常：{responses!r}")
-    responses = list(responses)
-    log.warning(
-        "[LIVE] batch 初始撮合回應 %.1fms（未等待 transaction hash）：%s",
-        post_ms,
-        responses,
-    )
-    return responses
+    prepared = prepare_limit_orders_batch(normalized, order_type)
+    return post_prepared_limit_orders_batch(prepared)
 
 
 def place_limit_order(

@@ -1093,21 +1093,111 @@ async def _submit_fok(token_id: str, side: str, plan: dict, dry_run: bool) -> tu
     return await _resolve_fok_response(response, dry_run)
 
 
+def _post_sign_pair_revalidation(
+    slug: str | None,
+    up_token: str,
+    up: dict,
+    down_token: str,
+    down: dict,
+) -> tuple[bool, dict]:
+    """Verify that the signed pair is still executable using the newest WS books.
+
+    A signed order's price cannot be changed.  If the latest executable limit is
+    worse than either signed limit, posting the old pair could fill only one leg.
+    """
+    details = {
+        "signedUpLimitPrice": float(up["limitPrice"]),
+        "signedDownLimitPrice": float(down["limitPrice"]),
+        "targetShares": min(float(up["shares"]), float(down["shares"])),
+    }
+    market = sim.state.get("market") or {}
+    current_slug = market.get("slug")
+    if slug and current_slug != slug:
+        return False, {
+            **details,
+            "abortReason": "market_changed_during_signing",
+            "currentWindowSlug": current_slug,
+        }
+
+    try:
+        current_up_token, current_down_token = sim._market_tokens(market)
+    except Exception:
+        current_up_token, current_down_token = None, None
+    if current_up_token != up_token or current_down_token != down_token:
+        return False, {
+            **details,
+            "abortReason": "market_tokens_changed_during_signing",
+        }
+
+    latest_up = sim._ws_get_book(up_token)
+    latest_down = sim._ws_get_book(down_token)
+    if not latest_up or not latest_down:
+        return False, {
+            **details,
+            "abortReason": "latest_ws_book_unavailable_after_signing",
+        }
+    if not _live_books_are_coherent(latest_up, latest_down):
+        return False, {
+            **details,
+            "abortReason": "latest_ws_books_stale_after_signing",
+            "dataGuardReason": _live_book_guard_reason(latest_up, latest_down),
+        }
+
+    cash = _strategy_cash_sync(False)
+    if cash is None:
+        return False, {
+            **details,
+            "abortReason": "cash_cache_unavailable_after_signing",
+        }
+    latest = _direct_pair_plans(
+        latest_up,
+        latest_down,
+        details["targetShares"],
+        cash,
+        diagnostic_slug=None,
+    )
+    if not latest:
+        return False, {
+            **details,
+            "abortReason": "pair_no_longer_profitable_or_fully_executable",
+        }
+
+    latest_up_plan, latest_down_plan = latest
+    latest_up_limit = float(latest_up_plan["limitPrice"])
+    latest_down_limit = float(latest_down_plan["limitPrice"])
+    details.update(
+        {
+            "latestUpRequiredLimitPrice": latest_up_limit,
+            "latestDownRequiredLimitPrice": latest_down_limit,
+            "latestPairDecisionSum": latest_up_limit + latest_down_limit,
+            "postSignGuard": "passed",
+        }
+    )
+    epsilon = 1e-9
+    if (
+        latest_up_limit > float(up["limitPrice"]) + epsilon
+        or latest_down_limit > float(down["limitPrice"]) + epsilon
+    ):
+        details["postSignGuard"] = "failed"
+        details["abortReason"] = "signed_limits_no_longer_cover_latest_depth"
+        return False, details
+    return True, details
+
+
 async def _submit_fok_pair(
     up_token: str,
     up: dict,
     down_token: str,
     down: dict,
     dry_run: bool,
+    slug: str | None = None,
 ) -> tuple[tuple[str, dict], tuple[str, dict]]:
-    """兩腿先簽名，再以同一次 POST /orders 送達 CLOB。
+    """兩腿先簽名，重新驗證最新 WS 深度，再以同一次 POST /orders 送達 CLOB。
 
     Batch 只縮小兩腿的客戶端／網路到達差，不提供跨訂單原子性，因此仍逐腿分類結果，
     讓既有的補鎖利與緊急平倉邏輯接手單腿成交情況。
     """
     _record_order_action_started()
-    if not dry_run:
-        _invalidate_cash_cache()
 
     orders = [
         {
@@ -1123,14 +1213,95 @@ async def _submit_fok_pair(
             "size": down["shares"],
         },
     ]
-    try:
-        responses = await asyncio.to_thread(
-            live.place_limit_orders_batch,
-            orders,
-            dry_run,
-            "FOK",
-            not dry_run,
+    if dry_run:
+        if slug:
+            record_live_window_diagnostic(
+                slug,
+                "pair_batch_submitted",
+                status="pair_submitted",
+                submissionMode="DRY-RUN",
+                pairedShares=min(float(up["shares"]), float(down["shares"])),
+                pairDecisionSum=float(up["limitPrice"]) + float(down["limitPrice"]),
+                upLimitPrice=up["limitPrice"],
+                downLimitPrice=down["limitPrice"],
+            )
+        try:
+            responses = await asyncio.to_thread(
+                live.place_limit_orders_batch,
+                orders,
+                True,
+                "FOK",
+                False,
+            )
+        except Exception as exc:
+            # 保留舊介面的保守語意：測試／替代 adapter 若在 batch 呼叫中拋例外，
+            # 呼叫端無法證明它是否已送出，因此仍停止策略而不是重試。
+            error = {"error": str(exc), "batch": True}
+            return ("unconfirmed", error), ("unconfirmed", error)
+    else:
+        # 簽名是純本機 CPU 工作，失敗時可以確定尚未 POST，因此不能誤標成
+        # unconfirmed。放到 thread 後，主 event loop 仍可在這段時間持續接收 WS 更新。
+        try:
+            prepared = await asyncio.to_thread(live.prepare_limit_orders_batch, orders, "FOK")
+        except Exception as exc:
+            error = {
+                "error": str(exc),
+                "batch": True,
+                "phase": "prepare",
+                "postAttempted": False,
+            }
+            log.error(f"[LIVE] FOK batch 建單或簽名失敗、確定未送出：{exc}", exc_info=True)
+            return ("not_filled", error), ("not_filled", error)
+
+        valid, guard = _post_sign_pair_revalidation(
+            slug,
+            up_token,
+            up,
+            down_token,
+            down,
         )
+        guard["signMs"] = round(float(prepared.get("signMs", 0.0)), 3)
+        if not valid:
+            error = {**guard, "batch": True, "postAttempted": False}
+            log.warning(
+                "[LIVE] batch 簽名後最新深度已失效，取消 POST：%s",
+                error,
+            )
+            if slug:
+                record_live_window_diagnostic(slug, "pair_aborted_after_signing", **error)
+            return ("not_filled", error), ("not_filled", error)
+
+        if slug:
+            record_live_window_diagnostic(
+                slug,
+                "pair_batch_submitted",
+                status="pair_submitted",
+                submissionMode="REAL",
+                pairedShares=min(float(up["shares"]), float(down["shares"])),
+                pairDecisionSum=float(up["limitPrice"]) + float(down["limitPrice"]),
+                upLimitPrice=up["limitPrice"],
+                downLimitPrice=down["limitPrice"],
+                **guard,
+            )
+        try:
+            responses = await asyncio.to_thread(live.post_prepared_limit_orders_batch, prepared)
+        except Exception as exc:
+            # 只有 POST 已開始後的例外才是結果不明；伺服器可能已收到 request。
+            error = {
+                "error": str(exc),
+                "batch": True,
+                "phase": "post",
+                "postAttempted": True,
+            }
+            log.error(f"[LIVE] FOK batch POST 後結果不明：{exc}", exc_info=True)
+            return ("unconfirmed", error), ("unconfirmed", error)
+        finally:
+            # 只在真正開始 POST 後刷新餘額；若在簽名期間啟動 balance request，會跟
+            # 關鍵送單共用 HTTP client，反而增加自我延遲。
+            _invalidate_cash_cache()
+
+    try:
+        response_count = len(responses)
     except Exception as exc:
         # 整個 batch 沒有逐腿回應時，不能假設兩腿都沒成交；網路斷線、5xx 或 SDK
         # 例外都可能發生在伺服器已收單之後。標成 unconfirmed 會讓上層 halt，避免重送。
@@ -1138,8 +1309,8 @@ async def _submit_fok_pair(
         log.error(f"[LIVE] FOK batch 結果不明：{exc}", exc_info=True)
         return ("unconfirmed", error), ("unconfirmed", error)
 
-    if len(responses) != 2:
-        error = {"error": f"unexpected_batch_response_count={len(responses)}", "batch": True}
+    if response_count != 2:
+        error = {"error": f"unexpected_batch_response_count={response_count}", "batch": True}
         return ("unconfirmed", error), ("unconfirmed", error)
 
     up_result, down_result = await asyncio.gather(
@@ -1540,8 +1711,8 @@ async def _execute_direct_pair(
     down_token = _token_id("Down")
     record_live_window_diagnostic(
         slug,
-        "pair_batch_submitted",
-        status="pair_submitted",
+        "pair_batch_preparing",
+        status="candidate",
         submissionMode="DRY-RUN" if dry_run else "REAL",
         pairedShares=min(float(up["shares"]), float(down["shares"])),
         pairDecisionSum=float(up["limitPrice"]) + float(down["limitPrice"]),
@@ -1554,6 +1725,7 @@ async def _execute_direct_pair(
         down_token,
         down,
         dry_run,
+        slug,
     )
     record_live_window_diagnostic(
         slug,

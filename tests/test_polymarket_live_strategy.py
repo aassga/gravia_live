@@ -279,6 +279,30 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.order for item in posted], ["signed-up", "signed-down"])
         self.assertEqual([item.orderType for item in posted], ["FOK", "FOK"])
 
+    def test_real_batch_can_be_signed_then_posted_in_two_phases(self):
+        client = MagicMock()
+        client.post_orders.return_value = [
+            {"success": True, "status": "matched", "orderID": "up-order"},
+            {"success": True, "status": "matched", "orderID": "down-order"},
+        ]
+        orders = [
+            {"token_id": "up", "side": "BUY", "price": 0.40, "size": 5.0},
+            {"token_id": "down", "side": "BUY", "price": 0.50, "size": 5.0},
+        ]
+        with (
+            patch.object(trader, "LIVE_TRADING", True),
+            patch.object(trader, "STRATEGY_ARMED", True),
+            patch.object(trader, "get_client", return_value=client),
+            patch.object(trader, "build_order", side_effect=["signed-up", "signed-down"]),
+        ):
+            prepared = trader.prepare_limit_orders_batch(orders, "FOK")
+            client.post_orders.assert_not_called()
+            responses = trader.post_prepared_limit_orders_batch(prepared)
+
+        client.post_orders.assert_called_once()
+        self.assertEqual(len(responses), 2)
+        self.assertIn("signMs", prepared)
+
     def test_limit_price_rounds_in_adverse_direction_plus_one_tick_buffer(self):
         book = {"tickSize": 0.01}
         buy_fill = {"worstPrice": 0.40012}
@@ -508,6 +532,84 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             "FOK",
             False,
         )
+
+    def test_post_sign_guard_rejects_limits_that_no_longer_cover_depth(self):
+        up = {"limitPrice": 0.40, "shares": 5.0}
+        down = {"limitPrice": 0.50, "shares": 5.0}
+        books = [self._fresh_ws_book({"asks": [], "bids": []}) for _ in range(2)]
+        latest = (
+            {"limitPrice": 0.41, "shares": 5.0},
+            {"limitPrice": 0.50, "shares": 5.0},
+        )
+        with (
+            patch.object(strategy.sim, "_ws_get_book", side_effect=books),
+            patch.object(strategy, "_live_books_are_coherent", return_value=True),
+            patch.object(strategy, "_strategy_cash_sync", return_value=100.0),
+            patch.object(strategy, "_direct_pair_plans", return_value=latest),
+        ):
+            valid, details = strategy._post_sign_pair_revalidation(
+                "btc-window", "up-token", up, "down-token", down
+            )
+
+        self.assertFalse(valid)
+        self.assertEqual(details["abortReason"], "signed_limits_no_longer_cover_latest_depth")
+        self.assertEqual(details["postSignGuard"], "failed")
+
+    async def test_real_pair_revalidates_after_signing_before_post(self):
+        up = {"limitPrice": 0.40, "shares": 5.0}
+        down = {"limitPrice": 0.50, "shares": 5.0}
+        events = []
+
+        def prepare(*_args):
+            events.append("prepare")
+            return {"signMs": 12.3}
+
+        def guard(*_args):
+            events.append("guard")
+            return True, {"postSignGuard": "passed"}
+
+        def post(*_args):
+            events.append("post")
+            return [
+                {"success": True, "status": "matched", "orderID": "up-order"},
+                {"success": True, "status": "matched", "orderID": "down-order"},
+            ]
+
+        with (
+            patch.object(trader, "prepare_limit_orders_batch", side_effect=prepare),
+            patch.object(strategy, "_post_sign_pair_revalidation", side_effect=guard),
+            patch.object(trader, "post_prepared_limit_orders_batch", side_effect=post),
+            patch.object(strategy, "_invalidate_cash_cache"),
+        ):
+            up_result, down_result = await strategy._submit_fok_pair(
+                "up-token", up, "down-token", down, False, "btc-window"
+            )
+
+        self.assertEqual(events, ["prepare", "guard", "post"])
+        self.assertEqual(up_result[0], "filled")
+        self.assertEqual(down_result[0], "filled")
+
+    async def test_real_pair_aborts_after_signing_without_post(self):
+        up = {"limitPrice": 0.40, "shares": 5.0}
+        down = {"limitPrice": 0.50, "shares": 5.0}
+        prepared = {"signMs": 12.3}
+        with (
+            patch.object(trader, "prepare_limit_orders_batch", return_value=prepared),
+            patch.object(
+                strategy,
+                "_post_sign_pair_revalidation",
+                return_value=(False, {"abortReason": "signed_limits_no_longer_cover_latest_depth"}),
+            ),
+            patch.object(trader, "post_prepared_limit_orders_batch") as post,
+        ):
+            up_result, down_result = await strategy._submit_fok_pair(
+                "up-token", up, "down-token", down, False, "btc-window"
+            )
+
+        post.assert_not_called()
+        self.assertEqual(up_result[0], "not_filled")
+        self.assertEqual(down_result[0], "not_filled")
+        self.assertFalse(up_result[1]["postAttempted"])
 
     async def test_real_execution_prefers_matched_trade_price(self):
         plan = {"observedVwap": 0.40, "limitPrice": 0.42, "shares": 10.0}
