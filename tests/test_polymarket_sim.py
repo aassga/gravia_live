@@ -40,6 +40,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim._sim_data_guard_log_at.clear()
         sim._pair_stability_candidates.clear()
         sim._direction_stability_candidates.clear()
+        sim._btc_15m_ask_history.clear()
         sim._window_diag_dirty.clear()
         sim._chainlink_twap_history.clear()
         sim._chainlink_twap_latest.clear()
@@ -355,136 +356,110 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertEqual(pos["side"], "Down")
 
-    def test_btc_15m_uses_only_dedicated_lock_and_adaptive_direction_variants(self):
+    def test_btc_15m_uses_only_dump_then_hedge_variant(self):
         self.assertNotIn("btc-4h", [asset["id"] for asset in sim.ASSETS])
         variants = [v for v in sim.AB_VARIANTS if v["assetId"] == "btc-15m"]
-        self.assertEqual(
-            [v["id"] for v in variants],
-            ["btc-15m-adaptive-lock", "btc-15m-chainlink-late-direction"],
-        )
-        self.assertTrue(variants[0]["executionSafePair"])
-        self.assertEqual(variants[0]["minDepthMultiplier"], 2.0)
-        self.assertEqual(variants[1]["directionProfile"], "btc-15m-adaptive")
-        self.assertEqual(variants[0]["lockMaxSum"], 0.98)
-        self.assertEqual(variants[1]["stakePct"], 7.0)
+        self.assertEqual([v["id"] for v in variants], ["btc-15m-dump-then-hedge"])
+        variant = variants[0]
+        self.assertTrue(variant["dumpThenHedge"])
+        self.assertEqual(variant["lookbackSeconds"], 3.0)
+        self.assertEqual(variant["minMovePct"], 15.0)
+        self.assertEqual(variant["entryWindowSeconds"], 120.0)
+        self.assertEqual(variant["targetShares"], 5.0)
+        self.assertEqual(variant["lockMaxSum"], 0.95)
+        self.assertEqual(variant["minNetPerShare"], 0.01)
 
-    def test_btc_15m_lock_requires_continuous_deep_pair(self):
-        up_book = {
+    @staticmethod
+    def _timed_book(ask, observed_at, size=1_000.0):
+        return {
             "tickSize": 0.01,
             "minOrderSize": 5.0,
-            "asks": [{"price": 0.39, "size": 1_000.0}],
-            "bids": [],
-        }
-        down_book = {
-            "tickSize": 0.01,
-            "minOrderSize": 5.0,
-            "asks": [{"price": 0.39, "size": 1_000.0}],
-            "bids": [],
-        }
-        with patch.object(sim.time, "monotonic", side_effect=[100.0, 100.21]):
-            self.assertFalse(
-                sim._try_direct_pair("btc-15m-adaptive-lock", "btc-15m-window", up_book, down_book)
-            )
-            self.assertTrue(
-                sim._try_direct_pair("btc-15m-adaptive-lock", "btc-15m-window", up_book, down_book)
-            )
-        self.assertTrue(sim.ab_states["btc-15m-adaptive-lock"]["position"]["hedged"])
-
-    def test_btc_15m_adaptive_direction_requires_stable_chainlink_and_market_agreement(self):
-        slug = "btc-updown-15m-test"
-        self._set_chainlink_signal(
-            opening=100.0, current=100.15, asset_id="btc-15m", slug=slug
-        )
-        up_book = {
-            "tickSize": 0.01,
-            "minOrderSize": 5.0,
-            "asks": [{"price": 0.80, "size": 1_000.0}],
-            "bids": [{"price": 0.79, "size": 1_000.0}],
+            "asks": [{"price": ask, "size": size}],
+            "bids": [{"price": max(0.01, ask - 0.01), "size": size}],
             "quoteSource": "websocket",
-            "receivedAtMonotonic": 100.0,
+            "receivedAtMonotonic": observed_at,
         }
-        down_book = {
-            "tickSize": 0.01,
-            "minOrderSize": 5.0,
-            "asks": [{"price": 0.20, "size": 1_000.0}],
-            "bids": [{"price": 0.19, "size": 1_000.0}],
-        }
-        with patch.object(sim.time, "monotonic", side_effect=[100.0, 100.0, 101.6, 101.6]):
-            sim._try_late_direction_entry(
-                "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
+
+    def _trigger_15m_up_dump(self, slug="btc-updown-15m-test", remaining=895.0):
+        vid = "btc-15m-dump-then-hedge"
+        sim.simulate_trading(
+            vid, slug, self._timed_book(0.80, 100.0), self._timed_book(0.20, 100.0),
+            remaining, None,
+        )
+        with patch.object(sim.time, "monotonic", return_value=103.1):
+            sim.simulate_trading(
+                vid, slug, self._timed_book(0.64, 103.1), self._timed_book(0.20, 103.1),
+                remaining - 3.1, None,
             )
-            self.assertIsNone(sim.ab_states["btc-15m-chainlink-late-direction"]["position"])
-            sim._try_late_direction_entry(
-                "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
-            )
-        pos = sim.ab_states["btc-15m-chainlink-late-direction"]["position"]
+        return sim.ab_states[vid]
+
+    def test_btc_15m_enters_dropped_leg_in_first_two_minutes(self):
+        st = self._trigger_15m_up_dump()
+        pos = st["position"]
         self.assertIsNotNone(pos)
         self.assertEqual(pos["side"], "Up")
-        self.assertGreaterEqual(pos["fairProbability"], sim.BTC_15M_DIRECTION_MIN_PROBABILITY)
-        self.assertGreaterEqual(pos["entryEdge"], sim.BTC_15M_DIRECTION_MIN_EDGE_PER_SHARE)
-        self.assertLessEqual(
-            pos["entryDecisionNotional"] + pos["entryDecisionFee"],
-            sim.BTC_15M_DIRECTION_MAX_BUDGET_USD,
-        )
+        self.assertEqual(pos["shares"], 5.0)
+        self.assertAlmostEqual(pos["signalDropPct"], 20.0)
+        self.assertEqual(pos["strategyMode"], "dump_then_hedge")
+        self.assertEqual(st["dumpHedgeStats"]["leg1Entries"], 1)
 
-    def test_btc_15m_adaptive_direction_rejects_market_disagreement(self):
-        slug = "btc-updown-15m-disagree"
-        self._set_chainlink_signal(
-            opening=100.0, current=100.20, asset_id="btc-15m", slug=slug
-        )
-        up_book = self._fresh_ws_book({
-            "tickSize": 0.01,
-            "minOrderSize": 5.0,
-            "asks": [{"price": 0.41, "size": 1_000.0}],
-            "bids": [{"price": 0.40, "size": 1_000.0}],
-        })
-        down_book = {
-            "tickSize": 0.01,
-            "minOrderSize": 5.0,
-            "asks": [{"price": 0.61, "size": 1_000.0}],
-            "bids": [{"price": 0.60, "size": 1_000.0}],
-        }
-        sim._try_late_direction_entry(
-            "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
-        )
-        self.assertIsNone(sim.ab_states["btc-15m-chainlink-late-direction"]["position"])
+    def test_btc_15m_does_not_enter_after_first_two_minutes(self):
+        st = self._trigger_15m_up_dump(remaining=770.0)
+        self.assertIsNone(st["position"])
+        diag = st["windowDiagnostics"][0]
+        self.assertEqual(diag["lastReason"], "outside_dump_entry_window")
 
-    def test_btc_15m_direction_does_not_require_unused_opposite_book(self):
-        slug = "btc-updown-15m-selected-leg-only"
-        self._set_chainlink_signal(
-            opening=100.0, current=100.15, asset_id="btc-15m", slug=slug
+    def test_btc_15m_requires_full_five_share_leg1_depth(self):
+        vid = "btc-15m-dump-then-hedge"
+        slug = "btc-updown-15m-shallow"
+        sim.simulate_trading(
+            vid, slug, self._timed_book(0.80, 100.0), self._timed_book(0.20, 100.0),
+            895.0, None,
         )
-        up_book = {
-            "tickSize": 0.01,
-            "minOrderSize": 5.0,
-            "asks": [{"price": 0.80, "size": 1_000.0}],
-            "bids": [{"price": 0.79, "size": 1_000.0}],
-            "quoteSource": "websocket",
-            "receivedAtMonotonic": 100.0,
-        }
-        down_book = {"asks": [], "bids": [], "quoteSource": "rest_fallback"}
-        with patch.object(sim.time, "monotonic", side_effect=[100.0, 100.0, 101.6, 101.6]):
-            sim._try_late_direction_entry(
-                "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
+        with patch.object(sim.time, "monotonic", return_value=103.1):
+            sim.simulate_trading(
+                vid, slug, self._timed_book(0.64, 103.1, size=4.0),
+                self._timed_book(0.20, 103.1), 891.9, None,
             )
-            sim._try_late_direction_entry(
-                "btc-15m-chainlink-late-direction", slug, up_book, down_book, 20.0
-            )
-        pos = sim.ab_states["btc-15m-chainlink-late-direction"]["position"]
-        self.assertIsNotNone(pos)
-        self.assertEqual(pos["side"], "Up")
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        self.assertEqual(sim.ab_states[vid]["dumpHedgeStats"]["leg1Rejected"], 1)
 
-    def test_btc_15m_signal_scales_confidence_with_remaining_volatility(self):
-        now_ms = int(time.time() * 1000)
-        sim._chainlink_twap_history.extend(
-            (now_ms - (60 - i * 10) * 1000, 100.0 + (0.03 if i % 2 else -0.03))
-            for i in range(7)
-        )
-        signal = {"opening": 100.0, "current": 100.1, "observedAt": now_ms}
-        short = sim.estimate_btc_15m_direction_signal(signal, 12.0)
-        long = sim.estimate_btc_15m_direction_signal(signal, 30.0)
-        self.assertGreater(short["probability"], long["probability"])
-        self.assertLess(short["projectedSigmaPct"], long["projectedSigmaPct"])
+    def test_btc_15m_completes_fee_aware_opposite_leg_and_can_repeat(self):
+        vid = "btc-15m-dump-then-hedge"
+        slug = "btc-updown-15m-complete"
+        st = self._trigger_15m_up_dump(slug=slug)
+        with patch.object(sim.time, "monotonic", return_value=103.2):
+            sim.simulate_trading(
+                vid, slug, self._timed_book(0.64, 103.2), self._timed_book(0.20, 103.2),
+                891.8, None,
+            )
+        self.assertIsNone(st["position"])
+        self.assertEqual(len(st["pendingSettlements"]), 1)
+        completed = st["pendingSettlements"][0]
+        self.assertTrue(completed["hedged"])
+        self.assertGreater(completed["lockedPnl"], 0)
+        self.assertEqual(st["dumpHedgeStats"]["completedCycles"], 1)
+
+        # 完成後清掉三秒歷史；同一個舊訊號不能在下一個 tick 立刻重複進場。
+        with patch.object(sim.time, "monotonic", return_value=103.3):
+            sim.simulate_trading(
+                vid, slug, self._timed_book(0.64, 103.3), self._timed_book(0.20, 103.3),
+                891.7, None,
+            )
+        self.assertIsNone(st["position"])
+
+    def test_btc_15m_does_not_hedge_when_price_sum_or_net_is_not_safe(self):
+        vid = "btc-15m-dump-then-hedge"
+        slug = "btc-updown-15m-no-hedge"
+        st = self._trigger_15m_up_dump(slug=slug)
+        with patch.object(sim.time, "monotonic", return_value=103.2):
+            sim.simulate_trading(
+                vid, slug, self._timed_book(0.64, 103.2), self._timed_book(0.28, 103.2),
+                891.8, None,
+            )
+        self.assertIsNotNone(st["position"])
+        self.assertFalse(st["position"]["hedged"])
+        self.assertEqual(st["windowDiagnostics"][0]["lastReason"], "dump_hedge_sum_above_maximum")
 
     def test_chainlink_signal_rejects_stale_observation(self):
         self._set_chainlink_signal()
@@ -677,15 +652,13 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNone(sim._simulation_book_guard_reason(up, down, now))
         self.assertTrue(sim._simulation_books_are_coherent("btc", up, down, now))
 
-    def test_btc_15m_direction_ignores_opposite_leg_without_relaxing_lock_variants(self):
+    def test_btc_15m_dump_variant_validates_the_used_leg_inside_strategy(self):
         now = 100.0
         up = {"quoteSource": "websocket", "receivedAtMonotonic": now - 0.10}
         down = {"quoteSource": "websocket", "receivedAtMonotonic": now - 0.75}
-        direction = sim.AB_VARIANT_BY_ID["btc-15m-chainlink-late-direction"]
-        lock = sim.AB_VARIANT_BY_ID["btc-15m-adaptive-lock"]
+        dump = sim.AB_VARIANT_BY_ID["btc-15m-dump-then-hedge"]
         with patch.object(sim.time, "monotonic", return_value=now):
-            self.assertTrue(sim._variant_books_are_coherent("btc-15m", direction, up, down))
-            self.assertFalse(sim._variant_books_are_coherent("btc-15m", lock, up, down))
+            self.assertTrue(sim._variant_books_are_coherent("btc-15m", dump, up, down))
 
     def test_ws_tick_does_not_trade_until_both_reconnect_snapshots_arrive(self):
         ms = sim.markets_state["btc"]

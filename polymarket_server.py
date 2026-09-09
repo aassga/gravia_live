@@ -180,6 +180,18 @@ BTC_15M_DIRECTION_STABILITY_SECONDS    = 0.75
 BTC_15M_DIRECTION_STAKE_PCT            = 7.0
 BTC_15M_DIRECTION_MAX_BUDGET_USD       = 10.0
 BTC_15M_DIRECTION_MIN_CASH_RESERVE_USD = 10.0
+
+# BTC 15 分鐘「暴跌後補腿」紙上策略。這組刻意使用新的 variant id，避免把舊的
+# 15m 直接鎖利／Chainlink 尾盤方向性績效混進來。第一腿只在窗口開始後 120 秒內，
+# 以 WebSocket best ask 與約 3 秒前的同腿 ask 比較；第二腿則不受進場窗口限制，
+# 但必須用相同股數通過完整深度、滑價、動態費用與最低淨利檢查。
+BTC_15M_DUMP_LOOKBACK_SECONDS       = 3.0
+BTC_15M_DUMP_MIN_MOVE_PCT           = 15.0
+BTC_15M_DUMP_ENTRY_WINDOW_SECONDS   = 120.0
+BTC_15M_DUMP_TARGET_SHARES          = 5.0
+BTC_15M_DUMP_LOCK_MAX_SUM           = 0.95
+BTC_15M_DUMP_MIN_NET_PER_SHARE      = 0.01
+BTC_15M_DUMP_MIN_CASH_RESERVE_USD   = 5.0
 # Chainlink RTDS 仍供 15m／4h 方向性策略與結算觀察使用。BTC 5m 這次刻意改回 Binance
 # 只是比較訊號來源是否影響下單率；Binance 並非結算來源，結果可能與市場最終判定不同。
 CHAINLINK_RTDS_URL = "wss://ws-live-data.polymarket.com"
@@ -251,17 +263,18 @@ for _asset in ASSETS:
         continue
     if _asset["id"] == "btc-15m":
         AB_VARIANTS.append({
-            "id":                  "btc-15m-adaptive-lock",
+            "id":                  "btc-15m-dump-then-hedge",
             "assetId":             "btc-15m",
-            "label":               "BTC 15m 深度確認兩腿鎖利",
+            "label":               "BTC 15m 暴跌後補腿（3s/-15%）",
             "entryMaxPrice":       None,
-            "lockMaxSum":          0.98,
-            "executionSafePair":   True,
-            "stakePct":            10.0,
-            "maxPairBudgetUsd":    20.0,
-            "minCashReserveUsd":   10.0,
-            "minDepthMultiplier":  2.0,
-            "stabilitySeconds":    0.20,
+            "lockMaxSum":          BTC_15M_DUMP_LOCK_MAX_SUM,
+            "dumpThenHedge":       True,
+            "lookbackSeconds":     BTC_15M_DUMP_LOOKBACK_SECONDS,
+            "minMovePct":          BTC_15M_DUMP_MIN_MOVE_PCT,
+            "entryWindowSeconds":  BTC_15M_DUMP_ENTRY_WINDOW_SECONDS,
+            "targetShares":        BTC_15M_DUMP_TARGET_SHARES,
+            "minNetPerShare":      BTC_15M_DUMP_MIN_NET_PER_SHARE,
+            "minCashReserveUsd":   BTC_15M_DUMP_MIN_CASH_RESERVE_USD,
         })
     else:
         for _cfg in _VARIANT_CONFIGS:
@@ -291,23 +304,7 @@ for _asset in ASSETS:
         })
     # BTC 15m／4h 保留結算同源 Chainlink；BTC 5m 暫時另開新的 Binance variant id，
     # 讓本次比較不會混入原本 Chainlink 方向組的歷史績效。
-    if _asset["id"] == "btc-15m":
-        AB_VARIANTS.append({
-            "id":                    "btc-15m-chainlink-late-direction",
-            "assetId":               "btc-15m",
-            "label":                 "BTC 15m Chainlink 自適應方向性（T-20~60s）",
-            "entryMaxPrice":         None,
-            "lockMaxSum":            SIM_LOCK_MAX_SUM,
-            "lateDirectionOnly":     True,
-            "directionProfile":      "btc-15m-adaptive",
-            "lateDirectionMaxPrice": BTC_15M_DIRECTION_MAX_PRICE,
-            "stakePct":              BTC_15M_DIRECTION_STAKE_PCT,
-            "maxDirectionalBudgetUsd": BTC_15M_DIRECTION_MAX_BUDGET_USD,
-            "minCashReserveUsd":     BTC_15M_DIRECTION_MIN_CASH_RESERVE_USD,
-            "minDepthMultiplier":    BTC_15M_DIRECTION_DEPTH_MULTIPLIER,
-            "stabilitySeconds":      BTC_15M_DIRECTION_STABILITY_SECONDS,
-        })
-    elif _asset["id"] == "btc":
+    if _asset["id"] == "btc":
         AB_VARIANTS.append({
             "id":                    "btc-binance-late-direction",
             "assetId":               "btc",
@@ -334,7 +331,7 @@ for _asset in ASSETS:
             "minDepthMultiplier":    LIVE_MIRROR_DEPTH_MULTIPLIER,
             "stabilitySeconds":      LIVE_MIRROR_STABILITY_SECONDS,
         })
-    elif _asset["binanceSymbol"] == "BTCUSDT":
+    elif _asset["id"] != "btc-15m" and _asset["binanceSymbol"] == "BTCUSDT":
         AB_VARIANTS.append({
             "id":                    f"{_asset['id']}-chainlink-late-direction",
             "assetId":               _asset["id"],
@@ -402,6 +399,14 @@ def _new_variant_state() -> dict:
             "rescueHedges": 0,
             "rescueUnwinds": 0,
             "rescueFailures": 0,
+        },
+        "dumpHedgeStats": {
+            "signalsDetected": 0,
+            "leg1Entries": 0,
+            "leg1Rejected": 0,
+            "hedgeChecks": 0,
+            "completedCycles": 0,
+            "unhedgedSettlements": 0,
         },
     }
 
@@ -517,6 +522,7 @@ def reset_with_balance(start_balance: float) -> None:
     for vid in ab_states:
         ab_states[vid] = _new_variant_state()
         ab_states[vid]["peakPortfolio"] = shared_config["startBalance"]
+    _btc_15m_ask_history.clear()
     _window_diag_dirty.clear()
     global sim_state
     sim_state = ab_states[DEFAULT_VARIANT_ID]
@@ -1344,6 +1350,73 @@ def _target_order_size(variant_id: str) -> tuple[float, float]:
 
 _pair_stability_candidates: dict[str, dict] = {}
 _direction_stability_candidates: dict[str, dict] = {}
+_btc_15m_ask_history: dict[str, dict[str, deque[tuple[float, float]]]] = {}
+
+
+def _dump_hedge_stats(st: dict) -> dict:
+    defaults = {
+        "signalsDetected": 0,
+        "leg1Entries": 0,
+        "leg1Rejected": 0,
+        "hedgeChecks": 0,
+        "completedCycles": 0,
+        "unhedgedSettlements": 0,
+    }
+    stats = st.setdefault("dumpHedgeStats", {})
+    for key, value in defaults.items():
+        stats.setdefault(key, value)
+    return stats
+
+
+def _record_btc_15m_asks(
+    slug: str,
+    up_book: dict,
+    down_book: dict,
+    lookback_seconds: float,
+) -> dict[str, dict]:
+    """記錄兩腿 WebSocket best ask，回傳相對約 lookback 秒前的跌幅訊號。
+
+    使用各腿實際收到 WS 更新的 monotonic timestamp，而不是策略被重算的時間，避免
+    Binance／輪詢等額外觸發把同一份舊報價重複寫入，錯誤製造出「持續三秒」的歷史。
+    """
+    histories = _btc_15m_ask_history.setdefault(
+        slug, {"Up": deque(maxlen=4096), "Down": deque(maxlen=4096)}
+    )
+    signals: dict[str, dict] = {}
+    keep_seconds = max(10.0, float(lookback_seconds) * 4)
+    for side, book in (("Up", up_book), ("Down", down_book)):
+        asks = book.get("asks") or []
+        observed_at = book.get("receivedAtMonotonic")
+        if (
+            not asks
+            or book.get("quoteSource") != "websocket"
+            or not isinstance(observed_at, (int, float))
+        ):
+            continue
+        price = float(asks[0]["price"])
+        history = histories[side]
+        if history and float(observed_at) <= history[-1][0] + 1e-9:
+            continue
+        history.append((float(observed_at), price))
+        cutoff = float(observed_at) - float(lookback_seconds)
+        while len(history) > 1 and history[1][0] < float(observed_at) - keep_seconds:
+            history.popleft()
+        reference = None
+        for sample_at, sample_price in reversed(history):
+            if sample_at <= cutoff:
+                reference = (sample_at, sample_price)
+                break
+        if reference and reference[1] > 0:
+            drop_pct = (reference[1] - price) / reference[1] * 100
+            signals[side] = {
+                "side": side,
+                "dropPct": drop_pct,
+                "referencePrice": reference[1],
+                "referenceAt": reference[0],
+                "currentPrice": price,
+                "currentAt": float(observed_at),
+            }
+    return signals
 
 
 def executable_ask_depth(book: dict, limit_price: float) -> float:
@@ -1625,6 +1698,211 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     enter_position(variant_id, slug, "Up", up_fill, budget, None, None)
     hedge_position(variant_id, "Down", down_fill)
     return True
+
+
+def _try_btc_15m_dump_then_hedge(
+    variant_id: str,
+    slug: str,
+    up_book: dict,
+    down_book: dict,
+    remaining_seconds: float | None,
+) -> None:
+    """15m 紙上策略：前三分鐘內追蹤 ask，前兩分鐘暴跌先進一腿，之後費後補腿。
+
+    這不是原子套利：Leg 1 到 Leg 2 之間刻意保留方向曝險。沒有等到合格的 Leg 2
+    就抱到市場結算，讓模擬如實反映策略最主要的尾部風險。
+    """
+    variant = AB_VARIANT_BY_ID[variant_id]
+    st = ab_states[variant_id]
+    stats = _dump_hedge_stats(st)
+    lookback = float(variant["lookbackSeconds"])
+    signals = _record_btc_15m_asks(slug, up_book, down_book, lookback)
+    pos = st.get("position")
+
+    if pos is None:
+        window_seconds = 900.0
+        entry_window = float(variant["entryWindowSeconds"])
+        if remaining_seconds is None:
+            record_window_diagnostic(variant_id, slug, "missing_remaining_seconds")
+            return
+        elapsed = window_seconds - float(remaining_seconds)
+        if elapsed < 0 or elapsed > entry_window:
+            record_window_diagnostic(
+                variant_id, slug, "outside_dump_entry_window",
+                remainingSeconds=remaining_seconds,
+                elapsedSeconds=max(0.0, elapsed),
+            )
+            return
+
+        candidates = [
+            signal for signal in signals.values()
+            if float(signal["dropPct"]) >= float(variant["minMovePct"])
+        ]
+        if not candidates:
+            best_drop = max((float(x["dropPct"]) for x in signals.values()), default=None)
+            record_window_diagnostic(
+                variant_id, slug, "dump_below_threshold" if signals else "dump_history_warming",
+                remainingSeconds=remaining_seconds,
+                bestDumpPct=best_drop,
+                dumpThresholdPct=float(variant["minMovePct"]),
+            )
+            return
+
+        signal = max(candidates, key=lambda row: float(row["dropPct"]))
+        side = str(signal["side"])
+        book = up_book if side == "Up" else down_book
+        signal_key = (
+            f"{slug}|{side}|{float(signal['referenceAt']):.6f}|"
+            f"{float(signal['currentAt']):.6f}|{float(signal['currentPrice']):.6f}"
+        )
+        if st.get("lastDumpSignalKey") != signal_key:
+            stats["signalsDetected"] += 1
+            st["lastDumpSignalKey"] = signal_key
+        common = {
+            "remainingSeconds": remaining_seconds,
+            "selectedSide": side,
+            "dumpPct": float(signal["dropPct"]),
+            "dumpReferencePrice": float(signal["referencePrice"]),
+            "dumpCurrentAsk": float(signal["currentPrice"]),
+            "dumpLookbackSeconds": lookback,
+        }
+        if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
+            stats["leg1Rejected"] += 1
+            record_window_diagnostic(
+                variant_id, slug, "dump_leg_book_not_fresh",
+                dataGuardReason=_simulation_single_book_guard_reason(book), **common,
+            )
+            return
+
+        shares = float(variant["targetShares"])
+        min_order_size = float(book.get("minOrderSize", 1) or 1)
+        fill = simulate_buy_fill(book, shares)
+        if (
+            not fill
+            or shares < min_order_size
+            or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD
+        ):
+            stats["leg1Rejected"] += 1
+            record_window_diagnostic(
+                variant_id, slug, "dump_leg1_incomplete_fill_or_minimum",
+                targetShares=shares, minOrderSize=min_order_size, **common,
+            )
+            return
+
+        cash, _ = compute_cash_and_portfolio(variant_id)
+        reserve = float(variant.get("minCashReserveUsd", 0.0))
+        # 進 Leg 1 前先替未來 Leg 2 保留完整資金，不讓已有鎖利部位把可用現金吃光後，
+        # 新週期只買得起第一腿卻永遠買不起對沖腿。
+        max_pair_fee_per_share = 2 * SIM_TAKER_FEE_RATE * 0.25
+        required_pair_cash = shares * (float(variant["lockMaxSum"]) + max_pair_fee_per_share)
+        if required_pair_cash > max(0.0, cash - reserve) + 1e-9:
+            stats["leg1Rejected"] += 1
+            record_window_diagnostic(
+                variant_id, slug, "dump_insufficient_reserved_pair_cash",
+                cashUsd=cash, requiredPairCash=required_pair_cash, reserveUsd=reserve, **common,
+            )
+            return
+
+        enter_position(
+            variant_id, slug, side, fill, required_pair_cash, None, None
+        )
+        pos = st["position"]
+        pos.update({
+            "strategyMode": "dump_then_hedge",
+            "signalSource": "polymarket_ws_best_ask",
+            "signalDropPct": float(signal["dropPct"]),
+            "signalReferencePrice": float(signal["referencePrice"]),
+            "signalCurrentAsk": float(signal["currentPrice"]),
+            "signalLookbackSeconds": lookback,
+            "signalRemainingSeconds": float(remaining_seconds),
+            "hedgeWaitStartedAt": time.time(),
+        })
+        stats["leg1Entries"] += 1
+        record_window_diagnostic(
+            variant_id, slug, "dump_leg1_entered",
+            status="waiting_for_hedge", **common,
+        )
+        save_sim_state()
+        log.info(
+            f"[SIM:{variant_id}] 暴跌 Leg1 {side} drop={signal['dropPct']:.2f}% "
+            f"${signal['referencePrice']:.3f}->${signal['currentPrice']:.3f} "
+            f"VWAP=${fill['vwap']:.4f} shares={shares:.0f}"
+        )
+        return
+
+    if pos.get("windowSlug") != slug or pos.get("hedged"):
+        return
+    if remaining_seconds is None or float(remaining_seconds) <= 0:
+        record_window_diagnostic(variant_id, slug, "dump_window_closed_before_hedge")
+        return
+
+    other_side = "Down" if pos["side"] == "Up" else "Up"
+    other_book = down_book if other_side == "Down" else up_book
+    stats["hedgeChecks"] += 1
+    if not _simulation_direction_book_is_fresh(variant["assetId"], other_side, other_book):
+        record_window_diagnostic(
+            variant_id, slug, "dump_hedge_book_not_fresh",
+            selectedSide=other_side,
+            dataGuardReason=_simulation_single_book_guard_reason(other_book),
+        )
+        return
+    hedge_fill = simulate_buy_fill(other_book, float(pos["shares"]))
+    if not hedge_fill:
+        record_window_diagnostic(
+            variant_id, slug, "dump_hedge_insufficient_depth",
+            selectedSide=other_side, targetShares=pos["shares"],
+        )
+        return
+
+    projected_cost = (
+        _position_decision_cost(pos)
+        + hedge_fill["decisionNotional"]
+        + hedge_fill["decisionFee"]
+    )
+    price_sum = float(pos["entryDecisionPrice"]) + float(hedge_fill["decisionPrice"])
+    net_per_share = (float(pos["shares"]) - projected_cost) / float(pos["shares"])
+    cash, _ = compute_cash_and_portfolio(variant_id)
+    reserve = float(variant.get("minCashReserveUsd", 0.0))
+    hedge_cost = hedge_fill["decisionNotional"] + hedge_fill["decisionFee"]
+    details = {
+        "selectedSide": other_side,
+        "pairDecisionSum": price_sum,
+        "pairNetPerShare": net_per_share,
+        "hedgeDecisionPrice": hedge_fill["decisionPrice"],
+        "targetShares": pos["shares"],
+    }
+    if price_sum > float(variant["lockMaxSum"]):
+        record_window_diagnostic(variant_id, slug, "dump_hedge_sum_above_maximum", **details)
+        return
+    if net_per_share < float(variant["minNetPerShare"]):
+        record_window_diagnostic(variant_id, slug, "dump_hedge_net_below_minimum", **details)
+        return
+    if hedge_cost > max(0.0, cash - reserve) + 1e-9:
+        record_window_diagnostic(
+            variant_id, slug, "dump_hedge_insufficient_cash", cashUsd=cash, **details
+        )
+        return
+
+    hedge_position(variant_id, other_side, hedge_fill)
+    completed = st["position"]
+    completed["hedgeWaitSeconds"] = max(
+        0.0, time.time() - float(completed.get("hedgeWaitStartedAt", time.time()))
+    )
+    completed["cycleCompletedAt"] = time.time()
+    st["pendingSettlements"].append(completed)
+    st["position"] = None
+    stats["completedCycles"] += 1
+    # 同一個 3 秒暴跌訊號只能建立一組；完成後重新累積三秒歷史，才允許下一個週期。
+    _btc_15m_ask_history.pop(slug, None)
+    record_window_diagnostic(
+        variant_id, slug, "dump_cycle_completed",
+        status="entered_locked", hedgeWaitSeconds=completed["hedgeWaitSeconds"], **details,
+    )
+    save_sim_state()
+    log.info(
+        f"[SIM:{variant_id}] 暴跌策略完成補腿 {other_side} "
+        f"wait={completed['hedgeWaitSeconds']:.2f}s 淨鎖利=${completed['lockedPnl']:+.2f}"
+    )
 
 
 def estimate_btc_15m_direction_signal(
@@ -2263,7 +2541,8 @@ def simulate_trading(
     variant = AB_VARIANT_BY_ID[variant_id]
     settings = {k: variant.get(k) for k in (
         "lockMaxSum", "lateDirectionMaxPrice", "directionSignalSource",
-        "minDepthMultiplier", "stabilitySeconds")}
+        "minDepthMultiplier", "stabilitySeconds", "lookbackSeconds",
+        "minMovePct", "entryWindowSeconds", "targetShares", "minNetPerShare")}
     settings["stakePct"] = variant.get("stakePct", shared_config["stakePct"])
     with decision_evaluation("SIM", variant_id, slug, evaluation_source,
                              up_book, down_book, remaining_seconds, settings):
@@ -2311,6 +2590,12 @@ def _simulate_trading_impl(
 
     if variant.get("marketMakerOnly"):
         update_market_maker_quotes(variant_id, slug, up_book, down_book, remaining_seconds)
+        return
+
+    if variant.get("dumpThenHedge"):
+        _try_btc_15m_dump_then_hedge(
+            variant_id, slug, up_book, down_book, remaining_seconds
+        )
         return
 
     if pos is None:
@@ -2448,6 +2733,14 @@ def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
         "exitReason":   pos.get("exitReason"),
         "fairProbability": pos.get("fairProbability"),
         "entryEdge":    pos.get("entryEdge"),
+        "strategyMode": pos.get("strategyMode"),
+        "signalSource": pos.get("signalSource"),
+        "signalDropPct": pos.get("signalDropPct"),
+        "signalReferencePrice": pos.get("signalReferencePrice"),
+        "signalCurrentAsk": pos.get("signalCurrentAsk"),
+        "signalLookbackSeconds": pos.get("signalLookbackSeconds"),
+        "signalRemainingSeconds": pos.get("signalRemainingSeconds"),
+        "hedgeWaitSeconds": pos.get("hedgeWaitSeconds"),
         "maker":         bool(pos.get("maker")),
         "tradeType":    trade_type,
         "outcome":      outcome,
@@ -2472,6 +2765,8 @@ def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
         st["wins"] += 1
     if AB_VARIANT_BY_ID[variant_id].get("marketMakerOnly") and not pos.get("hedged"):
         _maker_stats(st)["singleLegSettlements"] += 1
+    if AB_VARIANT_BY_ID[variant_id].get("dumpThenHedge") and not pos.get("hedged"):
+        _dump_hedge_stats(st)["unhedgedSettlements"] += 1
     record_window_diagnostic(
         variant_id,
         pos["windowSlug"],
@@ -2526,6 +2821,7 @@ def queue_settlement(slug: str) -> None:
         quotes = st.get("makerQuotes")
         if isinstance(quotes, dict) and quotes.get("windowSlug") == slug:
             st["makerQuotes"] = None
+    _btc_15m_ask_history.pop(slug, None)
     save_sim_state()
 
 # ── Polymarket 市場資料 WebSocket（只用在模擬版）───────────────────────────
@@ -2662,7 +2958,7 @@ def _variant_books_are_coherent(asset_id: str, variant: dict, up_book: dict, dow
     """Dispatch each strategy only after the data it actually uses is safe."""
     # Every direction-only variant validates its selected BUY leg after the
     # signal determines the side. Pair strategies still require both legs.
-    if variant.get("lateDirectionOnly"):
+    if variant.get("lateDirectionOnly") or variant.get("dumpThenHedge"):
         return True
     max_skew = SIM_BOOK_MAX_SKEW_SECONDS
     log_key = asset_id
@@ -3186,6 +3482,7 @@ def build_ab_leaderboard() -> list:
             "label":         v["label"],
             "strategyType":  "maker" if v.get("marketMakerOnly") else "taker",
             "liveMirrorOnly": bool(v.get("liveMirrorOnly")),
+            "dumpThenHedge": bool(v.get("dumpThenHedge")),
             "entryMaxPrice": v["entryMaxPrice"],
             "lockMaxSum":    v["lockMaxSum"],
             "stakePct":      float(v.get("stakePct", shared_config["stakePct"])),
@@ -3209,6 +3506,12 @@ def build_ab_leaderboard() -> list:
             "maxDrawdown":   st.get("maxDrawdown", 0.0),
             "makerQuotes":   st.get("makerQuotes"),
             "makerStats":    _maker_stats(st) if v.get("marketMakerOnly") else None,
+            "dumpHedgeStats": _dump_hedge_stats(st) if v.get("dumpThenHedge") else None,
+            "lookbackSeconds": v.get("lookbackSeconds"),
+            "minMovePct": v.get("minMovePct"),
+            "entryWindowSeconds": v.get("entryWindowSeconds"),
+            "targetShares": v.get("targetShares"),
+            "minNetPerShare": v.get("minNetPerShare"),
             "windowDiagnostics": [decision_diag.public_summary(x)
                                   for x in st.get("windowDiagnostics", [])[:20]],
             "trades":        st["trades"],  # 這組自己的成交紀錄，前端獨立顯示，方便看個別下注金額
