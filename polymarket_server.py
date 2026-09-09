@@ -2898,7 +2898,10 @@ def _run_ws_simulation_tick(token_id: str) -> None:
             )
             fair = ms.get("fair")
             if aid == "btc":
-                log_price_sum_diagnostic(f"sim-ws-{aid}", up_book, down_book, SIM_LOCK_MAX_SUM)
+                log_price_sum_diagnostic(
+                    f"sim-ws-{aid}", up_book, down_book,
+                    AB_VARIANT_BY_ID["btc-historical-hybrid"]["lockMaxSum"],
+                )
             for variant_id, variant in AB_VARIANT_BY_ID.items():
                 if variant["assetId"] == aid and _variant_books_are_coherent(
                     aid, variant, up_book, down_book
@@ -3109,7 +3112,10 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     fair = estimate_fair_up(aid)
     ms["fair"] = fair  # WS 觸發的即時評估（_on_ws_price_tick）沿用這份，不用每個 tick 都重算
     if aid == "btc" and _simulation_books_are_coherent(aid, ms["upBook"], ms["downBook"]):
-        log_price_sum_diagnostic(f"sim-poll-{aid}", ms["upBook"], ms["downBook"], SIM_LOCK_MAX_SUM)
+        log_price_sum_diagnostic(
+            f"sim-poll-{aid}", ms["upBook"], ms["downBook"],
+            AB_VARIANT_BY_ID["btc-historical-hybrid"]["lockMaxSum"],
+        )
     for variant_id, variant in AB_VARIANT_BY_ID.items():
         if variant["assetId"] == aid and _variant_books_are_coherent(
             aid, variant, ms["upBook"], ms["downBook"]
