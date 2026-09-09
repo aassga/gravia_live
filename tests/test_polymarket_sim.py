@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -287,6 +288,12 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual(variant["directionSignalSource"], "binance_window")
         hybrid = sim.AB_VARIANT_BY_ID["btc-historical-hybrid"]
         self.assertEqual(hybrid["directionSignalSource"], "chainlink_twap")
+        self.assertEqual(hybrid["lockMaxSum"], sim.LIVE_MIRROR_LOCK_MAX_SUM)
+        self.assertEqual(hybrid["stakePct"], sim.LIVE_MIRROR_STAKE_PCT)
+        self.assertEqual(hybrid["maxPairBudgetUsd"], sim.LIVE_MIRROR_MAX_PAIR_BUDGET_USD)
+        self.assertEqual(hybrid["minCashReserveUsd"], sim.LIVE_MIRROR_MIN_CASH_RESERVE_USD)
+        self.assertEqual(hybrid["minDepthMultiplier"], sim.LIVE_MIRROR_DEPTH_MULTIPLIER)
+        self.assertEqual(hybrid["stabilitySeconds"], sim.LIVE_MIRROR_STABILITY_SECONDS)
 
     def test_historical_hybrid_prioritizes_direct_pair(self):
         self._set_binance_signal()
@@ -527,6 +534,92 @@ class PolymarketSimulationTests(unittest.TestCase):
             sim.set_ws_simulation_ticks_enabled(old_enabled)
         self.assertEqual(received, ["token-a"])
         self.assertEqual(sim._ws_get_book("token-a")["quoteSource"], "websocket")
+
+    def test_live_action_runs_before_deferred_ws_simulation(self):
+        events = []
+
+        def live_listener(_token_id):
+            events.append("live")
+            return True
+
+        async def scenario():
+            sim.register_ws_price_listener(live_listener)
+            try:
+                with patch.object(
+                    sim, "_run_ws_simulation_tick", side_effect=lambda _token: events.append("sim")
+                ):
+                    sim._on_ws_price_tick("priority-token")
+                    self.assertEqual(events, ["live"])
+                    await asyncio.sleep(0)
+                    self.assertEqual(events, ["live", "sim"])
+            finally:
+                sim.unregister_ws_price_listener(live_listener)
+                sim._pending_simulation_ticks.clear()
+
+        asyncio.run(scenario())
+
+    def test_live_action_runs_before_deferred_chainlink_simulation(self):
+        events = []
+        ms = sim.markets_state["btc"]
+        ms.update({
+            "market": {"slug": "btc-window"},
+            "upTokenId": "btc-up-token",
+            "upBook": {"asks": [{"price": 0.4, "size": 10}]},
+            "downBook": {"asks": [{"price": 0.5, "size": 10}]},
+        })
+
+        def live_listener(_token_id):
+            events.append("live")
+            return True
+
+        async def scenario():
+            sim.register_ws_price_listener(live_listener)
+            try:
+                with (
+                    patch.object(sim, "_capture_window_open_chainlink_twap"),
+                    patch.object(
+                        sim, "_run_chainlink_simulation_tick",
+                        side_effect=lambda _aid: events.append("sim"),
+                    ),
+                ):
+                    sim._on_chainlink_twap_tick()
+                    self.assertEqual(events, ["live"])
+                    await asyncio.sleep(0)
+                    self.assertEqual(events, ["live", "sim"])
+            finally:
+                sim.unregister_ws_price_listener(live_listener)
+                sim._pending_simulation_ticks.clear()
+
+        asyncio.run(scenario())
+
+    def test_live_action_runs_before_deferred_binance_simulation(self):
+        events = []
+        ms = sim.markets_state["btc"]
+        ms.update({"market": {"slug": "btc-window"}, "upTokenId": "btc-up-token"})
+
+        def live_listener(_token_id):
+            events.append("live")
+            return True
+
+        async def scenario():
+            sim.register_ws_price_listener(live_listener)
+            try:
+                with (
+                    patch.object(sim, "get_binance_ws_price", return_value=100.5),
+                    patch.object(
+                        sim, "_run_binance_simulation_tick",
+                        side_effect=lambda _aid: events.append("sim"),
+                    ),
+                ):
+                    sim._on_binance_price_tick("BTCUSDT")
+                    self.assertEqual(events, ["live"])
+                    await asyncio.sleep(0)
+                    self.assertEqual(events, ["live", "sim"])
+            finally:
+                sim.unregister_ws_price_listener(live_listener)
+                sim._pending_simulation_ticks.clear()
+
+        asyncio.run(scenario())
 
     def test_binance_tick_notifies_live_listener_immediately_for_btc(self):
         received = []

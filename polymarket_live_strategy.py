@@ -1925,16 +1925,17 @@ def _set_quote_status(source: str) -> None:
 _ws_action_in_flight = {"v": False}
 
 
-def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_lock: asyncio.Lock) -> None:
+def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_lock: asyncio.Lock) -> bool:
     market = sim.state.get("market") or {}
     up_id, down_id = sim._market_tokens(market)
     if token_id not in (up_id, down_id):
-        return
+        return False
     books = (sim._ws_get_book(up_id), sim._ws_get_book(down_id))
     remaining = max(0.0, float(sim.state.get("windowEndsAt") or 0) / 1000 - sim.real_now())
     with _decision_evaluation(market.get("slug"), sim.decision_diag.trigger.get(),
             books[0] or {}, books[1] or {}, remaining):
         _on_ws_tick_sync_impl(token_id, session, decision_lock, books)
+    return bool(_ws_action_in_flight["v"] or decision_lock.locked())
 
 
 def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decision_lock: asyncio.Lock, books) -> None:

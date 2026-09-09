@@ -106,6 +106,8 @@ BTC 5 分鐘方向性策略只要求準備買入的方向腿具備新鮮 WebSock
 
 窗口診斷針對 `btc-historical-hybrid` 保留 `decisionSamples`（最近 12 筆）與 `decisionEvents`（最近 8 筆候選／進場／送單結果），完整快照只留最近 8 個窗口；可用 `POLY_DECISION_EVIDENCE_VARIANTS` 指定其他策略。取樣包含觸發來源、程序 run ID、評估 ID、兩腿前六檔、快照指紋及接收時間、Chainlink／Binance 訊號、當次參數和拒絕原因，並比對當下 WebSocket 快取。一般重複拒絕依觸發來源各自最多每秒取樣一次，避免高頻 WS 排擠輪詢證據；各來源原因首次出現及候選／成交事件另行保留。完整快照只存 SQLite／策略狀態檔，Dashboard 只傳筆數，避免放大每次推播。這是取樣證據，不是逐 tick 完整重播；`matchesLatestWs=false` 表示使用的簿與取樣當下快取不同，單憑此欄不能推論是否能真實成交。
 
+即時行情處理會先執行實盤判斷；只有偵測到候選並排定實盤動作時，才把同一 tick 的模擬計算延後一個 event-loop 回合。三秒輪詢等待外部現貨／K 線請求後，也會重新讀取最新完整 WebSocket 訂單簿。送單工作開始後仍會再用最新訂單簿重算兩腿，候選已消失時不送單。
+
 可在 VPS 用 `python scripts/compare_decisions.py --limit 5` 比對最近窗口，或加 `--window btc-updown-5m-...` 指定窗口。工具僅讀取資料，以同一程序、同一市場和策略尋找最近的實盤取樣，列出時間差、簿是否相同及兩邊決策。此次只補證據，尚未更改輪詢寫回訂單簿的行為或進場門檻。
 
 ### BTC 15 分鐘專用模擬策略
@@ -128,6 +130,7 @@ BTC 5 分鐘方向性策略只要求準備買入的方向腿具備新鮮 WebSock
 - `POLY_VALIDATE_ORDER_PATH=true`：安全驗證模式。每個新市場預熱並簽署兩筆 FOK，但硬性禁止 `POST /orders`；即使另外兩個開關誤設為 `true` 也不會真實執行。
 - `POLY_ENABLE_LATE_DIRECTION=false`：預設禁止窗口末端的單腿方向性下注；只有明確改成 `true` 才會啟用。BTC 5m 啟用後會在剩餘 3–10 秒內使用 Polymarket RTDS Chainlink 60 秒 TWAP 相對窗口開盤 TWAP 判斷方向，不要求 Polymarket 訂單簿同方向。
 - `POLY_LIVE_VARIANT_ID=btc-historical-hybrid`：選擇實盤要對齊的模擬策略。測試 `btc-loose` 時是兩腿鎖利、合計上限 `$0.98`；名稱中的 `$0.45` 是舊單腿欄位，現行兩腿專用流程不使用它。
+- `btc-historical-hybrid` 模擬組直接沿用實盤鏡像的鎖利門檻、下注比例、單筆上限、現金保留、深度倍數與穩定時間；例如 VPS 的 DRY-RUN `0.98 / 15.5%` 會同步套用到該模擬組，避免比較不同參數。
 - 設為 `POLY_LIVE_VARIANT_ID=btc-binance-late-direction` 並開啟 `POLY_ENABLE_LATE_DIRECTION=true` 時，實盤會成為純 `BTC Binance 晚進場方向性（T-10s）`：不先嘗試兩腿鎖利，只在剩餘 3–10 秒按 Binance Futures 窗口漲跌訊號評估單腿進場。
 - `POLY_MAX_PAIR_BUDGET_USD=25`：每組兩腿最多 25 USDC。
 - `POLY_MIN_CASH_RESERVE_USD=5`：至少保留 5 USDC 現金。

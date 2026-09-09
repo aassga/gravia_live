@@ -323,11 +323,16 @@ for _asset in ASSETS:
             "assetId":               "btc",
             "label":                 "BTC 歷史混合（鎖利→Chainlink T-10s）",
             "entryMaxPrice":         None,
-            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lockMaxSum":            LIVE_MIRROR_LOCK_MAX_SUM,
             "lateDirectionOnly":     True,
             "historicalHybrid":      True,
             "directionSignalSource": "chainlink_twap",
             "lateDirectionMaxPrice": 0.92,
+            "stakePct":              LIVE_MIRROR_STAKE_PCT,
+            "maxPairBudgetUsd":      LIVE_MIRROR_MAX_PAIR_BUDGET_USD,
+            "minCashReserveUsd":     LIVE_MIRROR_MIN_CASH_RESERVE_USD,
+            "minDepthMultiplier":    LIVE_MIRROR_DEPTH_MULTIPLIER,
+            "stabilitySeconds":      LIVE_MIRROR_STABILITY_SECONDS,
         })
     elif _asset["binanceSymbol"] == "BTCUSDT":
         AB_VARIANTS.append({
@@ -1097,8 +1102,30 @@ def chainlink_twap_status() -> dict:
     }
 
 
+def _run_chainlink_simulation_tick(aid: str) -> None:
+    ms = markets_state[aid]
+    market = ms.get("market") or {}
+    up_book, down_book = ms.get("upBook"), ms.get("downBook")
+    if not market or not up_book or not down_book:
+        return
+    remaining = None if ms.get("windowEndsAt") is None else max(
+        0.0, ms["windowEndsAt"] / 1000 - real_now()
+    )
+    for variant_id, variant in AB_VARIANT_BY_ID.items():
+        if (
+            variant["assetId"] == aid
+            and variant.get("lateDirectionOnly")
+            and variant.get("directionSignalSource") != "binance_window"
+            and _variant_books_are_coherent(aid, variant, up_book, down_book)
+        ):
+            simulate_trading(
+                variant_id, market["slug"], up_book, down_book,
+                remaining, ms.get("fair"), False, evaluation_source="chainlink",
+            )
+
+
 def _on_chainlink_twap_tick() -> None:
-    """Drive Chainlink directional/hybrid simulations and the embedded live listener."""
+    """Prioritize live Chainlink evaluation before equivalent simulations."""
     for asset in ASSETS:
         if asset.get("binanceSymbol") != "BTCUSDT":
             continue
@@ -1106,23 +1133,19 @@ def _on_chainlink_twap_tick() -> None:
         ms = markets_state[aid]
         _capture_window_open_chainlink_twap(ms)
         market = ms.get("market") or {}
-        up_book, down_book = ms.get("upBook"), ms.get("downBook")
-        if not market or not up_book or not down_book:
+        if not market or not ms.get("upBook") or not ms.get("downBook"):
             continue
-        remaining = None if ms.get("windowEndsAt") is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
-        for variant_id, variant in AB_VARIANT_BY_ID.items():
-            if (
-                variant["assetId"] == aid
-                and variant.get("lateDirectionOnly")
-                and variant.get("directionSignalSource") != "binance_window"
-            ):
-                if _variant_books_are_coherent(aid, variant, up_book, down_book):
-                    simulate_trading(
-                        variant_id, market["slug"], up_book, down_book,
-                        remaining, ms.get("fair"), False, evaluation_source="chainlink",
-                    )
-        if aid == "btc" and ms.get("upTokenId"):
-            _notify_ws_price_listeners(ms["upTokenId"], "chainlink")
+        live_action = bool(
+            aid == "btc"
+            and ms.get("upTokenId")
+            and _notify_ws_price_listeners(ms["upTokenId"], "chainlink")
+        )
+        if live_action:
+            _defer_simulation_tick(
+                "chainlink", aid, lambda aid=aid: _run_chainlink_simulation_tick(aid)
+            )
+        else:
+            _run_chainlink_simulation_tick(aid)
 
 
 def _apply_chainlink_twap_message(message: dict) -> int:
@@ -1208,6 +1231,29 @@ async def chainlink_twap_loop() -> None:
         await asyncio.sleep(delay)
 
 
+def _run_binance_simulation_tick(aid: str) -> None:
+    ms = markets_state[aid]
+    fair = estimate_fair_up(aid)
+    if not fair:
+        return
+    ms["fair"] = fair
+    slug = ms["market"]["slug"]
+    remaining_seconds = (
+        None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
+    )
+    up_book, down_book = ms.get("upBook"), ms.get("downBook")
+    if up_book and down_book:
+        for variant_id, variant in AB_VARIANT_BY_ID.items():
+            if variant["assetId"] == aid and _variant_books_are_coherent(
+                aid, variant, up_book, down_book
+            ):
+                simulate_trading(
+                    variant_id, slug, up_book, down_book, remaining_seconds, fair,
+                    allow_early_exit=False,
+                    evaluation_source="binance",
+                )
+
+
 def _on_binance_price_tick(symbol: str) -> None:
     """Binance 現貨價一有變動就立刻重算 theo、重跑鎖利判斷（純記憶體運算，沒有 I/O，
     很便宜，可以跑得比 3 秒輪詢頻繁很多）。跟 _on_ws_price_tick（Polymarket 訂單簿
@@ -1228,27 +1274,17 @@ def _on_binance_price_tick(symbol: str) -> None:
         ms["spotPrice"] = price
         # BTC 5m 實盤嵌入模式也要由 Binance tick 立即觸發判斷，否則雖然改用 Binance
         # 當訊號，真正送單仍只會等 Polymarket book／Chainlink 更新才被動重算。
-        if aid == "btc" and ms.get("upTokenId"):
-            _notify_ws_price_listeners(ms["upTokenId"], "binance")
-        fair = estimate_fair_up(aid)
-        if not fair:
-            continue
-        ms["fair"] = fair
-        slug = ms["market"]["slug"]
-        remaining_seconds = (
-            None if ms["windowEndsAt"] is None else max(0.0, ms["windowEndsAt"] / 1000 - real_now())
+        live_action = bool(
+            aid == "btc"
+            and ms.get("upTokenId")
+            and _notify_ws_price_listeners(ms["upTokenId"], "binance")
         )
-        up_book, down_book = ms.get("upBook"), ms.get("downBook")
-        if up_book and down_book:
-            for variant_id, variant in AB_VARIANT_BY_ID.items():
-                if variant["assetId"] == aid and _variant_books_are_coherent(
-                    aid, variant, up_book, down_book
-                ):
-                    simulate_trading(
-                        variant_id, slug, up_book, down_book, remaining_seconds, fair,
-                        allow_early_exit=False,
-                        evaluation_source="binance",
-                    )
+        if live_action:
+            _defer_simulation_tick(
+                "binance", aid, lambda aid=aid: _run_binance_simulation_tick(aid)
+            )
+        else:
+            _run_binance_simulation_tick(aid)
 
 
 async def fetch_outcome(session: aiohttp.ClientSession, slug: str) -> str | None:
@@ -2516,6 +2552,7 @@ _ws_book_updated_at: dict = {}
 _ws_last_message_at = 0.0
 _ws_price_listeners: set = set()
 _ws_simulation_ticks_enabled = True
+_pending_simulation_ticks: set[tuple[str, str]] = set()
 _sim_data_guard_log_at: dict = {}
 
 
@@ -2647,22 +2684,40 @@ def _variant_books_are_coherent(asset_id: str, variant: dict, up_book: dict, dow
     return coherent
 
 
-def _notify_ws_price_listeners(token_id: str, source: str = "market_ws") -> None:
+def _notify_ws_price_listeners(token_id: str, source: str = "market_ws") -> bool:
     token = decision_diag.trigger.set(source)
     try:
-        _dispatch_ws_price_listeners(token_id)
+        return _dispatch_ws_price_listeners(token_id)
     finally:
         decision_diag.trigger.reset(token)
 
 
-def _dispatch_ws_price_listeners(token_id: str) -> None:
+def _dispatch_ws_price_listeners(token_id: str) -> bool:
+    action_scheduled = False
     for callback in tuple(_ws_price_listeners):
         try:
             result = callback(token_id)
             if asyncio.iscoroutine(result):
                 asyncio.get_running_loop().create_task(result)
+            elif result:
+                action_scheduled = True
         except Exception as exc:
             log.exception(f"[WS] price listener failed for token={token_id}: {exc}")
+    return action_scheduled
+
+
+def _defer_simulation_tick(source: str, key: str, callback) -> None:
+    """Let a just-scheduled live action run before coalesced simulation work."""
+    tick_key = (source, key)
+    if tick_key in _pending_simulation_ticks:
+        return
+    _pending_simulation_ticks.add(tick_key)
+
+    def run() -> None:
+        _pending_simulation_ticks.discard(tick_key)
+        callback()
+
+    asyncio.get_running_loop().call_soon(run)
 
 
 async def _ws_ensure_meta(session: aiohttp.ClientSession, token_id: str) -> None:
@@ -2820,7 +2875,7 @@ def _ws_apply_message(msg: dict) -> None:
     _mm_maybe_log_summary()
 
 
-def _on_ws_price_tick(token_id: str) -> None:
+def _run_ws_simulation_tick(token_id: str) -> None:
     """跟目前這輪視窗有關的 token 報價一有變動就立刻重跑一次評估（純記憶體運算，
     沒有任何 I/O，很便宜，可以放心讓它跑得比 3 秒輪詢頻繁很多）。
     刻意不呼叫 persist_quote——那個會寫 SQLite，頻率這麼高的話划不來，
@@ -2854,7 +2909,16 @@ def _on_ws_price_tick(token_id: str) -> None:
                         evaluation_source="market_ws",
                     )
             break
-    _notify_ws_price_listeners(token_id)
+
+
+def _on_ws_price_tick(token_id: str) -> None:
+    """Prioritize live evaluation and defer simulation when it schedules work."""
+    if _notify_ws_price_listeners(token_id):
+        _defer_simulation_tick(
+            "market_ws", token_id, lambda: _run_ws_simulation_tick(token_id)
+        )
+        return
+    _run_ws_simulation_tick(token_id)
 
 
 async def market_ws_loop() -> None:
@@ -2951,6 +3015,14 @@ async def _get_midpoint_ws_or_rest(session: aiohttp.ClientSession, token_id: str
     return await fetch_midpoint(session, token_id)
 
 
+def _latest_ws_book_or_fallback(token_id: str, fallback: dict) -> dict:
+    """Prefer the newest complete WS snapshot after unrelated polling I/O."""
+    latest = _ws_get_book(token_id)
+    if latest is not None and latest.get("quoteSource") == "websocket":
+        return latest
+    return fallback
+
+
 # ── 背景抓取任務 ───────────────────────────────────────────────────────────
 
 async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
@@ -3007,6 +3079,15 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
         fetch_klines(session, asset["binanceSymbol"], 60),
         return_exceptions=True,
     )
+    # Spot/klines/midpoint requests can take hundreds of milliseconds. A newer
+    # WS snapshot may have arrived meanwhile; do not overwrite it with the
+    # books captured before those awaits.
+    up_book = _latest_ws_book_or_fallback(up_id, up_book)
+    down_book = _latest_ws_book_or_fallback(down_id, down_book)
+    if up_book.get("bids") and up_book.get("asks"):
+        up_price = (up_book["bids"][0]["price"] + up_book["asks"][0]["price"]) / 2
+    if down_book.get("bids") and down_book.get("asks"):
+        down_price = (down_book["bids"][0]["price"] + down_book["asks"][0]["price"]) / 2
     if not isinstance(up_price, Exception):   ms["upPrice"] = up_price
     if not isinstance(down_price, Exception): ms["downPrice"] = down_price
     ms["upBook"] = up_book

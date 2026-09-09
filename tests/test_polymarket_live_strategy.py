@@ -622,6 +622,30 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         fair = {"fairUp": 0.6, "fairDown": 0.4}
         return up, down, fair
 
+    async def test_ws_pair_entry_revalidates_latest_books_before_submit(self):
+        up, down, fair = self._fair_and_legs()
+        latest_up = {"asks": [{"price": 0.80, "size": 10}], "bids": []}
+        latest_down = {"asks": [{"price": 0.40, "size": 10}], "bids": []}
+        strategy.sim.state["upBook"] = latest_up
+        strategy.sim.state["downBook"] = latest_down
+
+        with (
+            patch.object(strategy, "_strategy_cash_sync", return_value=100.0),
+            patch.object(strategy, "_direct_pair_plans", return_value=None) as revalidate,
+            patch.object(strategy, "_execute_direct_pair", AsyncMock()) as execute,
+        ):
+            await strategy._run_ws_pair_entry(
+                None, "btc-window", up, down, fair, True, asyncio.Lock()
+            )
+
+        self.assertIs(revalidate.call_args.args[0], latest_up)
+        self.assertIs(revalidate.call_args.args[1], latest_down)
+        execute.assert_not_awaited()
+        diagnostic = strategy.live_state["windowDiagnostics"][0]
+        self.assertEqual(
+            diagnostic["reasonCounts"]["pair_candidate_vanished_before_submit"], 1
+        )
+
     async def test_batch_legs_both_filled_creates_locked_position(self):
         up, down, fair = self._fair_and_legs()
 

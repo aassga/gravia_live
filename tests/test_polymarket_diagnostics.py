@@ -100,9 +100,8 @@ class DecisionEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((a["trigger"], b["trigger"]), ("poll", "chainlink"))
         self.assertNotEqual(a["evaluationId"], b["evaluationId"])
 
-    async def test_poll_evidence_detects_book_superseded_while_waiting_for_spot(self):
-        # Reproduce the existing polling race without changing trading behavior:
-        # WS advances during REST I/O; poll subsequently evaluates its earlier snapshot.
+    async def test_poll_refreshes_ws_book_after_waiting_for_spot(self):
+        # WS advances during REST I/O; poll must evaluate and retain the newer snapshot.
         now = time.monotonic()
         old_up, old_down = book(.90, now), book(.08, now)
         new_up, new_down = book(.97, now + .01), book(.02, now + .01)
@@ -142,6 +141,8 @@ class DecisionEvidenceTests(unittest.IsolatedAsyncioTestCase):
             await sim._fetch_one_asset(None, next(a for a in sim.ASSETS if a["id"] == "btc"))
         sample = evidence["decisionEvents"][0]
         self.assertEqual(sample["trigger"], "poll")
-        self.assertFalse(sample["matchesLatestWs"])
-        self.assertEqual(sample["upBook"]["asks"][0]["price"], .90)
-        self.assertEqual(sample["latestWsUpBook"]["asks"][0]["price"], .97)
+        self.assertTrue(sample["matchesLatestWs"])
+        self.assertEqual(sample["upBook"]["asks"][0]["price"], .97)
+        self.assertEqual(
+            sample["latestWsUpBook"]["fingerprint"], sample["upBook"]["fingerprint"]
+        )
