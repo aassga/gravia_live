@@ -28,6 +28,7 @@ from email.utils import parsedate_to_datetime
 from statistics import NormalDist, pstdev
 
 import aiohttp
+import polymarket_diagnostics as decision_diag
 import websockets
 from websockets.server import serve
 
@@ -417,6 +418,7 @@ sim_state = ab_states[DEFAULT_VARIANT_ID]
 def _window_diagnostic(variant_id: str, slug: str) -> dict:
     """Return the bounded per-window strategy record, creating it on first sight."""
     items = ab_states[variant_id].setdefault("windowDiagnostics", [])
+    decision_diag.trim_old_window_evidence(items)
     for item in items:
         if item.get("windowSlug") == slug:
             return item
@@ -474,6 +476,7 @@ def record_window_diagnostic(
     if isinstance(remaining, (int, float)):
         item["minRemainingSeconds"] = min(float(remaining), float(item.get("minRemainingSeconds", remaining)))
         item["maxRemainingSeconds"] = max(float(remaining), float(item.get("maxRemainingSeconds", remaining)))
+    decision_diag.record(item, reason, details)
     _window_diag_dirty.add((variant_id, slug))
     return item
 
@@ -1116,10 +1119,10 @@ def _on_chainlink_twap_tick() -> None:
                 if _variant_books_are_coherent(aid, variant, up_book, down_book):
                     simulate_trading(
                         variant_id, market["slug"], up_book, down_book,
-                        remaining, ms.get("fair"), False,
+                        remaining, ms.get("fair"), False, evaluation_source="chainlink",
                     )
         if aid == "btc" and ms.get("upTokenId"):
-            _notify_ws_price_listeners(ms["upTokenId"])
+            _notify_ws_price_listeners(ms["upTokenId"], "chainlink")
 
 
 def _apply_chainlink_twap_message(message: dict) -> int:
@@ -1226,7 +1229,7 @@ def _on_binance_price_tick(symbol: str) -> None:
         # BTC 5m 實盤嵌入模式也要由 Binance tick 立即觸發判斷，否則雖然改用 Binance
         # 當訊號，真正送單仍只會等 Polymarket book／Chainlink 更新才被動重算。
         if aid == "btc" and ms.get("upTokenId"):
-            _notify_ws_price_listeners(ms["upTokenId"])
+            _notify_ws_price_listeners(ms["upTokenId"], "binance")
         fair = estimate_fair_up(aid)
         if not fair:
             continue
@@ -1244,6 +1247,7 @@ def _on_binance_price_tick(symbol: str) -> None:
                     simulate_trading(
                         variant_id, slug, up_book, down_book, remaining_seconds, fair,
                         allow_early_exit=False,
+                        evaluation_source="binance",
                     )
 
 
@@ -2213,6 +2217,43 @@ def simulate_trading(
     remaining_seconds: float | None,
     fair: dict | None,
     allow_early_exit: bool = True,
+    evaluation_source: str = "direct",
+) -> None:
+    if variant_id not in decision_diag.TARGET_VARIANTS:
+        _simulate_trading_impl(
+            variant_id, slug, up_book, down_book, remaining_seconds, fair, allow_early_exit
+        )
+        return
+    variant = AB_VARIANT_BY_ID[variant_id]
+    settings = {k: variant.get(k) for k in (
+        "lockMaxSum", "lateDirectionMaxPrice", "directionSignalSource",
+        "minDepthMultiplier", "stabilitySeconds")}
+    settings["stakePct"] = variant.get("stakePct", shared_config["stakePct"])
+    with decision_evaluation("SIM", variant_id, slug, evaluation_source,
+                             up_book, down_book, remaining_seconds, settings):
+        _simulate_trading_impl(variant_id, slug, up_book, down_book,
+                               remaining_seconds, fair, allow_early_exit)
+
+
+def decision_evaluation(stream, variant_id, slug, source, up, down, remaining, settings):
+    ms = markets_state[AB_VARIANT_BY_ID[variant_id]["assetId"]]
+    signal = {k: ms.get(k) for k in ("chainlinkTwapPrice", "chainlinkTwapObservedAt",
+        "windowOpenChainlinkTwapPrice", "windowOpenChainlinkTwapObservedAt",
+        "windowOpenChainlinkTwapSlug", "spotPrice", "windowOpenSpotPrice")}
+    token_ids = (ms.get("upTokenId"), ms.get("downTokenId"))
+    return decision_diag.evaluation(stream, variant_id, slug, source, up, down,
+        remaining, settings, signal,
+        lambda: tuple(_ws_get_book(tid) if tid else None for tid in token_ids))
+
+
+def _simulate_trading_impl(
+    variant_id: str,
+    slug: str,
+    up_book: dict,
+    down_book: dict,
+    remaining_seconds: float | None,
+    fair: dict | None,
+    allow_early_exit: bool = True,
 ) -> None:
     variant = AB_VARIANT_BY_ID[variant_id]
     st = ab_states[variant_id]
@@ -2606,7 +2647,15 @@ def _variant_books_are_coherent(asset_id: str, variant: dict, up_book: dict, dow
     return coherent
 
 
-def _notify_ws_price_listeners(token_id: str) -> None:
+def _notify_ws_price_listeners(token_id: str, source: str = "market_ws") -> None:
+    token = decision_diag.trigger.set(source)
+    try:
+        _dispatch_ws_price_listeners(token_id)
+    finally:
+        decision_diag.trigger.reset(token)
+
+
+def _dispatch_ws_price_listeners(token_id: str) -> None:
     for callback in tuple(_ws_price_listeners):
         try:
             result = callback(token_id)
@@ -2802,6 +2851,7 @@ def _on_ws_price_tick(token_id: str) -> None:
                     simulate_trading(
                         variant_id, slug, up_book, down_book, remaining_seconds, fair,
                         allow_early_exit=False,
+                        evaluation_source="market_ws",
                     )
             break
     _notify_ws_price_listeners(token_id)
@@ -2983,7 +3033,8 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
         if variant["assetId"] == aid and _variant_books_are_coherent(
             aid, variant, ms["upBook"], ms["downBook"]
         ):
-            simulate_trading(variant_id, slug, ms["upBook"], ms["downBook"], remaining_seconds, fair)
+            simulate_trading(variant_id, slug, ms["upBook"], ms["downBook"], remaining_seconds, fair,
+                             evaluation_source="poll")
 
     ms["connected"] = True
     persist_quote(aid, fair)
@@ -3071,7 +3122,8 @@ def build_ab_leaderboard() -> list:
             "maxDrawdown":   st.get("maxDrawdown", 0.0),
             "makerQuotes":   st.get("makerQuotes"),
             "makerStats":    _maker_stats(st) if v.get("marketMakerOnly") else None,
-            "windowDiagnostics": st.get("windowDiagnostics", [])[:20],
+            "windowDiagnostics": [decision_diag.public_summary(x)
+                                  for x in st.get("windowDiagnostics", [])[:20]],
             "trades":        st["trades"],  # 這組自己的成交紀錄，前端獨立顯示，方便看個別下注金額
         })
     return rows

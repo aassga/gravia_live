@@ -79,7 +79,8 @@ def _load_strategy_state() -> dict:
             "earlyExits": int(state.get("earlyExits", 0)),
             "updatedAt": state.get("updatedAt"),
             "trades": state.get("trades", []),
-            "windowDiagnostics": state.get("windowDiagnostics", [])[:20],
+            "windowDiagnostics": [strategy.sim.decision_diag.public_summary(x)
+                                  for x in state.get("windowDiagnostics", [])[:20]],
         }
     except Exception as exc:
         return {"halted": True, "haltReason": f"strategy_state_read_failed: {exc}"}

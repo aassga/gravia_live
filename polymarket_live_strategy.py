@@ -154,6 +154,7 @@ def _load_live_state() -> dict:
 
 
 live_state = _load_live_state()
+sim.decision_diag.trim_old_window_evidence(live_state.setdefault("windowDiagnostics", []))
 _live_window_diag_dirty = False
 
 
@@ -190,6 +191,7 @@ def _live_window_diagnostic(slug: str) -> dict:
     """Return one bounded, persistent diagnostic summary for a live market window."""
     global _live_window_diag_dirty
     items = live_state.setdefault("windowDiagnostics", [])
+    sim.decision_diag.trim_old_window_evidence(items)
     execution_mode = "REAL" if REAL_EXECUTION_ENABLED else "DRY-RUN"
     for item in items:
         if (
@@ -255,6 +257,7 @@ def record_live_window_diagnostic(slug: str, reason: str | None = None, **detail
     if isinstance(remaining, (int, float)):
         item["minRemainingSeconds"] = min(float(remaining), float(item.get("minRemainingSeconds", remaining)))
         item["maxRemainingSeconds"] = max(float(remaining), float(item.get("maxRemainingSeconds", remaining)))
+    sim.decision_diag.record(item, reason, details)
     _live_window_diag_dirty = True
     return item
 
@@ -1719,6 +1722,29 @@ async def evaluate_and_act(
     fair: dict | None,
     allow_early_exit: bool = True,
 ) -> None:
+    with _decision_evaluation(slug, "poll", sim.state.get("upBook") or {},
+                              sim.state.get("downBook") or {}, remaining_seconds):
+        await _evaluate_and_act_impl(slug, session, remaining_seconds, fair, allow_early_exit)
+
+
+def _decision_evaluation(slug, source, up, down, remaining):
+    return sim.decision_evaluation("REAL" if REAL_EXECUTION_ENABLED else "DRY-RUN",
+        LIVE_VARIANT_ID, slug, source, up, down, remaining,
+        {"lockMaxSum": LOCK_MAX_SUM, "lateDirectionMaxPrice": LATE_DIRECTION_MAX_PRICE,
+         "stakePct": STAKE_PCT, "minDepthMultiplier": PAIR_MIN_DEPTH_MULTIPLIER,
+         "stabilitySeconds": PAIR_STABILITY_SECONDS, "halted": live_state.get("halted"),
+         "positionPresent": live_state.get("position") is not None,
+         "lastActionAt": live_state.get("lastActionAt"),
+         "actionCooldownSeconds": ACTION_COOLDOWN_SECONDS})
+
+
+async def _evaluate_and_act_impl(
+    slug: str,
+    session: aiohttp.ClientSession,
+    remaining_seconds: float | None,
+    fair: dict | None,
+    allow_early_exit: bool = True,
+) -> None:
     if live_state.get("halted"):
         record_live_window_diagnostic(
             slug, "strategy_halted", haltReason=live_state.get("haltReason")
@@ -1900,6 +1926,18 @@ _ws_action_in_flight = {"v": False}
 
 
 def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_lock: asyncio.Lock) -> None:
+    market = sim.state.get("market") or {}
+    up_id, down_id = sim._market_tokens(market)
+    if token_id not in (up_id, down_id):
+        return
+    books = (sim._ws_get_book(up_id), sim._ws_get_book(down_id))
+    remaining = max(0.0, float(sim.state.get("windowEndsAt") or 0) / 1000 - sim.real_now())
+    with _decision_evaluation(market.get("slug"), sim.decision_diag.trigger.get(),
+            books[0] or {}, books[1] or {}, remaining):
+        _on_ws_tick_sync_impl(token_id, session, decision_lock, books)
+
+
+def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decision_lock: asyncio.Lock, books) -> None:
     """同步、零延遲版本，取代舊版 _evaluate_ws_tick——見上面 _ws_action_in_flight 的說明。"""
     if live_state.get("halted"):
         return
@@ -1909,9 +1947,11 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
     up_id, down_id = sim._market_tokens(market)
     if token_id not in (up_id, down_id):
         return
-    up_book = sim._ws_get_book(up_id)
-    down_book = sim._ws_get_book(down_id)
+    up_book, down_book = books
     if up_book is None or down_book is None:
+        record_live_window_diagnostic(market["slug"], "missing_ws_book",
+                                      upBookPresent=up_book is not None,
+                                      downBookPresent=down_book is not None)
         return
     # 跟模擬盤自己的即時判斷（_on_ws_price_tick）對齊：只要求兩邊都有書可用，不額外
     # 要求 quoteSource 一定要是 "websocket"。以前這裡多這條件，但 WS 每次斷線重連時
@@ -1937,12 +1977,15 @@ def _on_ws_tick_sync(token_id: str, session: aiohttp.ClientSession, decision_loc
     record_live_window_observation(slug, up_book, down_book, remaining, "ws")
 
     if decision_lock.locked() or _ws_action_in_flight["v"]:
+        record_live_window_diagnostic(slug, "decision_busy",
+            decisionLocked=decision_lock.locked(), actionInFlight=_ws_action_in_flight["v"])
         return
 
     pos = live_state.get("position")
 
     if pos is None:
         if time.time() - float(live_state.get("lastActionAt", 0)) < ACTION_COOLDOWN_SECONDS:
+            record_live_window_diagnostic(slug, "action_cooldown")
             return
         if remaining <= 0:
             return

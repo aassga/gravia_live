@@ -104,6 +104,10 @@ BTC 5 分鐘方向性策略只要求準備買入的方向腿具備新鮮 WebSock
 
 真實下單管線也會在 `polymarket_live_strategy_state.json` 的 `windowDiagnostics` 保留最近 50 個窗口，並由實盤狀態 WebSocket 提供最近 20 個。每筆會標示 `REAL`／`DRY-RUN`、實際使用的策略、兩腿報價與深度、保守限價、Chainlink／Binance 訊號、拒絕原因、候選消失、batch／單腿結果及結算損益；高頻事件只在記憶體聚合，最多每 3 秒寫檔一次。
 
+窗口診斷針對 `btc-historical-hybrid` 保留 `decisionSamples`（最近 12 筆）與 `decisionEvents`（最近 8 筆候選／進場／送單結果），完整快照只留最近 8 個窗口；可用 `POLY_DECISION_EVIDENCE_VARIANTS` 指定其他策略。取樣包含觸發來源、程序 run ID、評估 ID、兩腿前六檔、快照指紋及接收時間、Chainlink／Binance 訊號、當次參數和拒絕原因，並比對當下 WebSocket 快取。一般重複拒絕依觸發來源各自最多每秒取樣一次，避免高頻 WS 排擠輪詢證據；各來源原因首次出現及候選／成交事件另行保留。完整快照只存 SQLite／策略狀態檔，Dashboard 只傳筆數，避免放大每次推播。這是取樣證據，不是逐 tick 完整重播；`matchesLatestWs=false` 表示使用的簿與取樣當下快取不同，單憑此欄不能推論是否能真實成交。
+
+可在 VPS 用 `python scripts/compare_decisions.py --limit 5` 比對最近窗口，或加 `--window btc-updown-5m-...` 指定窗口。工具僅讀取資料，以同一程序、同一市場和策略尋找最近的實盤取樣，列出時間差、簿是否相同及兩邊決策。此次只補證據，尚未更改輪詢寫回訂單簿的行為或進場門檻。
+
 ### BTC 15 分鐘專用模擬策略
 
 `btc-15m` 不再套用 5 分鐘的三組固定門檻，而是跑兩個專用且獨立記帳的策略：
