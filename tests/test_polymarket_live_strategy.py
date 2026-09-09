@@ -1206,7 +1206,9 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             strategy.sim.SIM_DEPTH_CAP_FRACTION,
             1.0 / strategy.PAIR_MIN_DEPTH_MULTIPLIER,
         )
-        self.assertEqual(pos["shares"], depth * expected_fraction)
+        # 實際策略會把 outcome token 股數無條件捨去為整數；3x 深度時
+        # 40 / 3 = 13.333...，因此應送 13 股，不可期待小數股。
+        self.assertEqual(pos["shares"], float(int(depth * expected_fraction)))
 
     def _set_market_for_preflight(self):
         strategy.sim.state["market"] = {
