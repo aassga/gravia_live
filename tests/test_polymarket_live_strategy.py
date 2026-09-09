@@ -281,7 +281,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
 
     def test_real_batch_can_be_signed_then_posted_in_two_phases(self):
         client = MagicMock()
-        client.post_orders.return_value = [
+        batch_response = [
             {"success": True, "status": "matched", "orderID": "up-order"},
             {"success": True, "status": "matched", "orderID": "down-order"},
         ]
@@ -294,14 +294,25 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             patch.object(trader, "STRATEGY_ARMED", True),
             patch.object(trader, "get_client", return_value=client),
             patch.object(trader, "build_order", side_effect=["signed-up", "signed-down"]),
+            patch.object(trader.log, "warning") as warning,
         ):
             prepared = trader.prepare_limit_orders_batch(orders, "FOK")
+            warning.assert_not_called()
             client.post_orders.assert_not_called()
+
+            def respond(_payload):
+                # 最後一道安全閘門通過後，第一個外部動作必須是 POST；不能先寫 log。
+                warning.assert_not_called()
+                return batch_response
+
+            client.post_orders.side_effect = respond
             responses = trader.post_prepared_limit_orders_batch(prepared)
 
         client.post_orders.assert_called_once()
         self.assertEqual(len(responses), 2)
         self.assertIn("signMs", prepared)
+        self.assertIn("postStartDelayMs", prepared)
+        self.assertIn("postMs", prepared)
 
     def test_limit_price_rounds_in_adverse_direction_plus_one_tick_buffer(self):
         book = {"tickSize": 0.01}

@@ -29,6 +29,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, ROUND_DOWN
 
 import aiohttp
@@ -70,6 +71,21 @@ EMERGENCY_UNWIND_ORDER_INTERVAL = max(0.5, float(os.environ.get("POLY_EMERGENCY_
 EMERGENCY_UNWIND_EXTRA_TICKS = max(0, int(os.environ.get("POLY_EMERGENCY_UNWIND_EXTRA_TICKS", "3")))
 _validated_order_path_slug: str | None = None
 _live_data_guard_log_at = 0.0
+_ORDER_SIGN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="poly-order-sign")
+_ORDER_POST_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="poly-order-post")
+
+
+def _executor_noop() -> None:
+    return None
+
+
+async def _warm_order_executors() -> None:
+    """在交易機會出現前先建立專用簽名／POST 執行緒，避開共用 thread pool 排隊。"""
+    loop = asyncio.get_running_loop()
+    await asyncio.gather(
+        loop.run_in_executor(_ORDER_SIGN_EXECUTOR, _executor_noop),
+        loop.run_in_executor(_ORDER_POST_EXECUTOR, _executor_noop),
+    )
 
 # 真實版跟隨模擬版 ASSETS 清單裡的哪一個市場，預設是 BTC 5 分鐘窗口（"btc"）。
 # 2026-09：模擬盤驗證出 15 分鐘／4 小時窗口的訂單簿深度比 5 分鐘深很多（少踩到「兩腿
@@ -107,7 +123,7 @@ DIRECT_PAIR_ENABLED = not bool(_LIVE_VARIANT.get("lateDirectionOnly")) or bool(
 # 的 batch 不是原子交易，因此把門檻收緊、要求限價內有數倍深度，並只接受持續存在的機會。
 # 這些參數也由 btc-live-lock 模擬組讀取，避免模擬與實盤再次使用不同條件。
 LOCK_MAX_SUM = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM", "0.95"))))
-PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "1.0")))
+PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_MULTIPLIER", "1.3")))
 PAIR_STABILITY_SECONDS = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.15")))
 RESCUE_LOCK_MAX_SUM = max(LOCK_MAX_SUM, min(0.99, float(os.environ.get("POLY_RESCUE_LOCK_MAX_SUM", "0.99"))))
 LATE_DIRECTION_MAX_PRICE = float(_LIVE_VARIANT.get("lateDirectionMaxPrice", 0.92))
@@ -1240,9 +1256,16 @@ async def _submit_fok_pair(
             return ("unconfirmed", error), ("unconfirmed", error)
     else:
         # 簽名是純本機 CPU 工作，失敗時可以確定尚未 POST，因此不能誤標成
-        # unconfirmed。放到 thread 後，主 event loop 仍可在這段時間持續接收 WS 更新。
+        # unconfirmed。使用預熱過的專用 thread，避免跟背景餘額／成交查詢共用 pool
+        # 排隊；主 event loop 在簽名期間仍可持續接收 WS 更新。
+        loop = asyncio.get_running_loop()
         try:
-            prepared = await asyncio.to_thread(live.prepare_limit_orders_batch, orders, "FOK")
+            prepared = await loop.run_in_executor(
+                _ORDER_SIGN_EXECUTOR,
+                live.prepare_limit_orders_batch,
+                orders,
+                "FOK",
+            )
         except Exception as exc:
             error = {
                 "error": str(exc),
@@ -1260,8 +1283,8 @@ async def _submit_fok_pair(
             down_token,
             down,
         )
-        guard["signMs"] = round(float(prepared.get("signMs", 0.0)), 3)
         if not valid:
+            guard["signMs"] = round(float(prepared.get("signMs", 0.0)), 3)
             error = {**guard, "batch": True, "postAttempted": False}
             log.warning(
                 "[LIVE] batch 簽名後最新深度已失效，取消 POST：%s",
@@ -1271,20 +1294,14 @@ async def _submit_fok_pair(
                 record_live_window_diagnostic(slug, "pair_aborted_after_signing", **error)
             return ("not_filled", error), ("not_filled", error)
 
-        if slug:
-            record_live_window_diagnostic(
-                slug,
-                "pair_batch_submitted",
-                status="pair_submitted",
-                submissionMode="REAL",
-                pairedShares=min(float(up["shares"]), float(down["shares"])),
-                pairDecisionSum=float(up["limitPrice"]) + float(down["limitPrice"]),
-                upLimitPrice=up["limitPrice"],
-                downLimitPrice=down["limitPrice"],
-                **guard,
-            )
         try:
-            responses = await asyncio.to_thread(live.post_prepared_limit_orders_batch, prepared)
+            # 簽名後驗證一通過，下一個有效操作就是把已備妥的 payload 交給專用
+            # POST thread；診斷聚合與 log 全部延後到 request 已經開始之後。
+            responses = await loop.run_in_executor(
+                _ORDER_POST_EXECUTOR,
+                live.post_prepared_limit_orders_batch,
+                prepared,
+            )
         except Exception as exc:
             # 只有 POST 已開始後的例外才是結果不明；伺服器可能已收到 request。
             error = {
@@ -1299,6 +1316,27 @@ async def _submit_fok_pair(
             # 只在真正開始 POST 後刷新餘額；若在簽名期間啟動 balance request，會跟
             # 關鍵送單共用 HTTP client，反而增加自我延遲。
             _invalidate_cash_cache()
+
+        guard.update(
+            {
+                "signMs": round(float(prepared.get("signMs", 0.0)), 3),
+                "perOrderSignMs": prepared.get("perOrderSignMs", []),
+                "signToPostMs": round(float(prepared.get("postStartDelayMs", 0.0)), 3),
+                "clobResponseMs": round(float(prepared.get("postMs", 0.0)), 3),
+            }
+        )
+        if slug:
+            record_live_window_diagnostic(
+                slug,
+                "pair_batch_submitted",
+                status="pair_submitted",
+                submissionMode="REAL",
+                pairedShares=min(float(up["shares"]), float(down["shares"])),
+                pairDecisionSum=float(up["limitPrice"]) + float(down["limitPrice"]),
+                upLimitPrice=up["limitPrice"],
+                downLimitPrice=down["limitPrice"],
+                **guard,
+            )
 
     try:
         response_count = len(responses)
@@ -2408,6 +2446,7 @@ async def strategy_loop() -> None:
     時間差（見對話紀錄裡的診斷）。如果要完全消除這個時間差，改用 run_embedded()，
     讓實盤判斷邏輯跑在 polymarket_server.py 那個進程裡、共用同一條連線。"""
     _log_startup_banner("獨立進程")
+    await _warm_order_executors()
 
     async with aiohttp.ClientSession() as session:
         decision_lock = asyncio.Lock()
@@ -2519,6 +2558,7 @@ async def run_embedded() -> None:
         的部位追蹤是完全獨立於 sim 自己的 ab_states 之外的另一份帳本。
     """
     _log_startup_banner("嵌入模擬盤進程，共用 WS 連線")
+    await _warm_order_executors()
 
     async with aiohttp.ClientSession() as session:
         decision_lock = asyncio.Lock()

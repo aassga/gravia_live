@@ -480,14 +480,6 @@ def prepare_limit_orders_batch(
     sign_ms = (time.perf_counter() - sign_started) * 1000
     payload = [PostOrdersV2Args(order=signed, orderType=order_type_value) for signed in signed_orders]
 
-    log.warning(
-        "[LIVE] batch 已簽名但尚未送出：%d 筆 %s（建單＋簽名 %.1fms，per_order=%s，backend=%s）",
-        len(normalized),
-        order_type.upper(),
-        sign_ms,
-        per_order_sign_ms,
-        signing_backend_name(),
-    )
     return {
         "client": client,
         "payload": payload,
@@ -495,40 +487,37 @@ def prepare_limit_orders_batch(
         "orderType": order_type.upper(),
         "signMs": sign_ms,
         "perOrderSignMs": per_order_sign_ms,
+        "readyAtMonotonic": time.perf_counter(),
     }
 
 
 def post_prepared_limit_orders_batch(prepared: dict) -> list[dict]:
     """Send a batch returned by prepare_limit_orders_batch exactly once."""
     _assert_real_order_enabled("POST /orders")
-    client = prepared["client"]
-    payload = prepared["payload"]
-    normalized = prepared["orders"]
-    log.warning(
-        "[LIVE] 通過簽名後深度驗證，單次 batch 送出 %d 筆 %s 訂單：%s",
-        len(normalized),
-        prepared["orderType"],
-        [
-            {
-                "side": order["side"],
-                "token_id": order["token_id"],
-                "price": order["price"],
-                "size": order["size"],
-            }
-            for order in normalized
-        ],
-    )
+    # 這裡是簽名後驗證到 CLOB 的最終臨界路徑。不要在 post_orders 前做日誌
+    # 格式化或其他 I/O；安全閘門通過後立刻送出已準備好的 payload。
     post_started = time.perf_counter()
-    responses = client.post_orders(payload)
+    prepared["postStartDelayMs"] = (
+        post_started - float(prepared.get("readyAtMonotonic", post_started))
+    ) * 1000
+    responses = prepared["client"].post_orders(prepared["payload"])
     post_ms = (time.perf_counter() - post_started) * 1000
+    normalized = prepared["orders"]
     if not isinstance(responses, (list, tuple)) or len(responses) != len(normalized):
         raise RuntimeError(f"POST /orders 回應筆數異常：{responses!r}")
     responses = list(responses)
     log.warning(
-        "[LIVE] batch 初始撮合回應 %.1fms（未等待 transaction hash）：%s",
+        "[LIVE] batch 已送出：簽名 %.1fms（per_order=%s）、簽名完成至 POST %.1fms、CLOB 初始回應 %.1fms"
+        "（未等待 transaction hash，backend=%s） orders=%s responses=%s",
+        float(prepared.get("signMs", 0.0)),
+        prepared.get("perOrderSignMs", []),
+        float(prepared.get("postStartDelayMs", 0.0)),
         post_ms,
+        signing_backend_name(),
+        normalized,
         responses,
     )
+    prepared["postMs"] = post_ms
     return responses
 
 
