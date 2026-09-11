@@ -190,8 +190,17 @@ def _fetch_state() -> dict:
         "trades": trades,
         "strategyState": strategy_state,
         "strategyConfig": {
-            "label": strategy._LIVE_VARIANT["label"],
+            # 2026-09-12：實盤單邊進場（POLY_LIVE_ENTRY_MAX_PRICE）是 .env 疊加在變體上的，
+            # 變體本身的 label 看不出來，所以顯示名稱把它接在後面，Dashboard 才對得上實際行為。
+            "label": (
+                f"{strategy._LIVE_VARIANT['label']}＋單邊進場 ≤${strategy.ENTRY_MAX_PRICE:.2f}"
+                if strategy.SINGLE_LEG_ENTRY_ENABLED
+                else strategy._LIVE_VARIANT["label"]
+            ),
             "variantId": strategy.LIVE_VARIANT_ID,
+            "singleLegEntryEnabled": strategy.SINGLE_LEG_ENTRY_ENABLED,
+            "entryMaxPrice": strategy.ENTRY_MAX_PRICE,
+            "minEntryEdge": strategy.sim.SIM_MIN_ENTRY_EDGE,
             "assetId": strategy.LIVE_ASSET_ID,
             "firstTradeGuard": strategy_state.get("firstTradeGuard"),
             "stakePct": strategy.STAKE_PCT,
