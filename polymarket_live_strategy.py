@@ -51,6 +51,10 @@ STAKE_PCT = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
 STRATEGY_ARMED = os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
 # Validation mode is a hard safety interlock: it can never submit real orders.
 REAL_EXECUTION_ENABLED = live.LIVE_TRADING and STRATEGY_ARMED and not live.VALIDATE_ORDER_PATH
+# A non-empty ID arms a one-shot gate for the first new REAL trade. The ID makes
+# the gate survive process restarts without accidentally re-arming an old run.
+FIRST_TRADE_GUARD_ID = os.environ.get("POLY_FIRST_TRADE_GUARD_ID", "").strip()
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 _LATE_DIRECTION_REQUESTED = os.environ.get("POLY_ENABLE_LATE_DIRECTION", "false").strip().lower() == "true"
 MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
@@ -110,6 +114,10 @@ if _LIVE_VARIANT["assetId"] != LIVE_ASSET_ID:
     raise RuntimeError(
         f"POLY_LIVE_VARIANT_ID={LIVE_VARIANT_ID} 不屬於 POLY_LIVE_ASSET_ID={LIVE_ASSET_ID}"
     )
+if _LIVE_VARIANT.get("simOnly"):
+    raise RuntimeError(
+        f"POLY_LIVE_VARIANT_ID={LIVE_VARIANT_ID} is simulation-only and cannot place real orders"
+    )
 # 保留舊名稱供既有工具／測試相容。只有明確屬於晚進場方向性的變體才能開啟單腿交易；
 # btc-loose 等兩腿策略即使環境殘留 true，也不會意外啟用方向性下注。
 _LIVE_DIRECTION_VARIANT_ID = LIVE_VARIANT_ID
@@ -129,6 +137,24 @@ RESCUE_LOCK_MAX_SUM = max(LOCK_MAX_SUM, min(0.99, float(os.environ.get("POLY_RES
 LATE_DIRECTION_MAX_PRICE = float(_LIVE_VARIANT.get("lateDirectionMaxPrice", 0.92))
 
 
+# 2026-09-12 依使用者要求：實盤也啟用「兩腿鎖不到就先買便宜那一腿」的單邊進場，判斷條件跟
+# 模擬盤 btc-main／btc-loose 的 entryMaxPrice 路徑同一套（買價 <= 上限、公平機率扣掉全部
+# 成本後 >= SIM_MIN_ENTRY_EDGE）。預設沿用變體的 entryMaxPrice；POLY_LIVE_ENTRY_MAX_PRICE
+# 可覆寫（設 0 代表關閉）。歷史混合變體的 entryMaxPrice 是 None，所以要用 .env 明確打開。
+# 單邊部位進場後交給既有補鎖利／提早退出邏輯，不像晚進場方向性那樣抱到結算。
+def _resolve_entry_max_price() -> float | None:
+    raw = os.environ.get("POLY_LIVE_ENTRY_MAX_PRICE", "").strip()
+    if raw:
+        value = float(raw)
+        return value if value > 0 else None
+    value = _LIVE_VARIANT.get("entryMaxPrice")
+    return float(value) if value is not None else None
+
+
+ENTRY_MAX_PRICE = _resolve_entry_max_price()
+SINGLE_LEG_ENTRY_ENABLED = ENTRY_MAX_PRICE is not None
+
+
 def _new_live_state() -> dict:
     return {
         "position": None,
@@ -145,6 +171,8 @@ def _new_live_state() -> dict:
         "halted": False,
         "haltReason": None,
         "unconfirmedOrder": None,
+        "runtimeDryRun": False,
+        "firstTradeGuard": None,
         "preflightSlug": None,
         "validationSlug": None,
         "validationResult": None,
@@ -194,6 +222,105 @@ def save_live_state() -> None:
             time.sleep(0.1 * (attempt + 1))
 
 
+def _real_execution_enabled() -> bool:
+    """Runtime-aware execution switch; the first-trade guard can disable it immediately."""
+    return REAL_EXECUTION_ENABLED and not bool(live_state.get("runtimeDryRun"))
+
+
+def _write_env_flag(key: str, value: str) -> None:
+    """Persist a safety switch so a service restart remains in DRY-RUN."""
+    lines = []
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    prefix = f"{key}="
+    replacement = f"{key}={value}\n"
+    replaced = False
+    for index, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[index] = replacement
+            replaced = True
+            break
+    if not replaced:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(replacement)
+    tmp_path = ENV_FILE + ".first-trade-guard.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    os.replace(tmp_path, ENV_FILE)
+
+
+def _configure_first_trade_guard() -> None:
+    if not FIRST_TRADE_GUARD_ID:
+        return
+    current = live_state.get("firstTradeGuard")
+    if isinstance(current, dict) and current.get("id") == FIRST_TRADE_GUARD_ID:
+        return
+    live_state["runtimeDryRun"] = False
+    live_state["firstTradeGuard"] = {
+        "id": FIRST_TRADE_GUARD_ID,
+        "variantId": LIVE_VARIANT_ID,
+        "status": "waiting",
+        "armedAt": time.time(),
+        "baselineTotalTrades": int(live_state.get("totalTrades", 0)),
+        "resultPnl": None,
+        "resultWindowSlug": None,
+        "resolvedAt": None,
+    }
+    save_live_state()
+    log.warning(
+        f"[FIRST-TRADE-GUARD] 已啟用，等待 {LIVE_VARIANT_ID} 第一筆新實盤交易結果"
+    )
+
+
+def _first_trade_guard_blocks_new_entry() -> bool:
+    guard = live_state.get("firstTradeGuard")
+    if (
+        not FIRST_TRADE_GUARD_ID
+        or not isinstance(guard, dict)
+        or guard.get("id") != FIRST_TRADE_GUARD_ID
+        or guard.get("status") != "waiting"
+    ):
+        return False
+    return any(not bool(pos.get("dryRun", True)) for pos in live_state.get("pendingSettlements", []))
+
+
+def _apply_first_trade_guard(trade: dict) -> None:
+    guard = live_state.get("firstTradeGuard")
+    if (
+        not FIRST_TRADE_GUARD_ID
+        or not isinstance(guard, dict)
+        or guard.get("id") != FIRST_TRADE_GUARD_ID
+        or guard.get("variantId") != LIVE_VARIANT_ID
+        or guard.get("status") != "waiting"
+        or bool(trade.get("dryRun", True))
+    ):
+        return
+    pnl = float(trade.get("pnlEstimate", 0))
+    guard.update({
+        "resultPnl": pnl,
+        "resultWindowSlug": trade.get("windowSlug"),
+        "resolvedAt": time.time(),
+    })
+    if pnl < 0:
+        guard["status"] = "loss_dry_run"
+        live_state["runtimeDryRun"] = True
+        try:
+            _write_env_flag("LIVE_TRADING", "false")
+        except Exception as exc:
+            guard["envUpdateError"] = str(exc)
+            log.exception("[FIRST-TRADE-GUARD] 無法寫入 .env；本進程仍已強制 DRY-RUN")
+        log.critical(
+            f"[FIRST-TRADE-GUARD] 首筆實盤虧損 ${pnl:+.2f}，已停止真實送單並切換 DRY-RUN"
+        )
+    else:
+        guard["status"] = "profit_continue"
+        log.warning(
+            f"[FIRST-TRADE-GUARD] 首筆實盤獲利 ${pnl:+.2f}，維持真實下單"
+        )
+
+
 def reset_live_state_for_tests() -> None:
     """只供單元測試在記憶體中清狀態；不會刪除實際狀態檔。"""
     global _validated_order_path_slug, _live_window_diag_dirty
@@ -208,7 +335,7 @@ def _live_window_diagnostic(slug: str) -> dict:
     global _live_window_diag_dirty
     items = live_state.setdefault("windowDiagnostics", [])
     sim.decision_diag.trim_old_window_evidence(items)
-    execution_mode = "REAL" if REAL_EXECUTION_ENABLED else "DRY-RUN"
+    execution_mode = "REAL" if _real_execution_enabled() else "DRY-RUN"
     for item in items:
         if (
             item.get("windowSlug") == slug
@@ -409,6 +536,7 @@ def _record_trade(pos: dict, pnl: float, outcome: str, trade_type: str) -> None:
         live_state["earlyExits"] += 1
     else:
         live_state["directionalTrades"] += 1
+    _apply_first_trade_guard(trade)
     diagnostic = record_live_window_diagnostic(
         pos["windowSlug"],
         "settled",
@@ -436,7 +564,7 @@ def _market_condition_id() -> str | None:
 
 def _fee_for_side(side: str, shares: float, price: float) -> tuple[float, float, float]:
     """回傳 (fee, rate, exponent)；實盤只接受預熱取得的 V2 動態市場費率。"""
-    if not REAL_EXECUTION_ENABLED:
+    if not _real_execution_enabled():
         return sim.taker_fee(shares, price), sim.SIM_TAKER_FEE_RATE, 1.0
     token_id = _token_id(side)
     config = live.get_cached_market_fee(token_id)
@@ -522,6 +650,17 @@ def _ask_depth(book: dict) -> float:
     """訂單簿目前看得到的賣單總深度，用來把想要的股數縮到真的吃得到的量，
     避免算出來的股數超過深度、FOK/FAK 整筆判定未成交，白白錯過機會。"""
     return sum(float(a.get("size", 0)) for a in (book.get("asks") or []))
+
+
+def _hedge_order_shares(pos: dict) -> float:
+    """補鎖利那一腿要送的股數：無條件捨去到整數。
+
+    2026-09-11 實盤：進場 FOK 真實成交 5.357143 股（交易所的市價買會依 USDC 金額重算股數），
+    之後補腿直接沿用這個小數股數，CLOB 連續以「invalid amounts, maker amount max 2 decimals,
+    taker amount max 4 decimals」拒絕了 400 多次。價格是 2 位小數，只有整數股數能保證
+    maker amount（price × size）也在 2 位小數內。捨去後剩下的零頭股數本來就會由
+    _apply_hedge_fields 記成殘值，不會假裝已對沖。"""
+    return float(Decimal(str(pos["shares"])).to_integral_value(rounding=ROUND_DOWN))
 
 
 def _buy_plan(side: str, book: dict, shares: float, fair_probability: float | None = None) -> dict | None:
@@ -714,6 +853,90 @@ async def _try_late_direction_entry(
     return result == "filled"
 
 
+def _single_leg_entry_plan(
+    up_book: dict,
+    down_book: dict,
+    shares: float,
+    fair: dict | None,
+    cash: float,
+    diagnostic_slug: str | None = None,
+) -> dict | None:
+    """對齊模擬版 _entry_candidate／_try_single_leg_entry：挑買價 <= ENTRY_MAX_PRICE 且
+    公平機率扣掉全部成本後仍留 SIM_MIN_ENTRY_EDGE 的那一腿，兩邊都合格取 edge 較大者。
+    跟晚進場方向性一樣不先按深度縮股：深度不夠 _buy_plan 內的 simulate_buy_fill 直接
+    回 None，等同 FOK 整筆未成交。"""
+    if ENTRY_MAX_PRICE is None:
+        return None
+    if not fair:
+        if diagnostic_slug:
+            record_live_window_diagnostic(diagnostic_slug, "single_leg_no_fair_model")
+        return None
+    candidates = []
+    for side, book, fair_side in (("Up", up_book, fair.get("fairUp")), ("Down", down_book, fair.get("fairDown"))):
+        if fair_side is None:
+            continue
+        plan = _buy_plan(side, book, shares, float(fair_side))
+        if not plan or plan["edge"] is None:
+            continue
+        if plan["limitPrice"] > ENTRY_MAX_PRICE or plan["edge"] < sim.SIM_MIN_ENTRY_EDGE:
+            continue
+        if plan["riskNotional"] + plan["fee"] > cash:
+            continue
+        candidates.append(plan)
+    if not candidates:
+        if diagnostic_slug:
+            up_asks, down_asks = up_book.get("asks") or [], down_book.get("asks") or []
+            record_live_window_diagnostic(
+                diagnostic_slug,
+                "single_leg_no_candidate",
+                entryMaxPrice=ENTRY_MAX_PRICE,
+                fairUp=fair.get("fairUp"),
+                fairDown=fair.get("fairDown"),
+                upAsk=float(up_asks[0]["price"]) if up_asks else None,
+                downAsk=float(down_asks[0]["price"]) if down_asks else None,
+                targetShares=shares,
+            )
+        return None
+    best = max(candidates, key=lambda p: p["edge"])
+    if diagnostic_slug:
+        record_live_window_diagnostic(
+            diagnostic_slug,
+            "single_leg_candidate",
+            status="candidate",
+            selectedSide=best["side"],
+            singleLegLimitPrice=best["limitPrice"],
+            singleLegEdge=best["edge"],
+            entryMaxPrice=ENTRY_MAX_PRICE,
+            targetShares=shares,
+        )
+    return best
+
+
+async def _try_single_leg_entry(
+    slug: str,
+    up_book: dict,
+    down_book: dict,
+    shares: float,
+    fair: dict | None,
+    cash: float,
+    dry_run: bool,
+) -> bool:
+    """3 秒輪詢路徑：兩腿鎖不到時的單邊進場（判斷＋送單）。成交後部位標記 strategy=single_leg，
+    之後由 _evaluate_and_act_impl 下半段的補鎖利／提早退出邏輯接手。"""
+    plan = _single_leg_entry_plan(up_book, down_book, shares, fair, cash, diagnostic_slug=slug)
+    if not plan:
+        return False
+    log.info(
+        f"[LIVE] 單邊進場 {plan['side']} limit=${plan['limitPrice']:.3f} fair={plan['fair']:.3f} "
+        f"edge={plan['edge']:+.4f} entryMaxPrice={ENTRY_MAX_PRICE}"
+    )
+    result = await _enter_position(slug, plan, dry_run)
+    if result == "filled":
+        live_state["position"]["strategy"] = "single_leg"
+        save_live_state()
+    return result == "filled"
+
+
 def _target_pair_order(cash: float) -> tuple[float, float]:
     """跟模擬版共用同一個計算函式（sim.target_pair_order），只是帶入真實版自己的
     下注比例／資金上限／保留額——公式本身跟模擬版保證一致，不會各寫一份長歪。"""
@@ -823,7 +1046,7 @@ async def _refresh_cash_cache() -> None:
 
 def _invalidate_cash_cache() -> None:
     _cash_cache["at"] = 0.0
-    if REAL_EXECUTION_ENABLED:
+    if _real_execution_enabled():
         # 下單後立刻在背景重查一次，不用整整等到下一輪 8 秒週期——但這個 task 本身
         # 不會被 decision_lock 卡住，也不會讓呼叫端等待。
         asyncio.create_task(_refresh_cash_cache())
@@ -832,7 +1055,7 @@ def _invalidate_cash_cache() -> None:
 async def _cash_refresh_loop() -> None:
     """背景持續刷新真實餘額快取，讓 evaluate_and_act 決策路徑不必再自己 await 網路 I/O。"""
     while True:
-        if REAL_EXECUTION_ENABLED:
+        if _real_execution_enabled():
             await _refresh_cash_cache()
         await asyncio.sleep(CASH_CACHE_TTL_SECONDS)
 
@@ -1700,7 +1923,7 @@ async def _retry_failed_leg_once(session: aiohttp.ClientSession, failed_side: st
     except Exception as exc:
         log.warning(f"[LIVE] 補鎖利重試前無法取得 {failed_side} 訂單簿：{exc}")
         return "not_filled"
-    hedge = _buy_plan(failed_side, latest_book, pos["shares"])
+    hedge = _buy_plan(failed_side, latest_book, _hedge_order_shares(pos))
     if not hedge:
         log.info(f"[LIVE] 補鎖利重試：{failed_side} 目前沒有足夠深度，放棄重試")
         return "not_filled"
@@ -1938,9 +2161,10 @@ async def evaluate_and_act(
 
 
 def _decision_evaluation(slug, source, up, down, remaining):
-    return sim.decision_evaluation("REAL" if REAL_EXECUTION_ENABLED else "DRY-RUN",
+    return sim.decision_evaluation("REAL" if _real_execution_enabled() else "DRY-RUN",
         LIVE_VARIANT_ID, slug, source, up, down, remaining,
         {"lockMaxSum": LOCK_MAX_SUM, "lateDirectionMaxPrice": LATE_DIRECTION_MAX_PRICE,
+         "entryMaxPrice": ENTRY_MAX_PRICE,
          "stakePct": STAKE_PCT, "minDepthMultiplier": PAIR_MIN_DEPTH_MULTIPLIER,
          "stabilitySeconds": PAIR_STABILITY_SECONDS, "halted": live_state.get("halted"),
          "positionPresent": live_state.get("position") is not None,
@@ -1977,7 +2201,11 @@ async def _evaluate_and_act_impl(
         # 完全衝突，所以只保留「還沒結算」這個最基本的條件。
         if remaining_seconds is None or remaining_seconds <= 0:
             return
-        dry_run = not REAL_EXECUTION_ENABLED
+        if _first_trade_guard_blocks_new_entry():
+            record_live_window_diagnostic(slug, "first_trade_guard_awaiting_result")
+            return
+
+        dry_run = not _real_execution_enabled()
         if not dry_run and live_state.get("preflightSlug") != slug:
             if not await _ensure_no_unmanaged_current_position():
                 return
@@ -2051,13 +2279,20 @@ async def _evaluate_and_act_impl(
                 await _execute_direct_pair(session, slug, direct[0], direct[1], fair, dry_run)
                 return
             sim.clear_pair_candidate("live:pair")
+        # 單邊進場只在晚進場方向性的窗口之外嘗試：最後 10 秒留給方向性訊號，避免兩條
+        # 單腿路徑在同一刻搶同一個部位、用不同標準各說各話。
+        if SINGLE_LEG_ENTRY_ENABLED and (
+            not ENABLE_LATE_DIRECTION or remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS
+        ):
+            if await _try_single_leg_entry(slug, up_book, down_book, shares, fair, cash, dry_run):
+                return
         if ENABLE_LATE_DIRECTION:
             await _try_late_direction_entry(slug, up_book, down_book, remaining_seconds, shares, dry_run)
         return
 
     if pos.get("hedged") or pos.get("windowSlug") != slug:
         return
-    if not pos.get("dryRun", True) and not REAL_EXECUTION_ENABLED:
+    if not pos.get("dryRun", True) and not _real_execution_enabled():
         log.error("[LIVE] 存在真實持倉，但真實策略未完整武裝；本程式不會假裝已對沖")
         return
     if pos.get("emergencyUnwindPending"):
@@ -2072,7 +2307,7 @@ async def _evaluate_and_act_impl(
     dry_run = bool(pos.get("dryRun", True))
     other_side = "Down" if pos["side"] == "Up" else "Up"
     other_book = down_book if other_side == "Down" else up_book
-    hedge = _buy_plan(other_side, other_book, pos["shares"])
+    hedge = _buy_plan(other_side, other_book, _hedge_order_shares(pos))
     if hedge:
         projected_cost = _position_risk_cost(pos) + hedge["riskNotional"] + hedge["fee"]
         net_per_share = (pos["shares"] - projected_cost) / pos["shares"]
@@ -2200,7 +2435,11 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
             return
         if remaining <= 0:
             return
-        dry_run = not REAL_EXECUTION_ENABLED
+        if _first_trade_guard_blocks_new_entry():
+            record_live_window_diagnostic(slug, "first_trade_guard_awaiting_result")
+            return
+
+        dry_run = not _real_execution_enabled()
         if not dry_run and live_state.get("preflightSlug") != slug:
             # 真實模式每個窗口第一次要做的 preflight 檢查需要真的等網路 I/O，不屬於這條
             # 零延遲路徑該做的事，留給 3 秒輪詢那條路（原本的 evaluate_and_act）處理。
@@ -2285,7 +2524,7 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
 
     if pos.get("hedged") or pos.get("windowSlug") != slug:
         return
-    if not pos.get("dryRun", True) and not REAL_EXECUTION_ENABLED:
+    if not pos.get("dryRun", True) and not _real_execution_enabled():
         return
     if pos.get("emergencyUnwindPending"):
         # 救援含餘額刷新與網路 I/O，交由 3 秒輪詢路徑執行；WS 快速路徑不重複排程。
@@ -2296,7 +2535,7 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
     dry_run = bool(pos.get("dryRun", True))
     other_side = "Down" if pos["side"] == "Up" else "Up"
     other_book = down_book if other_side == "Down" else up_book
-    hedge = _buy_plan(other_side, other_book, pos["shares"])
+    hedge = _buy_plan(other_side, other_book, _hedge_order_shares(pos))
     if not hedge:
         return
     projected_cost = _position_risk_cost(pos) + hedge["riskNotional"] + hedge["fee"]
@@ -2398,7 +2637,7 @@ def _log_startup_banner(mode: str) -> None:
     log.info(
         f"  LIVE_TRADING={live.LIVE_TRADING} · POLY_STRATEGY_ARMED={STRATEGY_ARMED} "
         f"· POLY_VALIDATE_ORDER_PATH={live.VALIDATE_ORDER_PATH} "
-        f"· REAL_EXECUTION={REAL_EXECUTION_ENABLED}"
+        f"· REAL_EXECUTION={_real_execution_enabled()}"
     )
     if live.VALIDATE_ORDER_PATH:
         log.warning("  ORDER PATH VALIDATION: signing enabled, POST /orders hard-disabled")
@@ -2436,6 +2675,13 @@ def _log_startup_banner(mode: str) -> None:
         )
     else:
         log.info("  單腿方向性下注已停用（POLY_ENABLE_LATE_DIRECTION=false）")
+    if SINGLE_LEG_ENTRY_ENABLED:
+        log.warning(
+            f"  單邊進場已啟用：兩腿鎖不到時買價<=${ENTRY_MAX_PRICE:.2f} 且 edge>="
+            f"{sim.SIM_MIN_ENTRY_EDGE:.3f} 的那一腿先進場（之後補鎖利／提早退出）"
+        )
+    else:
+        log.info("  單邊進場已停用（變體 entryMaxPrice=None 且未設 POLY_LIVE_ENTRY_MAX_PRICE）")
     if live_state.get("halted"):
         log.critical(f"  STRATEGY HALTED: {live_state.get('haltReason')}")
     log.info("=" * 64)
@@ -2445,6 +2691,7 @@ async def strategy_loop() -> None:
     """獨立進程執行：自己開一條 WS 連線。跟模擬盤各自獨立，會有各自連線收到報價的
     時間差（見對話紀錄裡的診斷）。如果要完全消除這個時間差，改用 run_embedded()，
     讓實盤判斷邏輯跑在 polymarket_server.py 那個進程裡、共用同一條連線。"""
+    _configure_first_trade_guard()
     _log_startup_banner("獨立進程")
     await _warm_order_executors()
 
@@ -2557,6 +2804,7 @@ async def run_embedded() -> None:
       - 換窗口／待結算偵測改成輪詢比對 sim.state["market"]["slug"]，因為 live_state
         的部位追蹤是完全獨立於 sim 自己的 ab_states 之外的另一份帳本。
     """
+    _configure_first_trade_guard()
     _log_startup_banner("嵌入模擬盤進程，共用 WS 連線")
     await _warm_order_executors()
 

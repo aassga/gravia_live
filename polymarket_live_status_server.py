@@ -67,6 +67,8 @@ def _load_strategy_state() -> dict:
             state = json.load(f)
         position = state.get("position")
         return {
+            "runtimeDryRun": bool(state.get("runtimeDryRun", False)),
+            "firstTradeGuard": state.get("firstTradeGuard"),
             "halted": bool(state.get("halted", False)),
             "haltReason": state.get("haltReason"),
             "position": position,
@@ -173,9 +175,12 @@ def _fetch_state() -> dict:
         "serverRegion": SERVER_REGION,
         "clobPingMs": ping_ms,
         "funderAddress": live.FUNDER_ADDRESS,
-        "liveTradingEnabled": live.LIVE_TRADING,
+        "liveTradingEnabled": live.LIVE_TRADING and not bool(strategy_state.get("runtimeDryRun")),
         "strategyArmed": os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true",
-        "strategyExecutionEnabled": live.LIVE_TRADING and os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true",
+        "strategyExecutionEnabled": (
+            live.LIVE_TRADING and os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
+            and not bool(strategy_state.get("runtimeDryRun"))
+        ),
         "balanceUsdc": balance_usdc,
         "baselineBalance": baseline["baselineBalance"],
         "baselineSetAt": baseline["baselineSetAt"],
@@ -188,6 +193,7 @@ def _fetch_state() -> dict:
             "label": strategy._LIVE_VARIANT["label"],
             "variantId": strategy.LIVE_VARIANT_ID,
             "assetId": strategy.LIVE_ASSET_ID,
+            "firstTradeGuard": strategy_state.get("firstTradeGuard"),
             "stakePct": strategy.STAKE_PCT,
             "lockMaxSum": strategy.LOCK_MAX_SUM,
             "minDepthMultiplier": strategy.PAIR_MIN_DEPTH_MULTIPLIER,

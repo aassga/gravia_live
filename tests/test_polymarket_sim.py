@@ -123,6 +123,39 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertGreater(cash, 0)
         self.assertAlmostEqual(portfolio, 100.0 + position["lockedPnl"])
 
+    # 2026-09-11 依使用者要求重新啟用 entryMaxPrice 單邊進場：兩腿加總卡在 $1.00 鎖不到時，
+    # 有設 entryMaxPrice 的組（conservative／main／loose）改用公平價模型先買便宜那一腿。
+    def test_single_leg_entry_fires_when_lock_impossible_and_cheap_side_has_edge(self):
+        # 加總 1.00，鎖利門檻 0.95 碰不到；但 Up 只要 0.30、模型認為 Up 有 60% 機率 → 有 edge
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.70, "size": 1_000.0}], "bids": []}
+        fair = {"fairUp": 0.60, "fairDown": 0.40}
+        sim.simulate_trading("btc-main", "btc-window", up_book, down_book, 180.0, fair)
+        pos = sim.ab_states["btc-main"]["position"]
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos["side"], "Up")
+        self.assertFalse(pos["hedged"])
+        self.assertGreater(pos["entryEdge"], sim.SIM_MIN_ENTRY_EDGE)
+
+    def test_single_leg_entry_respects_entry_max_price(self):
+        # main 的 entryMaxPrice=0.40：Up 賣 0.45 就算模型 edge 很大也不進
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.45, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.60, "size": 1_000.0}], "bids": []}
+        fair = {"fairUp": 0.90, "fairDown": 0.10}
+        sim.simulate_trading("btc-main", "btc-window", up_book, down_book, 180.0, fair)
+        self.assertIsNone(sim.ab_states["btc-main"]["position"])
+        # loose 的 entryMaxPrice=0.45（decision price 會多讓 tick 變 0.47，仍超過）→ 也不進
+        sim.simulate_trading("btc-loose", "btc-window", up_book, down_book, 180.0, fair)
+        self.assertIsNone(sim.ab_states["btc-loose"]["position"])
+
+    def test_single_leg_entry_skipped_for_variants_without_entry_max_price(self):
+        # historical-hybrid（實盤用的那組）entryMaxPrice=None，就算條件再好也不能走單邊路
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.70, "size": 1_000.0}], "bids": []}
+        fair = {"fairUp": 0.60, "fairDown": 0.40}
+        self.assertFalse(sim._try_single_leg_entry("btc-historical-hybrid", "btc-window", up_book, down_book, fair))
+        self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
+
     def test_live_lock_variant_mirrors_live_sizing_and_disables_directional_entry(self):
         variant = sim.AB_VARIANT_BY_ID["btc-live-lock"]
         self.assertTrue(variant["liveMirrorOnly"])
@@ -226,6 +259,31 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.load_sim_state()
         self.assertEqual(sim.ab_states["btc-main"]["totalPnl"], 12.34)
         self.assertIs(sim.sim_state, sim.ab_states["btc-main"])
+
+    def test_empty_settlement_retry_does_not_rewrite_all_sim_state(self):
+        async def scenario():
+            with patch.object(sim, "save_sim_state") as save:
+                await sim.retry_pending_settlements(None)
+                save.assert_not_called()
+
+        asyncio.run(scenario())
+
+    def test_resolved_settlement_retry_persists_queue_removal(self):
+        st = sim.ab_states["btc-main"]
+        st["pendingSettlements"] = [{"windowSlug": "resolved-window", "hedged": False}]
+
+        async def scenario():
+            with (
+                patch.object(sim, "fetch_outcome", return_value="Up"),
+                patch.object(sim, "_settle_pnl", return_value=1.0),
+                patch.object(sim, "record_trade"),
+                patch.object(sim, "save_sim_state") as save,
+            ):
+                await sim.retry_pending_settlements(None)
+                self.assertEqual(st["pendingSettlements"], [])
+                save.assert_called_once_with()
+
+        asyncio.run(scenario())
 
     def test_window_diagnostics_persist_each_window_and_rejection_reason(self):
         slug = "btc-updown-5m-diagnostic"
@@ -509,6 +567,50 @@ class PolymarketSimulationTests(unittest.TestCase):
             sim.set_ws_simulation_ticks_enabled(old_enabled)
         self.assertEqual(received, ["token-a"])
         self.assertEqual(sim._ws_get_book("token-a")["quoteSource"], "websocket")
+
+    def test_websocket_book_updates_are_coalesced_off_the_reader_path(self):
+        async def scenario():
+            old_event = sim._ws_tick_event
+            old_task = sim._ws_tick_dispatch_task
+            before_updates = sim._ws_perf["bookUpdates"]
+            before_coalesced = sim._ws_perf["coalescedUpdates"]
+            sim._pending_ws_price_ticks.clear()
+            sim._pending_ws_tick_queued_at.clear()
+            sim._ws_tick_event = asyncio.Event()
+            # Mark a dispatcher as active without starting its loop; this lets
+            # the test inspect and manually drain the coalesced queue.
+            sim._ws_tick_dispatch_task = asyncio.current_task()
+            dispatched = []
+            try:
+                with patch.object(sim, "_on_ws_price_tick", side_effect=dispatched.append):
+                    sim._ws_apply_message({
+                        "event_type": "book",
+                        "asset_id": "coalesced-token",
+                        "bids": [{"price": "0.39", "size": "5"}],
+                        "asks": [{"price": "0.40", "size": "5"}],
+                    })
+                    sim._ws_apply_message({
+                        "event_type": "price_change",
+                        "price_changes": [{
+                            "asset_id": "coalesced-token",
+                            "side": "SELL",
+                            "price": "0.40",
+                            "size": "7",
+                        }],
+                    })
+                    self.assertEqual(dispatched, [])
+                    self.assertEqual(sim._pending_ws_price_ticks, {"coalesced-token"})
+                    self.assertEqual(sim._drain_ws_price_ticks(), 1)
+                    self.assertEqual(dispatched, ["coalesced-token"])
+                    self.assertEqual(sim._ws_perf["bookUpdates"] - before_updates, 2)
+                    self.assertEqual(sim._ws_perf["coalescedUpdates"] - before_coalesced, 1)
+            finally:
+                sim._pending_ws_price_ticks.clear()
+                sim._pending_ws_tick_queued_at.clear()
+                sim._ws_tick_event = old_event
+                sim._ws_tick_dispatch_task = old_task
+
+        asyncio.run(scenario())
 
     def test_live_action_runs_before_deferred_ws_simulation(self):
         events = []
@@ -879,6 +981,124 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual(row["strategyType"], "maker")
         self.assertEqual(row["makerStats"]["quotesPlaced"], 2)
         self.assertIsNotNone(row["makerQuotes"]["Up"])
+    def test_inventory_rotation_is_an_independent_sim_only_variant(self):
+        variant = sim.AB_VARIANT_BY_ID["btc-inventory-rotation"]
+        self.assertTrue(variant["inventoryRotation"])
+        self.assertTrue(variant["simOnly"])
+        row = next(
+            item for item in sim.build_ab_leaderboard()
+            if item["id"] == "btc-inventory-rotation"
+        )
+        self.assertEqual(row["strategyType"], "rotation")
+        self.assertEqual(row["sliceShares"], 5.0)
+        self.assertEqual(variant["maxResidualShares"], 5.0)
+        self.assertEqual(variant["minEntryEdge"], 0.04)
+        self.assertTrue(variant["requireChainlinkConfirm"])
+        self.assertGreater(
+            variant["minEntryEdge"]
+            + variant["residualRiskPremium"]
+            + variant["futureHedgeFeeReserve"],
+            0.06,
+        )
+
+    def test_inventory_rotation_accumulates_then_pairs_only_at_a_profit(self):
+        variant_id = "btc-inventory-rotation"
+        variant = sim.AB_VARIANT_BY_ID[variant_id]
+        up_book = self._fresh_ws_book({
+            "tickSize": 0.01,
+            "minOrderSize": 5.0,
+            "bids": [{"price": 0.29, "size": 100.0}],
+            "asks": [{"price": 0.30, "size": 100.0}],
+        })
+        expensive_down = self._fresh_ws_book({
+            "tickSize": 0.01,
+            "minOrderSize": 5.0,
+            "bids": [{"price": 0.78, "size": 100.0}],
+            "asks": [{"price": 0.80, "size": 100.0}],
+        })
+        profitable_down = self._fresh_ws_book({
+            "tickSize": 0.01,
+            "minOrderSize": 5.0,
+            "bids": [{"price": 0.58, "size": 100.0}],
+            "asks": [{"price": 0.60, "size": 100.0}],
+        })
+        with (
+            patch.object(sim, "_simulation_books_are_coherent", return_value=True),
+            patch.object(sim, "get_chainlink_twap_signal", return_value={
+                "current": 100.5, "opening": 100.0, "observedAt": 1,
+                "ageSeconds": 0.0, "windowSeconds": 60,
+            }),
+            patch.dict(variant, {"actionCooldownSeconds": 0.0}),
+        ):
+            sim.simulate_trading(
+                variant_id, "btc-window", up_book, expensive_down, 100.0,
+                {"fairUp": 0.80, "fairDown": 0.20},
+            )
+            state = sim.ab_states[variant_id]
+            self.assertEqual(state["position"]["upShares"], 5.0)
+            self.assertEqual(state["position"]["downShares"], 0.0)
+
+            # Even a high Down model edge must not bypass the profitable-pai
+            # gate when buying Down would lock a loss against the held Up lot.
+            sim.simulate_trading(
+                variant_id, "btc-window", up_book, expensive_down, 90.0,
+                {"fairUp": 0.01, "fairDown": 0.99},
+            )
+            self.assertEqual(state["position"]["fillCount"], 1)
+
+            # A stronger signal on the already-held side must not average the
+            # residual from five shares up to ten while the hedge is expensive.
+            sim.simulate_trading(
+                variant_id, "btc-window", up_book, expensive_down, 85.0,
+                {"fairUp": 0.99, "fairDown": 0.01},
+            )
+            self.assertEqual(state["position"]["upShares"], 5.0)
+            self.assertEqual(state["position"]["fillCount"], 1)
+
+            sim.simulate_trading(
+                variant_id, "btc-window", up_book, profitable_down, 80.0,
+                {"fairUp": 0.50, "fairDown": 0.50},
+            )
+            position = state["position"]
+            self.assertEqual(position["upShares"], 5.0)
+            self.assertEqual(position["downShares"], 5.0)
+            self.assertEqual(position["pairedShares"], 5.0)
+            self.assertEqual(position["residualShares"], 0.0)
+            self.assertGreater(position["lockedPnl"], 0.0)
+            self.assertAlmostEqual(
+                sim._settle_pnl(position, "Up"),
+                sim._settle_pnl(position, "Down"),
+            )
+
+    def test_inventory_rotation_requires_chainlink_to_confirm_new_direction(self):
+        variant_id = "btc-inventory-rotation"
+        variant = sim.AB_VARIANT_BY_ID[variant_id]
+        up_book = self._fresh_ws_book({
+            "tickSize": 0.01,
+            "minOrderSize": 5.0,
+            "bids": [{"price": 0.29, "size": 100.0}],
+            "asks": [{"price": 0.30, "size": 100.0}],
+        })
+        down_book = self._fresh_ws_book({
+            "tickSize": 0.01,
+            "minOrderSize": 5.0,
+            "bids": [{"price": 0.68, "size": 100.0}],
+            "asks": [{"price": 0.70, "size": 100.0}],
+        })
+        with (
+            patch.object(sim, "_simulation_books_are_coherent", return_value=True),
+            patch.object(sim, "get_chainlink_twap_signal", return_value={
+                "current": 99.5, "opening": 100.0, "observedAt": 1,
+                "ageSeconds": 0.0, "windowSeconds": 60,
+            }),
+            patch.dict(variant, {"actionCooldownSeconds": 0.0}),
+        ):
+            sim.simulate_trading(
+                variant_id, "btc-window", up_book, down_book, 100.0,
+                {"fairUp": 0.90, "fairDown": 0.10},
+            )
+        self.assertIsNone(sim.ab_states[variant_id]["position"])
+
 
 
 if __name__ == "__main__":

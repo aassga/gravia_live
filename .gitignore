@@ -27,3 +27,11 @@ polymarket_altcoins.err.log
 # 測試快取
 tests/__pycache__/
 .pytest_cache/
+
+# VPS 執行期產物與備份，不進版本庫
+*.log
+.env.bak*
+.codex_backups/
+polymarket_eth_mm.sqlite3
+polymarket_eth_mm.sqlite3-wal
+polymarket_eth_mm.sqlite3-shm
