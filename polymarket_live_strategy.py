@@ -153,6 +153,11 @@ def _resolve_entry_max_price() -> float | None:
 
 ENTRY_MAX_PRICE = _resolve_entry_max_price()
 SINGLE_LEG_ENTRY_ENABLED = ENTRY_MAX_PRICE is not None
+# 2026-09-12：單邊進場的停損。單邊部位原本只有「補腿鎖利」或「買盤價高於模型價值」兩種出場，
+# 對邊一路漲上去時只能抱到歸零（18:15 那筆 Down 從 0.33 跌到 0.02、-$2.32）。這裡在 3 秒輪詢
+# 路徑加一條：持有腿的保守可賣價 <= 進場成交價 × (1 − 停損%) 就用 FOK 賣掉。0 = 關閉。
+# 只套用 strategy=single_leg 的部位；晚進場方向性依設計抱到結算，不受影響。
+SINGLE_LEG_STOP_LOSS_PCT = max(0.0, min(95.0, float(os.environ.get("POLY_LIVE_SINGLE_LEG_STOP_LOSS_PCT", "0"))))
 
 
 def _new_live_state() -> dict:
@@ -2343,6 +2348,26 @@ async def _evaluate_and_act_impl(
             expected_hold = pos["shares"] * fair_side
             if minimum_liquidation >= expected_hold + pos["shares"] * sim.SIM_EXIT_EDGE:
                 await _close_position(exit_plan, dry_run, "market_bid_above_model_value")
+                return
+            stop_price = _single_leg_stop_loss_price(pos)
+            if stop_price is not None and exit_plan["limitPrice"] <= stop_price:
+                log.warning(
+                    f"[LIVE] 單邊停損觸發 {pos['side']} 可賣價=${exit_plan['limitPrice']:.3f} "
+                    f"<= 停損價=${stop_price:.3f}（進場 ${float(pos['entryPrice']):.3f} × "
+                    f"(1 − {SINGLE_LEG_STOP_LOSS_PCT:.0f}%)）"
+                )
+                record_live_window_diagnostic(
+                    slug, "single_leg_stop_loss",
+                    stopLossPrice=stop_price, exitLimitPrice=exit_plan["limitPrice"],
+                )
+                await _close_position(exit_plan, dry_run, "single_leg_stop_loss")
+
+
+def _single_leg_stop_loss_price(pos: dict) -> float | None:
+    """單邊進場部位的停損價；未啟用或不是單邊進場部位時回 None。"""
+    if SINGLE_LEG_STOP_LOSS_PCT <= 0 or pos.get("strategy") != "single_leg":
+        return None
+    return float(pos["entryPrice"]) * (1.0 - SINGLE_LEG_STOP_LOSS_PCT / 100.0)
 
 
 def _set_quote_status(source: str) -> None:
@@ -2692,6 +2717,10 @@ def _log_startup_banner(mode: str) -> None:
             f"  單邊進場已啟用：兩腿鎖不到時買價<=${ENTRY_MAX_PRICE:.2f} 且 edge>="
             f"{sim.SIM_MIN_ENTRY_EDGE:.3f} 的那一腿先進場（之後補鎖利／提早退出）"
         )
+        if SINGLE_LEG_STOP_LOSS_PCT > 0:
+            log.warning(f"  單邊停損已啟用：可賣價 <= 進場價 × (1 − {SINGLE_LEG_STOP_LOSS_PCT:.0f}%) 時 FOK 賣出")
+        else:
+            log.info("  單邊停損未啟用（POLY_LIVE_SINGLE_LEG_STOP_LOSS_PCT=0）")
     else:
         log.info("  單邊進場已停用（變體 entryMaxPrice=None 且未設 POLY_LIVE_ENTRY_MAX_PRICE）")
     if live_state.get("halted"):

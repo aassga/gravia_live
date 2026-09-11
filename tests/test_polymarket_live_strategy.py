@@ -602,6 +602,88 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["side"], "Up")
         self.assertEqual(plan["shares"], 5.0)
 
+    def _single_leg_position(self, side="Down", entry_price=0.33, strategy_name="single_leg"):
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window", "side": side, "tokenId": "down-token" if side == "Down" else "up-token",
+            "shares": 10.0, "entryPrice": entry_price, "entryLimitPrice": entry_price + 0.02,
+            "entryNotional": 10.0 * entry_price, "entryFee": 0.05, "entryRiskNotional": 10.0 * (entry_price + 0.02),
+            "entryRiskFee": 0.05, "stakeUsd": 10.0 * entry_price + 0.05, "strategy": strategy_name,
+            "hedged": False, "dryRun": True,
+        }
+
+    async def test_single_leg_stop_loss_sells_when_bid_falls_below_threshold(self):
+        # 進場 0.33、停損 40% → 停損價 0.198；Down 買盤 0.15 → 可賣價低於停損價 → 賣出
+        self._single_leg_position()
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.86, "size": 100}], "bids": [{"price": 0.84, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.16, "size": 100}], "bids": [{"price": 0.15, "size": 100}],
+        })
+        with (
+            patch.object(strategy, "SINGLE_LEG_STOP_LOSS_PCT", 40.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.85, "fairDown": 0.15})
+        close.assert_awaited_once()
+        plan, dry_run, reason = close.await_args.args
+        self.assertEqual(reason, "single_leg_stop_loss")
+        self.assertEqual(plan["side"], "Down")
+        self.assertLessEqual(plan["limitPrice"], 0.33 * 0.6)
+
+    async def test_single_leg_stop_loss_not_triggered_above_threshold_or_when_disabled(self):
+        self._single_leg_position()
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.76, "size": 100}], "bids": [{"price": 0.74, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.26, "size": 100}], "bids": [{"price": 0.25, "size": 100}],
+        })
+        # 買盤 0.25 → 可賣價約 0.24 > 停損價 0.198 → 不賣
+        with (
+            patch.object(strategy, "SINGLE_LEG_STOP_LOSS_PCT", 40.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.75, "fairDown": 0.25})
+        close.assert_not_awaited()
+        # 停損關閉（0）→ 即使買盤很低也不賣
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.06, "size": 100}], "bids": [{"price": 0.05, "size": 100}],
+        })
+        with (
+            patch.object(strategy, "SINGLE_LEG_STOP_LOSS_PCT", 0.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.95, "fairDown": 0.05})
+        close.assert_not_awaited()
+
+    async def test_single_leg_stop_loss_ignores_late_direction_positions(self):
+        self._single_leg_position(strategy_name="late_direction")
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.96, "size": 100}], "bids": [{"price": 0.94, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.06, "size": 100}], "bids": [{"price": 0.05, "size": 100}],
+        })
+        with (
+            patch.object(strategy, "SINGLE_LEG_STOP_LOSS_PCT", 40.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 5.0, {"fairUp": 0.95, "fairDown": 0.05})
+        close.assert_not_awaited()
+        self.assertIsNotNone(strategy.live_state["position"])
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (

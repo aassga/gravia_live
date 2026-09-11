@@ -217,6 +217,7 @@ def _fetch_state() -> dict:
             "variantId": strategy.LIVE_VARIANT_ID,
             "singleLegEntryEnabled": strategy.SINGLE_LEG_ENTRY_ENABLED,
             "entryMaxPrice": strategy.ENTRY_MAX_PRICE,
+            "singleLegStopLossPct": strategy.SINGLE_LEG_STOP_LOSS_PCT,
             "minEntryEdge": strategy.sim.SIM_MIN_ENTRY_EDGE,
             "assetId": strategy.LIVE_ASSET_ID,
             "firstTradeGuard": strategy_state.get("firstTradeGuard"),
