@@ -1605,6 +1605,56 @@ def log_price_sum_diagnostic(tag: str, up_book: dict, down_book: dict, lock_max_
     )
 
 
+def _entry_candidate(side: str, book: dict, shares: float, fair_probability: float, max_price: float) -> dict | None:
+    """單邊進場候選：買價要 <= entryMaxPrice，且公平機率扣掉全部成本後至少留 SIM_MIN_ENTRY_EDGE。
+
+    2026-09-11：依使用者要求重新啟用。這條「找不到鎖利就先買便宜那一腿賭單邊」的退路，
+    2026-09 初曾因 42 戰 0 勝、-$364.75 而關閉；現在重開是要在目前「兩腿加總卡在 $1.00、
+    鎖利門檻幾乎碰不到」的市場條件下重新驗證。只影響有設 entryMaxPrice 的模擬變體
+    （conservative／main／loose），實盤用的 btc-historical-hybrid 是 None，不受影響。
+    跟真實版一樣不先按深度縮小股數：深度不夠 simulate_buy_fill 會直接回傳 None（等同 FOK 未成交）。"""
+    fill = simulate_buy_fill(book, shares)
+    if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD or fill["decisionPrice"] > max_price:
+        return None
+    all_in_per_share = (fill["decisionNotional"] + fill["decisionFee"]) / fill["shares"]
+    edge = fair_probability - all_in_per_share
+    if edge < SIM_MIN_ENTRY_EDGE:
+        return None
+    return {"side": side, "fill": fill, "fair": fair_probability, "edge": edge}
+
+
+def _try_single_leg_entry(
+    variant_id: str, slug: str, up_book: dict, down_book: dict, fair: dict | None
+) -> bool:
+    """找不到兩腿鎖利時，用公平價模型挑一邊先進場（之後由既有補鎖利邏輯嘗試補另一腿）。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    max_price = variant.get("entryMaxPrice")
+    if max_price is None:
+        return False
+    if not fair:
+        record_window_diagnostic(variant_id, slug, "single_leg_no_fair_model")
+        return False
+    target_shares, budget = _target_order_size(variant_id)
+    if target_shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "single_leg_budget_too_small")
+        return False
+    candidates = [
+        _entry_candidate("Up", up_book, target_shares, fair["fairUp"], max_price),
+        _entry_candidate("Down", down_book, target_shares, fair["fairDown"], max_price),
+    ]
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        record_window_diagnostic(
+            variant_id, slug, "single_leg_no_candidate",
+            entryMaxPrice=max_price, fairUp=fair.get("fairUp"), fairDown=fair.get("fairDown"),
+        )
+        return False
+    best = max(candidates, key=lambda c: c["edge"])
+    enter_position(variant_id, slug, best["side"], best["fill"], budget, best["fair"], best["edge"])
+    record_window_diagnostic(variant_id, slug, "single_leg_entered", side=best["side"], edge=best["edge"])
+    return True
+
+
 def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
     """先檢查兩腿此刻是否可直接成交並鎖住淨利，這才是進場即無方向曝險的套利。
 
@@ -2625,9 +2675,12 @@ def _simulate_trading_impl(
             return
         if _try_direct_pair(variant_id, slug, up_book, down_book):
             return
-        # 其餘變體：找不到能立即鎖住兩邊的機會就空手，不退而求其次先賭單邊留下方向性
-        # 曝險——這條退路統計下來歷史勝率是 0%（42 戰 0 勝、-$364.75），關閉／重開過
-        # 幾次，2026-09 確認維持關閉。核心策略就是「兩邊都買才進場」，找不到就不進場。
+        # 其餘變體：找不到能立即鎖住兩邊時，有設 entryMaxPrice 的組（conservative／main／
+        # loose）改用公平價模型先買便宜那一腿，之後由下方補鎖利邏輯嘗試補另一腿。
+        # 2026-09-11 依使用者要求重新啟用——這條退路 2026-09 初曾因 0% 勝率（42 戰 0 勝、
+        # -$364.75）關閉，現在重開是要在「兩腿加總卡在 $1.00、鎖利門檻幾乎碰不到」的市場
+        # 條件下重新驗證。entryMaxPrice 為 None 的變體（含實盤用的 historical-hybrid）仍維持空手。
+        _try_single_leg_entry(variant_id, slug, up_book, down_book, fair)
         return
 
     if pos["hedged"] or pos["windowSlug"] != slug:

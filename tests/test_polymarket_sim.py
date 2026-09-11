@@ -123,6 +123,39 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertGreater(cash, 0)
         self.assertAlmostEqual(portfolio, 100.0 + position["lockedPnl"])
 
+    # 2026-09-11 依使用者要求重新啟用 entryMaxPrice 單邊進場：兩腿加總卡在 $1.00 鎖不到時，
+    # 有設 entryMaxPrice 的組（conservative／main／loose）改用公平價模型先買便宜那一腿。
+    def test_single_leg_entry_fires_when_lock_impossible_and_cheap_side_has_edge(self):
+        # 加總 1.00，鎖利門檻 0.95 碰不到；但 Up 只要 0.30、模型認為 Up 有 60% 機率 → 有 edge
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.70, "size": 1_000.0}], "bids": []}
+        fair = {"fairUp": 0.60, "fairDown": 0.40}
+        sim.simulate_trading("btc-main", "btc-window", up_book, down_book, 180.0, fair)
+        pos = sim.ab_states["btc-main"]["position"]
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos["side"], "Up")
+        self.assertFalse(pos["hedged"])
+        self.assertGreater(pos["entryEdge"], sim.SIM_MIN_ENTRY_EDGE)
+
+    def test_single_leg_entry_respects_entry_max_price(self):
+        # main 的 entryMaxPrice=0.40：Up 賣 0.45 就算模型 edge 很大也不進
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.45, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.60, "size": 1_000.0}], "bids": []}
+        fair = {"fairUp": 0.90, "fairDown": 0.10}
+        sim.simulate_trading("btc-main", "btc-window", up_book, down_book, 180.0, fair)
+        self.assertIsNone(sim.ab_states["btc-main"]["position"])
+        # loose 的 entryMaxPrice=0.45（decision price 會多讓 tick 變 0.47，仍超過）→ 也不進
+        sim.simulate_trading("btc-loose", "btc-window", up_book, down_book, 180.0, fair)
+        self.assertIsNone(sim.ab_states["btc-loose"]["position"])
+
+    def test_single_leg_entry_skipped_for_variants_without_entry_max_price(self):
+        # historical-hybrid（實盤用的那組）entryMaxPrice=None，就算條件再好也不能走單邊路
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.70, "size": 1_000.0}], "bids": []}
+        fair = {"fairUp": 0.60, "fairDown": 0.40}
+        self.assertFalse(sim._try_single_leg_entry("btc-historical-hybrid", "btc-window", up_book, down_book, fair))
+        self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
+
     def test_live_lock_variant_mirrors_live_sizing_and_disables_directional_entry(self):
         variant = sim.AB_VARIANT_BY_ID["btc-live-lock"]
         self.assertTrue(variant["liveMirrorOnly"])
