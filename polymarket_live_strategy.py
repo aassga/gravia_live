@@ -2542,6 +2542,11 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
     dry_run = bool(pos.get("dryRun", True))
     other_side = "Down" if pos["side"] == "Up" else "Up"
     other_book = down_book if other_side == "Down" else up_book
+    # 2026-09-11：帶著真實單腿部位重啟時，WS 快速路徑在 3 秒輪詢完成 token／費率預熱前
+    # 就開始評估補腿，_fee_for_side 每個 tick 都拋 missing_v2_market_fee（15 秒內 7000 筆
+    # traceback）。預熱是輪詢路徑的責任，這裡還沒熱好就先讓過，等下一個 tick。
+    if not dry_run and not live.order_tokens_and_fees_are_warm([_token_id(other_side)]):
+        return
     hedge = _buy_plan(other_side, other_book, _hedge_order_shares(pos))
     if not hedge:
         return
