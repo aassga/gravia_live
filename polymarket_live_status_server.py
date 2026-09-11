@@ -88,6 +88,22 @@ def _load_strategy_state() -> dict:
         return {"halted": True, "haltReason": f"strategy_state_read_failed: {exc}"}
 
 
+def _backfill_win_loss(state: dict) -> None:
+    """策略狀態檔在加入 winningTrades／losingTrades 之前就有的舊交易沒有被計數；
+    這裡用狀態檔保留的最近交易（最多 100 筆）補算，讓 Dashboard 勝率涵蓋歷史。
+    只在計數器缺少或明顯落後於交易清單時補算，避免蓋掉策略程式自己維護的數字。"""
+    trades = state.get("trades") or []
+    wins = sum(1 for t in trades if float(t.get("pnlEstimate") or 0) > 0)
+    losses = sum(1 for t in trades if float(t.get("pnlEstimate") or 0) < 0)
+    if state.get("winningTrades") is None or state.get("losingTrades") is None or (
+        int(state.get("winningTrades", 0)) + int(state.get("losingTrades", 0)) < wins + losses
+    ):
+        state["winningTrades"] = wins
+        state["losingTrades"] = losses
+    decided = int(state.get("winningTrades", 0)) + int(state.get("losingTrades", 0))
+    state["winRatePct"] = (100.0 * int(state.get("winningTrades", 0)) / decided) if decided else None
+
+
 def _compute_open_positions(trades: list, max_tokens: int = 10) -> list:
     """從最近成交紀錄反推「目前實際還持有」的部位，用真實鏈上餘額驗證——
     已經被兌換（redeem）掉的部位查出來會是 0，不會出現在這裡，
@@ -163,6 +179,7 @@ def _fetch_state() -> dict:
     trades = live.get_trade_history(limit=30)
     positions = _compute_open_positions(trades)
     strategy_state = _load_strategy_state()
+    _backfill_win_loss(strategy_state)
 
     balance_usdc = int(balance_raw.get("balance", 0)) / 1_000_000
     baseline = _load_or_init_baseline(balance_usdc)

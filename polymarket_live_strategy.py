@@ -167,6 +167,9 @@ def _new_live_state() -> dict:
         "lockedTrades": 0,
         "directionalTrades": 0,
         "earlyExits": 0,
+        # 勝率統計：以每筆保守淨損益估計的正負計數（0 視為不勝不負），Dashboard 顯示用。
+        "winningTrades": 0,
+        "losingTrades": 0,
         "lastActionAt": 0.0,
         "halted": False,
         "haltReason": None,
@@ -536,6 +539,10 @@ def _record_trade(pos: dict, pnl: float, outcome: str, trade_type: str) -> None:
         live_state["earlyExits"] += 1
     else:
         live_state["directionalTrades"] += 1
+    if pnl > 0:
+        live_state["winningTrades"] = int(live_state.get("winningTrades", 0)) + 1
+    elif pnl < 0:
+        live_state["losingTrades"] = int(live_state.get("losingTrades", 0)) + 1
     _apply_first_trade_guard(trade)
     diagnostic = record_live_window_diagnostic(
         pos["windowSlug"],
