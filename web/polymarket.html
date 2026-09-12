@@ -533,7 +533,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
         <div style="display:flex;gap:8px;flex-wrap:nowrap;overflow:hidden;font-size:9px;color:#888;margin-bottom:4px;white-space:nowrap;">
           <span>${isRotation
             ? `\u5206\u6279/\u914d\u5c0d/\u914d\u5c0d\u80a1 ${rotationStats.fills||0}/${rotationStats.pairEvents||0}/${Number(rotationStats.pairedShares||0).toFixed(0)} / \u672a\u914d\u5c0d\u7d50\u7b97 ${rotationStats.unpairedSettlements||0}`
-            : isMake
+            : isMaker
             ? `掛價/成交/配對 ${makerStats.quotesPlaced||0}/${makerStats.fills||0}/${makerStats.pairedFills||0}`
             : (isDump
               ? `訊號/首腿/完成/未對沖 ${dumpStats.signalsDetected||0}/${dumpStats.leg1Entries||0}/${dumpStats.completedCycles||0}/${dumpStats.unhedgedSettlements||0}`
