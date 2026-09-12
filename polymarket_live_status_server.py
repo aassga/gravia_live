@@ -221,6 +221,7 @@ def _fetch_state() -> dict:
             "lateFavoriteMinRemaining": strategy.LATE_FAVORITE_MIN_REMAINING,
             "lateFavoriteMinPrice": strategy.LATE_FAVORITE_MIN_PRICE,
             "lateFavoriteMaxPrice": strategy.LATE_FAVORITE_MAX_PRICE,
+            "lateFavoriteStopLossPrice": strategy.LATE_FAVORITE_STOP_LOSS_PRICE,
             "entryMaxPrice": strategy.ENTRY_MAX_PRICE,
             "singleLegStopLossPct": strategy.SINGLE_LEG_STOP_LOSS_PCT,
             "singleLegMaxEntriesPerWindow": strategy.SINGLE_LEG_MAX_ENTRIES_PER_WINDOW,

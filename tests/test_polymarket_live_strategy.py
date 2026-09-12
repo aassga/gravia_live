@@ -814,6 +814,34 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             diag = strategy._live_window_diagnostic("btc-window")
             self.assertGreaterEqual(diag["reasonCounts"].get("favorite_signal_disagrees", 0), 1)
 
+    async def test_live_late_favorite_stop_loss_sells_when_leader_flips(self):
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window", "side": "Down", "tokenId": "down-token",
+            "shares": 17.0, "entryPrice": 0.90, "entryLimitPrice": 0.91,
+            "entryNotional": 15.3, "entryFee": 0.05, "entryRiskNotional": 15.47, "entryRiskFee": 0.05,
+            "stakeUsd": 15.35, "strategy": "late_favorite", "hedged": False, "dryRun": True,
+        }
+        strategy.sim.state["upBook"] = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.21, "size": 500}], "bids": [{"price": 0.19, "size": 500}]})
+        strategy.sim.state["downBook"] = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.81, "size": 500}], "bids": [{"price": 0.79, "size": 500}]})
+        with (
+            patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
+            patch.object(strategy, "LATE_FAVORITE_STOP_LOSS_PRICE", 0.60),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 30.0, None)
+            close.assert_not_awaited()
+            strategy.sim.state["downBook"] = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+                "asks": [{"price": 0.52, "size": 500}], "bids": [{"price": 0.50, "size": 500}]})
+            await strategy.evaluate_and_act("btc-window", None, 25.0, None)
+            close.assert_awaited_once()
+            plan, dry_run, reason = close.await_args.args
+            self.assertEqual(reason, "favorite_stop_loss")
+            self.assertEqual(plan["side"], "Down")
+            self.assertLessEqual(plan["limitPrice"], 0.60)
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (

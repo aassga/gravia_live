@@ -183,6 +183,10 @@ LATE_FAVORITE_WINDOW_SECONDS   = 60.0   # 剩餘 <= 60 秒才看
 LATE_FAVORITE_MIN_REMAINING    = 5.0    # 剩餘 < 5 秒不進（結算前交易所常關單）
 LATE_FAVORITE_MIN_PRICE        = 0.90   # 領先方買價下限
 LATE_FAVORITE_MAX_PRICE        = 0.97   # 超過就沒利潤空間
+# 2026-09-12 12:33 那筆：進場 Down 0.90 後 40 秒內 0.95 → 0.57 → 0.08（3 秒內翻面），整注歸零 -$15.41，
+# 把前面 8 筆各賺 $1.4 的利潤全吃掉。停損：持有腿的保守可賣價 <= 這個價就賣（每個 tick 檢查）。
+# 翻面通常只有 1～3 秒的窗口可以賣在 0.4～0.6，所以這個停損只救得到一部分，不是保證。
+LATE_FAVORITE_STOP_LOSS_PRICE  = 0.60
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # BTC 5m 暫時在窗口最後 10 秒使用 Binance window delta 做隔離測試：不是在窗口一開始就靠模型優勢
@@ -387,6 +391,7 @@ for _asset in ASSETS:
             "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
             "favoriteMinPrice":      LATE_FAVORITE_MIN_PRICE,
             "favoriteMaxPrice":      LATE_FAVORITE_MAX_PRICE,
+            "favoriteStopLossPrice": LATE_FAVORITE_STOP_LOSS_PRICE,
         })
         AB_VARIANTS.append({
             "id":                    "btc-inventory-rotation",
@@ -2463,6 +2468,28 @@ def _try_late_favorite_entry(
     )
 
 
+def _try_late_favorite_stop_loss(variant_id: str, slug: str, up_book: dict, down_book: dict) -> None:
+    """領先方翻面：持有腿的保守可賣價 <= favoriteStopLossPrice 就整筆賣掉（每個 tick 檢查）。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    stop_price = variant.get("favoriteStopLossPrice")
+    if stop_price is None:
+        return
+    st = ab_states[variant_id]
+    pos = st["position"]
+    held_book = up_book if pos["side"] == "Up" else down_book
+    if not _simulation_direction_book_is_fresh(variant["assetId"], pos["side"], held_book):
+        return
+    fill = simulate_sell_fill(held_book, float(pos["shares"]))
+    if not fill or fill["decisionPrice"] > float(stop_price):
+        return
+    record_window_diagnostic(
+        variant_id, slug, "favorite_stop_loss",
+        selectedSide=pos["side"], exitDecisionPrice=fill["decisionPrice"], favoriteStopLossPrice=stop_price,
+    )
+    _close_directional_position(variant_id, fill, "favorite_stop_loss")
+    save_sim_state()
+
+
 def _close_directional_position(variant_id: str, fill: dict, reason: str) -> None:
     st = ab_states[variant_id]
     pos = st["position"]
@@ -3186,9 +3213,12 @@ def _simulate_trading_impl(
         return
 
     if variant.get("lateFavorite"):
-        # 買領先方後抱到結算：不補腿、不提早出場。
-        if pos is None and remaining_seconds is not None:
-            _try_late_favorite_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        # 買領先方後抱到結算：不補腿；唯一的出場是停損（領先方翻面時盡量賣掉一部分）。
+        if pos is None:
+            if remaining_seconds is not None:
+                _try_late_favorite_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        elif pos.get("windowSlug") == slug and not pos.get("hedged"):
+            _try_late_favorite_stop_loss(variant_id, slug, up_book, down_book)
         return
 
     if pos is None:
@@ -4267,6 +4297,7 @@ def build_ab_leaderboard() -> list:
             "favoriteWindowSeconds": v.get("favoriteWindowSeconds"),
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
+            "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
             "mmMaxPairCost": v.get("mmMaxPairCost"),
             "mmFirstLegMaxPrice": v.get("mmFirstLegMaxPrice"),
             "mmRescueSeconds": v.get("mmRescueSeconds"),
