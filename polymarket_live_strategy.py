@@ -124,9 +124,17 @@ _LIVE_DIRECTION_VARIANT_ID = LIVE_VARIANT_ID
 ENABLE_LATE_DIRECTION = _LATE_DIRECTION_REQUESTED and bool(_LIVE_VARIANT.get("lateDirectionOnly"))
 # 純晚進場方向性變體不能先被兩腿鎖利部位占用；歷史混合變體則保留「先鎖利、
 # 找不到才方向性」的既有流程。
-DIRECT_PAIR_ENABLED = not bool(_LIVE_VARIANT.get("lateDirectionOnly")) or bool(
-    _LIVE_VARIANT.get("historicalHybrid")
-)
+# 2026-09-12：「最後 60 秒買領先方」變體只做一件事——最後一分鐘買已經 >= 0.90 的那一邊、
+# 抱到結算；不做兩腿鎖利、不做晚進場方向性、不做單邊進場。判斷條件跟模擬盤
+# sim._try_late_favorite_entry 同一套。
+LATE_FAVORITE_ENABLED = bool(_LIVE_VARIANT.get("lateFavorite"))
+LATE_FAVORITE_WINDOW_SECONDS = float(_LIVE_VARIANT.get("favoriteWindowSeconds", 60.0))
+LATE_FAVORITE_MIN_REMAINING = float(_LIVE_VARIANT.get("favoriteMinRemaining", 5.0))
+LATE_FAVORITE_MIN_PRICE = float(_LIVE_VARIANT.get("favoriteMinPrice", 0.90))
+LATE_FAVORITE_MAX_PRICE = float(_LIVE_VARIANT.get("favoriteMaxPrice", 0.97))
+DIRECT_PAIR_ENABLED = (
+    not bool(_LIVE_VARIANT.get("lateDirectionOnly")) or bool(_LIVE_VARIANT.get("historicalHybrid"))
+) and not LATE_FAVORITE_ENABLED
 # 2026-09-07 實盤再次出現「快照上兩腿合計 0.92，但 346ms 後只成交一腿」。公開 API
 # 的 batch 不是原子交易，因此把門檻收緊、要求限價內有數倍深度，並只接受持續存在的機會。
 # 這些參數也由 btc-live-lock 模擬組讀取，避免模擬與實盤再次使用不同條件。
@@ -152,7 +160,7 @@ def _resolve_entry_max_price() -> float | None:
 
 
 ENTRY_MAX_PRICE = _resolve_entry_max_price()
-SINGLE_LEG_ENTRY_ENABLED = ENTRY_MAX_PRICE is not None
+SINGLE_LEG_ENTRY_ENABLED = ENTRY_MAX_PRICE is not None and not LATE_FAVORITE_ENABLED
 # 2026-09-12：單邊進場的停損。單邊部位原本只有「補腿鎖利」或「買盤價高於模型價值」兩種出場，
 # 對邊一路漲上去時只能抱到歸零（18:15 那筆 Down 從 0.33 跌到 0.02、-$2.32）。這裡在 3 秒輪詢
 # 路徑加一條：持有腿的保守可賣價 <= 進場成交價 × (1 − 停損%) 就用 FOK 賣掉。0 = 關閉。
@@ -975,6 +983,90 @@ def _single_leg_entry_allowed(slug: str, remaining_seconds: float) -> bool:
         )
         return False
     return True
+
+
+def _late_favorite_plan(
+    up_book: dict, down_book: dict, remaining_seconds: float, cash: float, diagnostic_slug: str | None = None
+) -> dict | None:
+    """對齊模擬版 _try_late_favorite_entry：剩餘 5～60 秒、某邊 ask 在 0.90～0.97、
+    Chainlink 60s TWAP 方向一致、book 為新鮮 WS 快照 → 以預算 / 買價換算整數股數。"""
+    def diag(reason, **details):
+        if diagnostic_slug:
+            record_live_window_diagnostic(diagnostic_slug, reason, remainingSeconds=remaining_seconds, **details)
+    if remaining_seconds > LATE_FAVORITE_WINDOW_SECONDS or remaining_seconds < LATE_FAVORITE_MIN_REMAINING:
+        diag("outside_favorite_window")
+        return None
+    up_asks, down_asks = up_book.get("asks") or [], down_book.get("asks") or []
+    up_ask = float(up_asks[0]["price"]) if up_asks else None
+    down_ask = float(down_asks[0]["price"]) if down_asks else None
+    if up_ask is not None and up_ask >= LATE_FAVORITE_MIN_PRICE:
+        side, book, ask = "Up", up_book, up_ask
+    elif down_ask is not None and down_ask >= LATE_FAVORITE_MIN_PRICE:
+        side, book, ask = "Down", down_book, down_ask
+    else:
+        diag("favorite_no_leader", upAsk=up_ask, downAsk=down_ask, favoriteMinPrice=LATE_FAVORITE_MIN_PRICE)
+        return None
+    if ask > LATE_FAVORITE_MAX_PRICE:
+        diag("favorite_price_above_maximum", selectedSide=side, selectedAsk=ask, favoriteMaxPrice=LATE_FAVORITE_MAX_PRICE)
+        return None
+    signal = sim.get_chainlink_twap_signal(LIVE_ASSET_ID)
+    delta_pct = None
+    if signal and signal.get("opening"):
+        delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
+        if (delta_pct > 0 and side == "Down") or (delta_pct < 0 and side == "Up"):
+            diag("favorite_signal_disagrees", selectedSide=side, signalDeltaPct=delta_pct)
+            return None
+    if not _live_direction_book_is_fresh(side, book):
+        diag("favorite_book_not_fresh", selectedSide=side, dataGuardReason=sim._simulation_single_book_guard_reason(book))
+        return None
+    _, budget = _target_pair_order(cash)
+    if budget < sim.SIM_MIN_ORDER_NOTIONAL_USD:
+        diag("favorite_budget_too_small", budgetUsd=budget)
+        return None
+    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    if shares < float(book.get("minOrderSize", 1) or 1):
+        diag("favorite_below_minimum_shares", targetShares=shares, minOrderSize=book.get("minOrderSize"))
+        return None
+    plan = _buy_plan(side, book, shares)
+    if not plan:
+        diag("favorite_insufficient_depth", selectedSide=side, targetShares=shares)
+        return None
+    if plan["limitPrice"] > LATE_FAVORITE_MAX_PRICE:
+        diag("favorite_price_above_maximum", selectedSide=side, directionLimitPrice=plan["limitPrice"], favoriteMaxPrice=LATE_FAVORITE_MAX_PRICE)
+        return None
+    if plan["riskNotional"] + plan["fee"] > cash:
+        diag("favorite_insufficient_cash", cashUsd=cash, totalRiskCost=plan["riskNotional"] + plan["fee"])
+        return None
+    plan["_signalSource"] = "late_favorite"
+    plan["_deltaPct"] = delta_pct
+    plan["_signalObservedAt"] = int(time.time() * 1000)
+    plan["_signalAgeSeconds"] = 0.0
+    plan["_bookQuoteSource"] = book.get("quoteSource")
+    plan["_bookReceivedAtMonotonic"] = book.get("receivedAtMonotonic")
+    diag("favorite_candidate", status="candidate", selectedSide=side, selectedAsk=ask, directionLimitPrice=plan["limitPrice"], targetShares=shares)
+    return plan
+
+
+async def _try_late_favorite_entry(
+    slug: str, up_book: dict, down_book: dict, remaining_seconds: float, cash: float, dry_run: bool
+) -> bool:
+    """3 秒輪詢路徑：最後 60 秒買領先方（判斷＋送單）。每窗口最多一次；成交後抱到結算。"""
+    if live_state.get("lateFavoriteWindowSlug") == slug:
+        record_live_window_diagnostic(slug, "favorite_already_entered")
+        return False
+    plan = _late_favorite_plan(up_book, down_book, remaining_seconds, cash, diagnostic_slug=slug)
+    if not plan:
+        return False
+    log.info(
+        f"[LIVE] 最後 {remaining_seconds:.0f}s 買領先方 {plan['side']} limit=${plan['limitPrice']:.3f} "
+        f"shares={plan['shares']:.0f} Δ={plan['_deltaPct'] if plan['_deltaPct'] is not None else float('nan'):+.3f}%"
+    )
+    result = await _enter_position(slug, plan, dry_run)
+    if result == "filled":
+        live_state["position"]["strategy"] = "late_favorite"
+        live_state["lateFavoriteWindowSlug"] = slug
+        save_live_state()
+    return result == "filled"
 
 
 def _target_pair_order(cash: float) -> tuple[float, float]:
@@ -2205,6 +2297,7 @@ def _decision_evaluation(slug, source, up, down, remaining):
         LIVE_VARIANT_ID, slug, source, up, down, remaining,
         {"lockMaxSum": LOCK_MAX_SUM, "lateDirectionMaxPrice": LATE_DIRECTION_MAX_PRICE,
          "entryMaxPrice": ENTRY_MAX_PRICE,
+         "lateFavorite": LATE_FAVORITE_ENABLED,
          "stakePct": STAKE_PCT, "minDepthMultiplier": PAIR_MIN_DEPTH_MULTIPLIER,
          "stabilitySeconds": PAIR_STABILITY_SECONDS, "halted": live_state.get("halted"),
          "positionPresent": live_state.get("position") is not None,
@@ -2267,6 +2360,10 @@ async def _evaluate_and_act_impl(
         cash = await _strategy_cash(dry_run)
         shares, budget = _target_pair_order(cash)
         if budget < 1.0 or shares < 1.0:
+            return
+
+        if LATE_FAVORITE_ENABLED:
+            await _try_late_favorite_entry(slug, up_book, down_book, remaining_seconds, cash, dry_run)
             return
 
         if DIRECT_PAIR_ENABLED:
@@ -2340,8 +2437,8 @@ async def _evaluate_and_act_impl(
     if pos.get("emergencyUnwindPending"):
         await _emergency_unwind(session, pos.get("emergencyUnwind", {}).get("reason", "resume_emergency_unwind"))
         return
-    if pos.get("strategy") == "late_direction":
-        # 晚進場方向性進場後就抱到結算，不補鎖利、不提早出場——道理跟 sim 那邊一樣：
+    if pos.get("strategy") in ("late_direction", "late_favorite"):
+        # 晚進場方向性／買領先方進場後就抱到結算，不補鎖利、不提早出場——道理跟 sim 那邊一樣：
         # 進場當下對邊常常正好夠便宜可以「鎖利」，但那樣等於把方向性優勢換成極小的
         # 鎖利價差，違背了這條路存在的目的。
         return
@@ -2492,6 +2589,9 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
     pos = live_state.get("position")
 
     if pos is None:
+        if LATE_FAVORITE_ENABLED:
+            # 買領先方只走 3 秒輪詢路徑；最後一分鐘不需要 tick 級反應，也避免兩條路搶同一個部位。
+            return
         if time.time() - float(live_state.get("lastActionAt", 0)) < ACTION_COOLDOWN_SECONDS:
             record_live_window_diagnostic(slug, "action_cooldown")
             return
@@ -2591,7 +2691,7 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
     if pos.get("emergencyUnwindPending"):
         # 救援含餘額刷新與網路 I/O，交由 3 秒輪詢路徑執行；WS 快速路徑不重複排程。
         return
-    if pos.get("strategy") == "late_direction":
+    if pos.get("strategy") in ("late_direction", "late_favorite"):
         return
 
     dry_run = bool(pos.get("dryRun", True))
@@ -2728,6 +2828,12 @@ def _log_startup_banner(mode: str) -> None:
         f"  emergency unwind: wait={EMERGENCY_UNWIND_WAIT_SECONDS:.1f}s "
         f"balance poll={EMERGENCY_UNWIND_POLL_INTERVAL:.2f}s order retry={EMERGENCY_UNWIND_ORDER_INTERVAL:.1f}s"
     )
+    if LATE_FAVORITE_ENABLED:
+        log.warning(
+            f"  買領先方已啟用：剩餘 {LATE_FAVORITE_MIN_REMAINING:.0f}~{LATE_FAVORITE_WINDOW_SECONDS:.0f}s、"
+            f"某邊 ask ${LATE_FAVORITE_MIN_PRICE:.2f}~${LATE_FAVORITE_MAX_PRICE:.2f} 且 Chainlink 同向 → 買該邊抱到結算；"
+            "兩腿鎖利／晚進場方向性／單邊進場全部停用"
+        )
     if ENABLE_LATE_DIRECTION:
         direction_source = (
             "Binance Futures 窗口漲跌"

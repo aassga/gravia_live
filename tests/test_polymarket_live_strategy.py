@@ -745,6 +745,75 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.45, "fairDown": 0.55})
             self.assertIsNotNone(strategy.live_state["position"])
 
+    def _favorite_books(self, up_ask=0.92, down_ask=0.09):
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": up_ask, "size": 500}], "bids": [{"price": round(up_ask - 0.01, 2), "size": 500}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": down_ask, "size": 500}], "bids": [{"price": max(0.01, round(down_ask - 0.01, 2)), "size": 500}]})
+        return up, down
+
+    async def test_live_late_favorite_buys_leader_and_holds_to_settlement(self):
+        self._set_chainlink_signal(opening=100.0, current=100.3)
+        up, down = self._favorite_books()
+        strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up, down
+        with (
+            patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", False),
+            patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", False),
+            patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 40.0, None)
+            pos = strategy.live_state["position"]
+            self.assertIsNotNone(pos)
+            self.assertEqual(pos["side"], "Up")
+            self.assertEqual(pos["strategy"], "late_favorite")
+            self.assertLessEqual(pos["entryLimitPrice"], 0.97)
+            self.assertEqual(pos["shares"], float(int(pos["shares"])))
+            self.assertEqual(strategy.live_state["lateFavoriteWindowSlug"], "btc-window")
+            # 對邊變便宜也不補腿、不提早出場
+            strategy.sim.state["downBook"] = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+                "asks": [{"price": 0.03, "size": 500}], "bids": [{"price": 0.02, "size": 500}]})
+            with (
+                patch.object(strategy, "_hedge_position", AsyncMock()) as hedge,
+                patch.object(strategy, "_close_position", AsyncMock()) as close,
+            ):
+                await strategy.evaluate_and_act("btc-window", None, 20.0, {"fairUp": 0.5, "fairDown": 0.5})
+            hedge.assert_not_awaited(); close.assert_not_awaited()
+            self.assertIsNotNone(strategy.live_state["position"])
+            # 同窗口不再進第二次
+            strategy.live_state["position"] = None
+            strategy.live_state["lastActionAt"] = 0
+            await strategy.evaluate_and_act("btc-window", None, 30.0, None)
+            self.assertIsNone(strategy.live_state["position"])
+
+    async def test_live_late_favorite_skips_when_no_leader_or_signal_disagrees_or_outside_window(self):
+        common = (
+            patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", False),
+            patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", False),
+            patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+        )
+        with common[0], common[1], common[2], common[3], common[4]:
+            self._set_chainlink_signal(opening=100.0, current=100.3)
+            up, down = self._favorite_books()
+            strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up, down
+            await strategy.evaluate_and_act("btc-window", None, 120.0, None)          # 還沒到最後 60 秒
+            self.assertIsNone(strategy.live_state["position"])
+            strategy.live_state["lastActionAt"] = 0
+            up2, down2 = self._favorite_books(up_ask=0.70, down_ask=0.31)              # 沒有領先方
+            strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up2, down2
+            await strategy.evaluate_and_act("btc-window", None, 40.0, None)
+            self.assertIsNone(strategy.live_state["position"])
+            strategy.live_state["lastActionAt"] = 0
+            self._set_chainlink_signal(opening=100.0, current=99.7)                   # Chainlink 反向
+            strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up, down
+            await strategy.evaluate_and_act("btc-window", None, 40.0, None)
+            self.assertIsNone(strategy.live_state["position"])
+            diag = strategy._live_window_diagnostic("btc-window")
+            self.assertGreaterEqual(diag["reasonCounts"].get("favorite_signal_disagrees", 0), 1)
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (

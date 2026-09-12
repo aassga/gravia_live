@@ -383,7 +383,6 @@ for _asset in ASSETS:
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateFavorite":          True,
-            "simOnly":               True,
             "favoriteWindowSeconds": LATE_FAVORITE_WINDOW_SECONDS,
             "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
             "favoriteMinPrice":      LATE_FAVORITE_MIN_PRICE,
