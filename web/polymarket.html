@@ -477,6 +477,8 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       const p=v.position;
       const isMaker=v.strategyType==='maker';
       const isDump=!!v.dumpThenHedge;
+      const isRotation=!!v.inventoryRotation;
+      const rotationStats=v.rotationStats||{};
       const makerStats=v.makerStats||{};
       const dumpStats=v.dumpHedgeStats||{};
       const makerQuotes=v.makerQuotes||{};
@@ -484,6 +486,15 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       const POS_BOX_HEIGHT=78;  // 固定高度：不管有沒有鎖利那行，三欄下面的成交紀錄都從同一個 Y 座標開始
       if(!p){
         posHtml=`<div style="font-size:9px;color:#444;margin-bottom:6px;height:${POS_BOX_HEIGHT}px;display:flex;align-items:center;justify-content:center;">— 空手，觀望中 —</div>`;
+      } else if(isRotation) {
+        const residual=Number(p.residualShares||0);
+        const locked=Number(p.lockedPnl||0);
+        posHtml=`<div style="font-size:9.5px;background:#00000055;border-radius:2px;padding:4px 6px;margin-bottom:6px;height:${POS_BOX_HEIGHT}px;box-sizing:border-box;overflow:hidden;">
+          <div style="display:flex;justify-content:space-between;"><span>Up <b class="up-b">${Number(p.upShares||0).toFixed(0)}</b> / Down <b class="dn-b">${Number(p.downShares||0).toFixed(0)}</b></span><span>\u5206\u6279 ${Number(p.fillCount||0)}</span></div>
+          <div style="color:#888;margin-top:2px;">\u5df2\u914d\u5c0d ${Number(p.pairedShares||0).toFixed(0)} \u80a1 ? \u6210\u672c $${Number(p.stakeUsd||0).toFixed(2)}</div>
+          <div style="color:${residual>0?'#ffd700':'#00ff9d'};">${residual>0?`\u5269\u9918 ${p.residualSide} ${residual.toFixed(0)} \u80a1\u66dd\u96aa`:'\u76ee\u524d\u7121\u55ae\u817f\u66dd\u96aa'}</div>
+          <div style="font-weight:700;margin-top:2px;color:${locked>=0?'#00ff9d':'#ff3a5c'};">\u5df2\u914d\u5c0d\u9396\u5b9a ${fmtMoney(locked)}</div>
+        </div>`;
       } else {
         const sideColor=p.side==='Up'?'#00ff9d':'#ff3a5c';
         let pnlLine;
@@ -520,7 +531,9 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
           <span>費用 $${(v.totalFees||0).toFixed(2)}</span>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:nowrap;overflow:hidden;font-size:9px;color:#888;margin-bottom:4px;white-space:nowrap;">
-          <span>${isMaker
+          <span>${isRotation
+            ? `\u5206\u6279/\u914d\u5c0d/\u914d\u5c0d\u80a1 ${rotationStats.fills||0}/${rotationStats.pairEvents||0}/${Number(rotationStats.pairedShares||0).toFixed(0)} / \u672a\u914d\u5c0d\u7d50\u7b97 ${rotationStats.unpairedSettlements||0}`
+            : isMaker
             ? `掛價/成交/配對 ${makerStats.quotesPlaced||0}/${makerStats.fills||0}/${makerStats.pairedFills||0}`
             : (isDump
               ? `訊號/首腿/完成/未對沖 ${dumpStats.signalsDetected||0}/${dumpStats.leg1Entries||0}/${dumpStats.completedCycles||0}/${dumpStats.unhedgedSettlements||0}`
@@ -528,7 +541,9 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
           <span class="red">回撤 ${(v.maxDrawdown||0).toFixed(2)}%</span>
         </div>
         <div style="font-size:8.5px;color:#444;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-          ${isMaker
+          ${isRotation
+            ? `\u6bcf\u6b21 ${Number(v.sliceShares||0).toFixed(0)} \u80a1 | edge>=${Number(v.minEntryEdge||0).toFixed(2)} | T-${Number(v.hedgeOnlySeconds||0).toFixed(0)}s \u5f8c\u53ea\u88dc\u817f | \u6b98\u7559<=${Number(v.maxResidualShares||0).toFixed(0)} \u80a1 | \u7e3d\u6210\u672c<=$${Number(v.maxGrossBudgetUsd||0).toFixed(0)}`
+            : isMaker
             ? `Maker queue · Up ${makerQuotes.Up?'$'+makerQuotes.Up.price.toFixed(3):'—'} / Down ${makerQuotes.Down?'$'+makerQuotes.Down.price.toFixed(3):'—'} · 救援 對沖/平倉/失敗 ${makerStats.rescueHedges||0}/${makerStats.rescueUnwinds||0}/${makerStats.rescueFailures||0}`
             : (isDump
               ? `前 ${Number(v.entryWindowSeconds||0).toFixed(0)}s · ${Number(v.lookbackSeconds||0).toFixed(0)}s 跌幅≥${Number(v.minMovePct||0).toFixed(0)}% · 固定 ${Number(v.targetShares||0).toFixed(0)}股 · 費後淨利≥${Number(v.minNetPerShare||0).toFixed(2)}/股`
@@ -539,7 +554,12 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       const list=trades.length?trades.map(t=>{
         const win=t.pnl>=0;
         const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
-        const dir=t.maker
+        const rotUp=Number(t.upShares||0), rotDown=Number(t.downShares||0);
+        const dir=t.strategyMode==='inventory_rotation'
+          ? (rotUp>0&&rotDown>0
+              ? `Up ${rotUp.toFixed(0)} / Down ${rotDown.toFixed(0)} 配對鎖利`
+              : `${rotUp>0?'Up '+rotUp.toFixed(0):'Down '+rotDown.toFixed(0)} 未配對結算`)
+          : t.maker
           ? (t.hedged?`${t.side}/${t.hedgeSide} Maker配對`:(t.exitReason==='maker_inventory_timeout'?`${t.side} Maker救援平倉`:`${t.side} Maker單腿`))
           : (t.strategyMode==='dump_then_hedge'
             ? (t.hedged?`${t.side}/${t.hedgeSide} 暴跌補腿`:`${t.side} 暴跌未對沖`)

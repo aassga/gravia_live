@@ -86,6 +86,11 @@ log = logging.getLogger("polymarket")
 
 # ── 模擬策略設定（紙上交易）────────────────────────────────────────────────
 SIM_ENTRY_MAX_PRICE   = 0.40   # 主要策略：只有價格 <= 這個門檻才考慮先進場一邊
+# 2026-09-12 依使用者要求關回純兩腿直接鎖利。單邊進場 2026-09-11 重開 8.5 小時的結果：
+# btc-main 98 筆 -$4（74 筆補到腿 +$190、24 筆補不到 0/24 -$195），btc-loose 100 筆 -$47；
+# 而重開前 195 小時的 +$322／+$331 全部來自兩腿直接鎖利，跟 entryMaxPrice 無關。
+# 想再驗證單邊進場時把這個開關打開即可（變體的 entryMaxPrice 仍保留給 Dashboard 顯示）。
+SIM_SINGLE_LEG_ENTRY_ENABLED = False
 SIM_LOCK_MAX_SUM      = 0.95   # 主要策略：兩邊最差可成交限價 <= 門檻，且扣費用後達最低淨利才配對
                                 # （2026-09 從 0.90 放寬到 0.95，增加鎖利機會頻率——真正擋住虧損單的
                                 # 是 SIM_MIN_NET_LOCK_PER_SHARE 這個獨立的淨利門檻，不是這裡，所以
@@ -108,6 +113,22 @@ SIM_MIN_ORDER_NOTIONAL_USD  = 1.0   # 跟實盤一致：單腿成交金額低於
 SIM_EXIT_EDGE               = 0.02  # 市場可賣價高於模型持有價值 2¢/股時提早退出
 SIM_FAIR_MODEL_WEIGHT       = 0.65  # Binance 波動模型權重；其餘使用市場隱含機率校準
 SIM_MIN_SIGMA_PER_SECOND    = {"btc": 0.000025, "btc-15m": 0.000025, "btc-4h": 0.000025, "eth": 0.000035}
+
+# BTC inventory-rotation experiment. This is deliberately SIM-only: it buys
+# one small slice at a time, accepts temporary directional inventory, and buys
+# the opposite outcome later only when the newly paired shares lock a net edge.
+ROTATION_SLICE_SHARES          = 5.0
+ROTATION_MIN_EDGE              = 0.04
+ROTATION_PAIR_MAX_SUM          = 0.98
+ROTATION_MAX_GROSS_USD         = 25.0
+ROTATION_MAX_RESIDUAL_SHARES   = 5.0
+ROTATION_HEDGE_ONLY_SECONDS    = 30.0
+ROTATION_ACTION_COOLDOWN       = 1.0
+ROTATION_RESIDUAL_RISK_PREMIUM = 0.01
+# A future hedge is also a taker fill. Reserve the maximum crypto taker fee per
+# share up front instead of treating an apparently cheap first leg as free to
+# hedge later. At p=0.5 the fee curve reaches rate * p * (1-p) = rate * 0.25.
+ROTATION_FUTURE_HEDGE_FEE_RESERVE = SIM_TAKER_FEE_RATE * 0.25
 
 # 實盤鏡像模擬組：直接讀取與 polymarket_live_strategy.py 相同的環境變數，讓模擬盤
 # 有一張獨立卡片只累積「目前實盤有效策略」的結果，不和 main／晚進場方向性混在一起。
@@ -331,6 +352,24 @@ for _asset in ASSETS:
             "minDepthMultiplier":    LIVE_MIRROR_DEPTH_MULTIPLIER,
             "stabilitySeconds":      LIVE_MIRROR_STABILITY_SECONDS,
         })
+        AB_VARIANTS.append({
+            "id":                    "btc-inventory-rotation",
+            "assetId":               "btc",
+            "label":                 "BTC \u52d5\u614b\u5eab\u5b58\u65cb\u8f49\uff08\u5206\u6279\u2192\u88dc\u817f\uff09",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            ROTATION_PAIR_MAX_SUM,
+            "inventoryRotation":     True,
+            "simOnly":               True,
+            "sliceShares":           ROTATION_SLICE_SHARES,
+            "minEntryEdge":          ROTATION_MIN_EDGE,
+            "maxGrossBudgetUsd":     ROTATION_MAX_GROSS_USD,
+            "maxResidualShares":     ROTATION_MAX_RESIDUAL_SHARES,
+            "hedgeOnlySeconds":      ROTATION_HEDGE_ONLY_SECONDS,
+            "actionCooldownSeconds": ROTATION_ACTION_COOLDOWN,
+            "residualRiskPremium":   ROTATION_RESIDUAL_RISK_PREMIUM,
+            "futureHedgeFeeReserve": ROTATION_FUTURE_HEDGE_FEE_RESERVE,
+            "requireChainlinkConfirm": True,
+        })
     elif _asset["id"] != "btc-15m" and _asset["binanceSymbol"] == "BTCUSDT":
         AB_VARIANTS.append({
             "id":                    f"{_asset['id']}-chainlink-late-direction",
@@ -407,6 +446,15 @@ def _new_variant_state() -> dict:
             "hedgeChecks": 0,
             "completedCycles": 0,
             "unhedgedSettlements": 0,
+        },
+        "rotationStats": {
+            "windowsEntered": 0,
+            "fills": 0,
+            "pairEvents": 0,
+            "pairedShares": 0.0,
+            "unpairedSettlements": 0,
+            "maxResidualShares": 0.0,
+            "lastActionAt": 0.0,
         },
     }
 
@@ -663,6 +711,12 @@ def simulate_sell_fill(book: dict, shares: float) -> dict | None:
 
 
 def _position_paid_cost(pos: dict) -> float:
+    if pos.get("strategyMode") == "inventory_rotation":
+        return (
+            float(pos.get("upNotional", 0)) + float(pos.get("upFee", 0))
+            + float(pos.get("downNotional", 0)) + float(pos.get("downFee", 0))
+        )
+
     cost = float(pos.get("entryNotional", pos["shares"] * pos["entryPrice"])) + float(pos.get("entryFee", 0))
     if pos.get("hedged"):
         cost += float(pos.get("hedgeNotional", pos.get("hedgeShares", 0) * (pos.get("hedgePrice") or 0)))
@@ -672,6 +726,12 @@ def _position_paid_cost(pos: dict) -> float:
 
 def _position_decision_cost(pos: dict) -> float:
     """回傳建立部位時的保守最差成本，用來決定後續是否真的能鎖利。"""
+    if pos.get("strategyMode") == "inventory_rotation":
+        return (
+            float(pos.get("upDecisionNotional", 0)) + float(pos.get("upDecisionFee", 0))
+            + float(pos.get("downDecisionNotional", 0)) + float(pos.get("downDecisionFee", 0))
+        )
+
     cost = float(pos.get("entryDecisionNotional", pos.get("entryNotional", pos["shares"] * pos["entryPrice"])))
     cost += float(pos.get("entryDecisionFee", pos.get("entryFee", 0)))
     if pos.get("hedged"):
@@ -1603,6 +1663,58 @@ def log_price_sum_diagnostic(tag: str, up_book: dict, down_book: dict, lock_max_
         f"[DIAG:{tag}] t={time.time():.3f} price_sum={price_sum:.4f} "
         f"up_ask={up_ask:.4f} down_ask={down_ask:.4f} lockMaxSum={lock_max_sum:.2f}"
     )
+
+
+def _entry_candidate(side: str, book: dict, shares: float, fair_probability: float, max_price: float) -> dict | None:
+    """單邊進場候選：買價要 <= entryMaxPrice，且公平機率扣掉全部成本後至少留 SIM_MIN_ENTRY_EDGE。
+
+    2026-09-11：依使用者要求重新啟用。這條「找不到鎖利就先買便宜那一腿賭單邊」的退路，
+    2026-09 初曾因 42 戰 0 勝、-$364.75 而關閉；現在重開是要在目前「兩腿加總卡在 $1.00、
+    鎖利門檻幾乎碰不到」的市場條件下重新驗證。只影響有設 entryMaxPrice 的模擬變體
+    （conservative／main／loose），實盤用的 btc-historical-hybrid 是 None，不受影響。
+    跟真實版一樣不先按深度縮小股數：深度不夠 simulate_buy_fill 會直接回傳 None（等同 FOK 未成交）。"""
+    fill = simulate_buy_fill(book, shares)
+    if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD or fill["decisionPrice"] > max_price:
+        return None
+    all_in_per_share = (fill["decisionNotional"] + fill["decisionFee"]) / fill["shares"]
+    edge = fair_probability - all_in_per_share
+    if edge < SIM_MIN_ENTRY_EDGE:
+        return None
+    return {"side": side, "fill": fill, "fair": fair_probability, "edge": edge}
+
+
+def _try_single_leg_entry(
+    variant_id: str, slug: str, up_book: dict, down_book: dict, fair: dict | None
+) -> bool:
+    """找不到兩腿鎖利時，用公平價模型挑一邊先進場（之後由既有補鎖利邏輯嘗試補另一腿）。"""
+    if not SIM_SINGLE_LEG_ENTRY_ENABLED:
+        return False
+    variant = AB_VARIANT_BY_ID[variant_id]
+    max_price = variant.get("entryMaxPrice")
+    if max_price is None:
+        return False
+    if not fair:
+        record_window_diagnostic(variant_id, slug, "single_leg_no_fair_model")
+        return False
+    target_shares, budget = _target_order_size(variant_id)
+    if target_shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "single_leg_budget_too_small")
+        return False
+    candidates = [
+        _entry_candidate("Up", up_book, target_shares, fair["fairUp"], max_price),
+        _entry_candidate("Down", down_book, target_shares, fair["fairDown"], max_price),
+    ]
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        record_window_diagnostic(
+            variant_id, slug, "single_leg_no_candidate",
+            entryMaxPrice=max_price, fairUp=fair.get("fairUp"), fairDown=fair.get("fairDown"),
+        )
+        return False
+    best = max(candidates, key=lambda c: c["edge"])
+    enter_position(variant_id, slug, best["side"], best["fill"], budget, best["fair"], best["edge"])
+    record_window_diagnostic(variant_id, slug, "single_leg_entered", side=best["side"], edge=best["edge"])
+    return True
 
 
 def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
@@ -2561,6 +2673,354 @@ def decision_evaluation(stream, variant_id, slug, source, up, down, remaining, s
         lambda: tuple(_ws_get_book(tid) if tid else None for tid in token_ids))
 
 
+
+def _rotation_stats(st: dict) -> dict:
+    defaults = {
+        "windowsEntered": 0,
+        "fills": 0,
+        "pairEvents": 0,
+        "pairedShares": 0.0,
+        "unpairedSettlements": 0,
+        "maxResidualShares": 0.0,
+        "lastActionAt": 0.0,
+    }
+    stats = st.setdefault("rotationStats", {})
+    for key, value in defaults.items():
+        stats.setdefault(key, value)
+    return stats
+
+
+def _rotation_lot_slice(lots: list, start_shares: float, shares: float) -> dict | None:
+    """Return paid and decision cost for a FIFO range of inventory lots."""
+    skip = max(0.0, float(start_shares))
+    remaining = max(0.0, float(shares))
+    totals = {"notional": 0.0, "fee": 0.0, "decisionNotional": 0.0, "decisionFee": 0.0}
+    for lot in lots:
+        lot_shares = float(lot.get("shares", 0))
+        if lot_shares <= 0:
+            continue
+        if skip >= lot_shares - 1e-9:
+            skip -= lot_shares
+            continue
+        available = lot_shares - skip
+        take = min(remaining, available)
+        ratio = take / lot_shares
+        for key in totals:
+            totals[key] += float(lot.get(key, 0)) * ratio
+        remaining -= take
+        skip = 0.0
+        if remaining <= 1e-9:
+            return totals
+    return None
+
+
+def _rotation_metrics(pos: dict) -> dict:
+    up_shares = sum(float(x.get("shares", 0)) for x in pos.get("upLots", []))
+    down_shares = sum(float(x.get("shares", 0)) for x in pos.get("downLots", []))
+    paired = min(up_shares, down_shares)
+    up_pair = _rotation_lot_slice(pos.get("upLots", []), 0.0, paired) if paired else None
+    down_pair = _rotation_lot_slice(pos.get("downLots", []), 0.0, paired) if paired else None
+    paid_pair_cost = sum((x or {}).get("notional", 0) + (x or {}).get("fee", 0) for x in (up_pair, down_pair))
+    decision_pair_cost = sum(
+        (x or {}).get("decisionNotional", 0) + (x or {}).get("decisionFee", 0)
+        for x in (up_pair, down_pair)
+    )
+    residual = abs(up_shares - down_shares)
+    residual_side = "Up" if up_shares > down_shares else ("Down" if down_shares > up_shares else None)
+    return {
+        "upShares": up_shares,
+        "downShares": down_shares,
+        "pairedShares": paired,
+        "residualShares": residual,
+        "residualSide": residual_side,
+        "lockedPnl": paired - paid_pair_cost,
+        "decisionLockedPnl": paired - decision_pair_cost,
+        "paidPairCost": paid_pair_cost,
+        "decisionPairCost": decision_pair_cost,
+    }
+
+
+def _refresh_rotation_position(pos: dict) -> dict:
+    metrics = _rotation_metrics(pos)
+    pos.update(metrics)
+    pos["upNotional"] = sum(float(x.get("notional", 0)) for x in pos.get("upLots", []))
+    pos["downNotional"] = sum(float(x.get("notional", 0)) for x in pos.get("downLots", []))
+    pos["upFee"] = sum(float(x.get("fee", 0)) for x in pos.get("upLots", []))
+    pos["downFee"] = sum(float(x.get("fee", 0)) for x in pos.get("downLots", []))
+    pos["upDecisionNotional"] = sum(float(x.get("decisionNotional", 0)) for x in pos.get("upLots", []))
+    pos["downDecisionNotional"] = sum(float(x.get("decisionNotional", 0)) for x in pos.get("downLots", []))
+    pos["upDecisionFee"] = sum(float(x.get("decisionFee", 0)) for x in pos.get("upLots", []))
+    pos["downDecisionFee"] = sum(float(x.get("decisionFee", 0)) for x in pos.get("downLots", []))
+    pos["upAvgPrice"] = pos["upNotional"] / metrics["upShares"] if metrics["upShares"] else None
+    pos["downAvgPrice"] = pos["downNotional"] / metrics["downShares"] if metrics["downShares"] else None
+    pos["shares"] = max(metrics["upShares"], metrics["downShares"])
+    pos["stakeUsd"] = _position_paid_cost(pos)
+    pos["hedged"] = metrics["pairedShares"] > 0 and metrics["residualShares"] <= 1e-9
+    return metrics
+
+
+def _rotation_add_fill(
+    variant_id: str,
+    slug: str,
+    side: str,
+    fill: dict,
+    fair_probability: float,
+    edge: float,
+) -> None:
+    st = ab_states[variant_id]
+    stats = _rotation_stats(st)
+    pos = st.get("position")
+    first_fill = pos is None
+    if first_fill:
+        pos = {
+            "windowSlug": slug,
+            "strategyMode": "inventory_rotation",
+            "side": side,
+            "entryPrice": float(fill["vwap"]),
+            "entryDecisionPrice": float(fill["decisionPrice"]),
+            "entryNotional": float(fill["notional"]),
+            "entryFee": float(fill["fee"]),
+            "entryTime": time.time(),
+            "entryEdge": edge,
+            "fairProbability": fair_probability,
+            "upLots": [],
+            "downLots": [],
+            "fillCount": 0,
+            "hedged": False,
+            "hedgeSide": None,
+            "hedgePrice": None,
+            "hedgeFee": 0.0,
+            "exitFee": 0.0,
+        }
+        st["position"] = pos
+        stats["windowsEntered"] += 1
+    paired_before = float(pos.get("pairedShares", 0))
+    lot = {
+        "shares": float(fill["shares"]),
+        "vwap": float(fill["vwap"]),
+        "notional": float(fill["notional"]),
+        "fee": float(fill["fee"]),
+        "decisionPrice": float(fill["decisionPrice"]),
+        "decisionNotional": float(fill["decisionNotional"]),
+        "decisionFee": float(fill["decisionFee"]),
+        "filledAt": time.time(),
+        "fairProbability": fair_probability,
+        "edge": edge,
+    }
+    pos[("upLots" if side == "Up" else "downLots")].append(lot)
+    pos["fillCount"] = int(pos.get("fillCount", 0)) + 1
+    pos["lastActionAt"] = time.time()
+    metrics = _refresh_rotation_position(pos)
+    stats["fills"] += 1
+    stats["lastActionAt"] = pos["lastActionAt"]
+    stats["maxResidualShares"] = max(float(stats.get("maxResidualShares", 0)), metrics["residualShares"])
+    paired_delta = metrics["pairedShares"] - paired_before
+    if paired_delta > 1e-9:
+        stats["pairEvents"] += 1
+        stats["pairedShares"] += paired_delta
+    record_window_diagnostic(
+        variant_id,
+        slug,
+        "rotation_pair_completed" if paired_delta > 0 else "rotation_accumulated",
+        status="entered",
+        side=side,
+        fillShares=fill["shares"],
+        fillDecisionPrice=fill["decisionPrice"],
+        edge=edge,
+        **metrics,
+    )
+    save_sim_state()
+    log.info(
+        f"[SIM:{variant_id}] rotation BUY {side} {fill['shares']:.0f} @ {fill['vwap']:.4f}; "
+        f"paired={metrics['pairedShares']:.0f} residual={metrics['residualSide']} "
+        f"{metrics['residualShares']:.0f} locked=${metrics['lockedPnl']:+.2f}"
+    )
+
+
+def _try_inventory_rotation(
+    variant_id: str,
+    slug: str,
+    up_book: dict,
+    down_book: dict,
+    remaining_seconds: float | None,
+    fair: dict | None,
+) -> None:
+    variant = AB_VARIANT_BY_ID[variant_id]
+    st = ab_states[variant_id]
+    stats = _rotation_stats(st)
+    if remaining_seconds is None or remaining_seconds <= 0:
+        return
+    if not _simulation_books_are_coherent(variant["assetId"], up_book, down_book):
+        record_window_diagnostic(variant_id, slug, "rotation_books_not_coherent")
+        return
+    if not fair:
+        record_window_diagnostic(variant_id, slug, "rotation_missing_fair_value")
+        return
+    cooldown = float(variant.get("actionCooldownSeconds", ROTATION_ACTION_COOLDOWN))
+    if time.time() - float(stats.get("lastActionAt", 0)) < cooldown:
+        record_window_diagnostic(variant_id, slug, "rotation_action_cooldown")
+        return
+
+    shares = float(variant.get("sliceShares", ROTATION_SLICE_SHARES))
+    books = {"Up": up_book, "Down": down_book}
+    fills = {side: simulate_buy_fill(book, shares) for side, book in books.items()}
+    for side, fill in list(fills.items()):
+        min_size = float(books[side].get("minOrderSize", 1) or 1)
+        if (
+            fill is None
+            or fill["shares"] + 1e-9 < min_size
+            or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD
+        ):
+            fills[side] = None
+
+    pos = st.get("position")
+    if pos and (pos.get("windowSlug") != slug or pos.get("strategyMode") != "inventory_rotation"):
+        return
+    metrics = _rotation_metrics(pos) if pos else {
+        "upShares": 0.0, "downShares": 0.0, "pairedShares": 0.0,
+        "residualShares": 0.0, "residualSide": None,
+    }
+
+    selected_side = None
+    selected_fill = None
+    selected_edge = None
+    # First priority is reducing an existing residual, but only when the new
+    # matched slice remains profitable after conservative price and fee costs.
+    if metrics["residualSide"]:
+        selected_side = "Down" if metrics["residualSide"] == "Up" else "Up"
+        selected_fill = fills.get(selected_side)
+        pair_shares = min(shares, metrics["residualShares"])
+        if selected_fill and pair_shares + 1e-9 >= shares:
+            held_lots = pos["upLots"] if metrics["residualSide"] == "Up" else pos["downLots"]
+            held = _rotation_lot_slice(held_lots, metrics["pairedShares"], pair_shares)
+            pair_sum = (
+                float(held["decisionNotional"]) + float(selected_fill["decisionNotional"])
+            ) / pair_shares
+            net_per_share = (
+                pair_shares - float(held["decisionNotional"]) - float(held["decisionFee"])
+                - float(selected_fill["decisionNotional"]) - float(selected_fill["decisionFee"])
+            ) / pair_shares
+            if pair_sum > float(variant["lockMaxSum"]) or net_per_share < SIM_MIN_NET_LOCK_PER_SHARE:
+                selected_fill = None
+                record_window_diagnostic(
+                    variant_id, slug, "rotation_waiting_for_profitable_hedge",
+                    pairDecisionSum=pair_sum, pairNetPerShare=net_per_share,
+                    residualSide=metrics["residualSide"], residualShares=metrics["residualShares"],
+                )
+            else:
+                fair_side = float(fair["fairUp"] if selected_side == "Up" else fair["fairDown"])
+                selected_edge = (
+                    fair_side
+                    - float(selected_fill["decisionPrice"])
+                    - float(selected_fill["decisionFee"]) / shares
+                )
+        elif selected_fill is None:
+            record_window_diagnostic(
+                variant_id, slug, "rotation_hedge_depth_insufficient",
+                residualSide=metrics["residualSide"],
+                residualShares=metrics["residualShares"],
+            )
+
+    # Once one side is open, the only permitted next fill is its opposite-side
+    # profitable hedge. The old behaviour could add a second same-side slice
+    # while waiting, which turned a 5-share experiment into a 10-share average
+    # down and dominated recent losses.
+    if selected_fill is None and metrics["residualSide"]:
+        record_window_diagnostic(
+            variant_id, slug, "rotation_same_side_averaging_blocked",
+            residualSide=metrics["residualSide"],
+            residualShares=metrics["residualShares"],
+        )
+        return
+
+    # A new residual slice is allowed only before the hedge-only phase, with a
+    # fresh settlement-aligned Chainlink direction confirmation. The model edge
+    # must additionally pay a residual-risk premium and reserve the future hedge
+    # taker fee; the entry fee is already included in ``edge`` below.
+    if selected_fill is None:
+        if remaining_seconds <= float(variant.get("hedgeOnlySeconds", ROTATION_HEDGE_ONLY_SECONDS)):
+            record_window_diagnostic(
+                variant_id, slug, "rotation_hedge_only_wait",
+                residualSide=metrics["residualSide"],
+                residualShares=metrics["residualShares"],
+            )
+            return
+        chainlink_signal = get_chainlink_twap_signal(variant["assetId"])
+        if variant.get("requireChainlinkConfirm") and chainlink_signal is None:
+            record_window_diagnostic(variant_id, slug, "rotation_missing_chainlink_confirmation")
+            return
+        chainlink_side = None
+        if chainlink_signal:
+            if chainlink_signal["current"] > chainlink_signal["opening"]:
+                chainlink_side = "Up"
+            elif chainlink_signal["current"] < chainlink_signal["opening"]:
+                chainlink_side = "Down"
+        if variant.get("requireChainlinkConfirm") and chainlink_side is None:
+            record_window_diagnostic(
+                variant_id, slug, "rotation_chainlink_neutral",
+                chainlinkCurrent=chainlink_signal["current"],
+                chainlinkOpening=chainlink_signal["opening"],
+            )
+            return
+        required_edge = (
+            float(variant.get("minEntryEdge", ROTATION_MIN_EDGE))
+            + float(variant.get("residualRiskPremium", ROTATION_RESIDUAL_RISK_PREMIUM))
+            + float(variant.get("futureHedgeFeeReserve", ROTATION_FUTURE_HEDGE_FEE_RESERVE))
+        )
+        candidates = []
+        for side, fill in fills.items():
+            if fill is None:
+                continue
+            if chainlink_side and side != chainlink_side:
+                continue
+            fair_side = float(fair["fairUp"] if side == "Up" else fair["fairDown"])
+            edge = fair_side - float(fill["decisionPrice"]) - float(fill["decisionFee"]) / shares
+            next_up = metrics["upShares"] + (shares if side == "Up" else 0.0)
+            next_down = metrics["downShares"] + (shares if side == "Down" else 0.0)
+            next_residual = abs(next_up - next_down)
+            if (
+                edge >= required_edge
+                and next_residual <= float(variant.get("maxResidualShares", ROTATION_MAX_RESIDUAL_SHARES))
+            ):
+                candidates.append((edge, side, fill))
+        if not candidates:
+            record_window_diagnostic(
+                variant_id, slug, "rotation_edge_or_residual_limit",
+                upEdge=(
+                    float(fair["fairUp"]) - float(fills["Up"]["decisionPrice"])
+                    - float(fills["Up"]["decisionFee"]) / shares
+                    if fills.get("Up") else None
+                ),
+                downEdge=(
+                    float(fair["fairDown"]) - float(fills["Down"]["decisionPrice"])
+                    - float(fills["Down"]["decisionFee"]) / shares
+                    if fills.get("Down") else None
+                ),
+                residualSide=metrics["residualSide"],
+                residualShares=metrics["residualShares"],
+                requiredEdge=required_edge,
+                chainlinkSide=chainlink_side,
+                chainlinkCurrent=chainlink_signal["current"] if chainlink_signal else None,
+                chainlinkOpening=chainlink_signal["opening"] if chainlink_signal else None,
+            )
+            return
+        selected_edge, selected_side, selected_fill = max(candidates, key=lambda item: item[0])
+
+    gross_cost = _position_paid_cost(pos) if pos else 0.0
+    new_cost = float(selected_fill["notional"]) + float(selected_fill["fee"])
+    cash, _ = compute_cash_and_portfolio(variant_id)
+    if gross_cost + new_cost > float(variant.get("maxGrossBudgetUsd", ROTATION_MAX_GROSS_USD)) or new_cost > cash:
+        record_window_diagnostic(
+            variant_id, slug, "rotation_budget_limit",
+            grossCost=gross_cost, newCost=new_cost, cash=cash,
+        )
+        return
+    fair_side = float(fair["fairUp"] if selected_side == "Up" else fair["fairDown"])
+    _rotation_add_fill(
+        variant_id, slug, selected_side, selected_fill, fair_side, float(selected_edge or 0.0)
+    )
+
+
 def _simulate_trading_impl(
     variant_id: str,
     slug: str,
@@ -2598,6 +3058,10 @@ def _simulate_trading_impl(
         )
         return
 
+    if variant.get("inventoryRotation"):
+        _try_inventory_rotation(variant_id, slug, up_book, down_book, remaining_seconds, fair)
+        return
+
     if pos is None:
         if remaining_seconds is None or remaining_seconds <= 0:
             return
@@ -2625,9 +3089,12 @@ def _simulate_trading_impl(
             return
         if _try_direct_pair(variant_id, slug, up_book, down_book):
             return
-        # 其餘變體：找不到能立即鎖住兩邊的機會就空手，不退而求其次先賭單邊留下方向性
-        # 曝險——這條退路統計下來歷史勝率是 0%（42 戰 0 勝、-$364.75），關閉／重開過
-        # 幾次，2026-09 確認維持關閉。核心策略就是「兩邊都買才進場」，找不到就不進場。
+        # 其餘變體：找不到能立即鎖住兩邊時，有設 entryMaxPrice 的組（conservative／main／
+        # loose）改用公平價模型先買便宜那一腿，之後由下方補鎖利邏輯嘗試補另一腿。
+        # 2026-09-11 依使用者要求重新啟用——這條退路 2026-09 初曾因 0% 勝率（42 戰 0 勝、
+        # -$364.75）關閉，現在重開是要在「兩腿加總卡在 $1.00、鎖利門檻幾乎碰不到」的市場
+        # 條件下重新驗證。entryMaxPrice 為 None 的變體（含實盤用的 historical-hybrid）仍維持空手。
+        _try_single_leg_entry(variant_id, slug, up_book, down_book, fair)
         return
 
     if pos["hedged"] or pos["windowSlug"] != slug:
@@ -2687,7 +3154,17 @@ def compute_cash_and_portfolio(variant_id: str) -> tuple[float, float]:
 
     current = st["position"]
     if current:
-        if current.get("hedged"):
+        if current.get("strategyMode") == "inventory_rotation":
+            metrics = _rotation_metrics(current)
+            market_value += metrics["pairedShares"]
+            if metrics["residualShares"] > 1e-9:
+                held_book = (
+                    ms["upBook"] if metrics["residualSide"] == "Up" else ms["downBook"]
+                )
+                liquidation = simulate_sell_fill(held_book, metrics["residualShares"])
+                if liquidation:
+                    market_value += liquidation["notional"] - liquidation["fee"]
+        elif current.get("hedged"):
             market_value += current["shares"]
         else:
             held_book = ms["upBook"] if current["side"] == "Up" else ms["downBook"]
@@ -2697,7 +3174,9 @@ def compute_cash_and_portfolio(variant_id: str) -> tuple[float, float]:
 
     for pending in st["pendingSettlements"]:
         # 完整配對一定可收回每股 $1；單邊倉在未知結果期間保守估值為 0，絕不提前釋放本金。
-        if pending.get("hedged"):
+        if pending.get("strategyMode") == "inventory_rotation":
+            market_value += _rotation_metrics(pending)["pairedShares"]
+        elif pending.get("hedged"):
             market_value += pending["shares"]
 
     cash = shared_config["startBalance"] + st["totalPnl"] - staked
@@ -2711,8 +3190,15 @@ def compute_cash_and_portfolio(variant_id: str) -> tuple[float, float]:
 
 def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
     st = ab_states[variant_id]
-    fees = float(pos.get("entryFee", 0)) + float(pos.get("hedgeFee", 0)) + float(pos.get("exitFee", 0))
-    trade_type = "locked" if pos.get("hedged") else ("early_exit" if outcome == "EarlyExit" else "directional")
+    is_rotation = pos.get("strategyMode") == "inventory_rotation"
+    fees = (
+        float(pos.get("upFee", 0)) + float(pos.get("downFee", 0)) + float(pos.get("exitFee", 0))
+        if is_rotation
+        else float(pos.get("entryFee", 0)) + float(pos.get("hedgeFee", 0)) + float(pos.get("exitFee", 0))
+    )
+    trade_type = "inventory_rotation" if is_rotation else (
+        "locked" if pos.get("hedged") else ("early_exit" if outcome == "EarlyExit" else "directional")
+    )
     trade = {
         "windowSlug":   pos["windowSlug"],
         "side":         pos["side"],
@@ -2750,12 +3236,29 @@ def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
         "entryTime":    pos["entryTime"],
         "exitTime":     time.time(),
     }
+    if is_rotation:
+        metrics = _rotation_metrics(pos)
+        trade.update({
+            "upShares": metrics["upShares"],
+            "downShares": metrics["downShares"],
+            "pairedShares": metrics["pairedShares"],
+            "residualSide": metrics["residualSide"],
+            "residualShares": metrics["residualShares"],
+            "upAvgPrice": pos.get("upAvgPrice"),
+            "downAvgPrice": pos.get("downAvgPrice"),
+            "lockedPnl": metrics["lockedPnl"],
+            "fillCount": int(pos.get("fillCount", 0)),
+            "totalMarketCost": _position_paid_cost(pos),
+        })
     st["trades"].insert(0, trade)
     st["trades"] = st["trades"][:50]
     st["totalPnl"] += pnl
     st["totalFees"] += fees
     st["totalTrades"] += 1
-    if trade_type == "locked":
+    if trade_type == "inventory_rotation":
+        if float(trade.get("residualShares", 0)) > 1e-9:
+            _rotation_stats(st)["unpairedSettlements"] += 1
+    elif trade_type == "locked":
         st["lockedTrades"] += 1
     elif trade_type == "early_exit":
         st["earlyExits"] += 1
@@ -2783,6 +3286,9 @@ def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
 
 
 def _settle_pnl(pos: dict, outcome: str) -> float:
+    if pos.get("strategyMode") == "inventory_rotation":
+        payout = float(pos.get("upShares", 0)) if outcome == "Up" else float(pos.get("downShares", 0))
+        return payout - _position_paid_cost(pos)
     payout = pos["shares"] if pos.get("hedged") or outcome == pos["side"] else 0.0
     return payout - _position_paid_cost(pos)
 
@@ -2793,9 +3299,11 @@ async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:
     直到真的查到結果為止，不會因為第一次查不到就把這筆損益憑空丟掉。
     對每一組 A/B 都各自重試，互不影響。
     """
+    state_changed = False
     for variant_id, st in ab_states.items():
         if not st["pendingSettlements"]:
             continue
+        pending_before = len(st["pendingSettlements"])
         still_pending = []
         for pos in st["pendingSettlements"]:
             outcome = await fetch_outcome(session, pos["windowSlug"])
@@ -2807,7 +3315,14 @@ async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:
             log.info(f"[SIM:{variant_id}] 結算 {pos['windowSlug']} 結果={outcome} "
                       f"{'(已鎖利)' if pos['hedged'] else '(方向性)'} PnL=${pnl:+.2f}")
         st["pendingSettlements"] = still_pending
-    save_sim_state()
+        if len(still_pending) != pending_before:
+            state_changed = True
+    # This function runs every three seconds.  Rewriting every strategy row
+    # when there was nothing to settle bloats SQLite's WAL and can pause the
+    # same event loop that must drain the CLOB WebSocket.  Window rollover and
+    # actual fills already persist immediately, so a no-op retry needs no write.
+    if state_changed:
+        save_sim_state()
 
 def queue_settlement(slug: str) -> None:
     """窗口換了：每一組 A/B 如果上一個窗口還有沒結算的倉位，各自丟進自己的待結算佇列，
@@ -2834,6 +3349,15 @@ def queue_settlement(slug: str) -> None:
 MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 WS_PING_INTERVAL = 10.0
 WS_RECONNECT_BACKOFF = [1, 2, 5, 10, 20]
+# The CLOB stream can publish thousands of book deltas per second.  Running all
+# live and paper strategies inline in ``ws.recv()`` makes this process a slow
+# consumer and eventually causes a 1013 disconnect.  Keep the reader hot and
+# evaluate the latest coalesced book on a separate, rate-limited event-loop task.
+WS_TICK_DISPATCH_INTERVAL_SECONDS = max(
+    0.005,
+    min(0.250, float(os.environ.get("POLY_WS_TICK_DISPATCH_INTERVAL_MS", "20")) / 1000.0),
+)
+WS_PERF_LOG_INTERVAL_SECONDS = 60.0
 
 _ws_books: dict = {}              # token_id -> {"bids": {price_str: size}, "asks": {price_str: size}}
 _ws_meta: dict = {}               # token_id -> {"tickSize":, "minOrderSize":}，第一次見到時查一次就沿用
@@ -2849,6 +3373,24 @@ _ws_last_message_at = 0.0
 _ws_price_listeners: set = set()
 _ws_simulation_ticks_enabled = True
 _pending_simulation_ticks: set[tuple[str, str]] = set()
+_pending_ws_price_ticks: set[str] = set()
+_pending_ws_tick_queued_at: dict[str, float] = {}
+_ws_tick_event: asyncio.Event | None = None
+_ws_tick_dispatch_task: asyncio.Task | None = None
+_ws_perf_last_log_at = 0.0
+_ws_perf = {
+    "rawMessages": 0,
+    "eventsApplied": 0,
+    "bookUpdates": 0,
+    "coalescedUpdates": 0,
+    "dispatchedTicks": 0,
+    "dispatchBatches": 0,
+    "maxPendingTokens": 0,
+    "lastDispatchLagMs": None,
+    "maxDispatchLagMs": 0.0,
+    "disconnects": 0,
+    "slowConsumerDisconnects": 0,
+}
 _sim_data_guard_log_at: dict = {}
 
 
@@ -2875,6 +3417,9 @@ def ws_feed_status() -> dict:
         "healthy": bool(_ws_connected and age is not None and age <= WS_PING_INTERVAL * 2.5),
         "lastMessageAgeSeconds": age,
         "subscribedTokens": len(_ws_subscribed_tokens),
+        "tickDispatchIntervalMs": WS_TICK_DISPATCH_INTERVAL_SECONDS * 1000.0,
+        "pendingPriceTicks": len(_pending_ws_price_ticks),
+        "performance": dict(_ws_perf),
     }
 
 
@@ -3132,6 +3677,7 @@ def _ws_apply_message(msg: dict) -> None:
     的關鍵：真正無風險套利的瞬間往往很短暫，等輪詢常常已經來不及。
     event_type 可能在最外層（book/price_change 實測過是這樣），也可能包在
     type + payload 裡（文件上 last_trade_price 是這樣）——兩種都接。"""
+    _ws_perf["eventsApplied"] += 1
     event_type = msg.get("event_type") or msg.get("type")
     payload = msg.get("payload", msg)
     if event_type == "book":
@@ -3144,7 +3690,7 @@ def _ws_apply_message(msg: dict) -> None:
         }
         _ws_snapshot_tokens.add(tid)
         _ws_book_updated_at[tid] = time.monotonic()
-        _on_ws_price_tick(tid)
+        _queue_ws_price_tick(tid)
     elif event_type == "price_change":
         touched = set()
         for change in payload.get("price_changes", []):
@@ -3165,7 +3711,7 @@ def _ws_apply_message(msg: dict) -> None:
             # tradable book.  The server normally sends ``book`` first.
             if tid in _ws_snapshot_tokens:
                 _ws_book_updated_at[tid] = time.monotonic()
-                _on_ws_price_tick(tid)
+                _queue_ws_price_tick(tid)
     elif event_type == "last_trade_price":
         _mm_record_trade(payload)
     _mm_maybe_log_summary()
@@ -3220,6 +3766,102 @@ def _on_ws_price_tick(token_id: str) -> None:
     _run_ws_simulation_tick(token_id)
 
 
+def _ensure_ws_tick_dispatcher() -> bool:
+    """Start the coalescing worker when called from a running asyncio loop.
+
+    Synchronous unit tests and offline helpers have no loop; they retain the old
+    immediate-dispatch behaviour so this module remains easy to exercise.
+    """
+    global _ws_tick_event, _ws_tick_dispatch_task
+    if _ws_tick_dispatch_task is not None and not _ws_tick_dispatch_task.done():
+        return True
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    _ws_tick_event = asyncio.Event()
+    _ws_tick_dispatch_task = loop.create_task(
+        _ws_price_tick_dispatch_loop(), name="polymarket-ws-tick-dispatch"
+    )
+    return True
+
+
+def _queue_ws_price_tick(token_id: str) -> None:
+    """Queue only the newest update for a token without blocking ``ws.recv()``."""
+    if not _ensure_ws_tick_dispatcher():
+        _on_ws_price_tick(token_id)
+        return
+    now = time.monotonic()
+    _ws_perf["bookUpdates"] += 1
+    if token_id in _pending_ws_price_ticks:
+        _ws_perf["coalescedUpdates"] += 1
+    _pending_ws_price_ticks.add(token_id)
+    # Overwrite with the newest timestamp: the worker evaluates the newest book,
+    # so this measures latency of the data that is actually used for a decision.
+    _pending_ws_tick_queued_at[token_id] = now
+    _ws_perf["maxPendingTokens"] = max(
+        _ws_perf["maxPendingTokens"], len(_pending_ws_price_ticks)
+    )
+    if _ws_tick_event is not None:
+        _ws_tick_event.set()
+
+
+def _drain_ws_price_ticks() -> int:
+    """Dispatch one evaluation per pending token using its latest in-memory book."""
+    tokens = tuple(_pending_ws_price_ticks)
+    if not tokens:
+        return 0
+    queued_at = {token_id: _pending_ws_tick_queued_at.get(token_id) for token_id in tokens}
+    _pending_ws_price_ticks.difference_update(tokens)
+    for token_id in tokens:
+        _pending_ws_tick_queued_at.pop(token_id, None)
+
+    now = time.monotonic()
+    lags = [max(0.0, now - value) * 1000.0 for value in queued_at.values()
+            if isinstance(value, (int, float))]
+    if lags:
+        lag_ms = max(lags)
+        _ws_perf["lastDispatchLagMs"] = lag_ms
+        _ws_perf["maxDispatchLagMs"] = max(_ws_perf["maxDispatchLagMs"], lag_ms)
+    _ws_perf["dispatchBatches"] += 1
+    _ws_perf["dispatchedTicks"] += len(tokens)
+    for token_id in tokens:
+        _on_ws_price_tick(token_id)
+    return len(tokens)
+
+
+async def _ws_price_tick_dispatch_loop() -> None:
+    """Rate-limit strategy work while preserving the newest order book state."""
+    global _ws_perf_last_log_at
+    last_dispatch_at = 0.0
+    while True:
+        if not _pending_ws_price_ticks:
+            assert _ws_tick_event is not None
+            await _ws_tick_event.wait()
+        wait_seconds = WS_TICK_DISPATCH_INTERVAL_SECONDS - (time.monotonic() - last_dispatch_at)
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+        if _ws_tick_event is not None:
+            _ws_tick_event.clear()
+        dispatched = _drain_ws_price_ticks()
+        if dispatched:
+            last_dispatch_at = time.monotonic()
+        if last_dispatch_at - _ws_perf_last_log_at >= WS_PERF_LOG_INTERVAL_SECONDS:
+            _ws_perf_last_log_at = last_dispatch_at
+            log.info(
+                "[WS-PERF] raw=%d events=%d book_updates=%d dispatched=%d "
+                "coalesced=%d pending=%d last_lag=%.1fms max_lag=%.1fms",
+                _ws_perf["rawMessages"],
+                _ws_perf["eventsApplied"],
+                _ws_perf["bookUpdates"],
+                _ws_perf["dispatchedTicks"],
+                _ws_perf["coalescedUpdates"],
+                len(_pending_ws_price_ticks),
+                float(_ws_perf["lastDispatchLagMs"] or 0.0),
+                float(_ws_perf["maxDispatchLagMs"] or 0.0),
+            )
+
+
 async def market_ws_loop() -> None:
     """背景常駐：連線 Polymarket 市場資料 WS，斷線自動重連（指數退避），
     重連後依 _ws_wanted_tokens 整批重新訂閱目前這輪視窗的 token。"""
@@ -3252,6 +3894,7 @@ async def market_ws_loop() -> None:
                         last_ping = now
                     if raw is not None:
                         _ws_last_message_at = time.monotonic()
+                        _ws_perf["rawMessages"] += 1
                     if raw is None or raw == "PONG":
                         continue
                     try:
@@ -3262,11 +3905,16 @@ async def market_ws_loop() -> None:
                         if isinstance(msg, dict):
                             _ws_apply_message(msg)
         except Exception as e:
+            _ws_perf["disconnects"] += 1
+            if "slow consumer" in str(e).lower():
+                _ws_perf["slowConsumerDisconnects"] += 1
             log.warning(f"[WS] 市場資料流斷線，準備重連：{e}")
         _ws_connected = False
         _ws_conn = None
         _ws_subscribed_tokens = set()
         _ws_snapshot_tokens = set()
+        _pending_ws_price_ticks.clear()
+        _pending_ws_tick_queued_at.clear()
         delay = WS_RECONNECT_BACKOFF[min(backoff_idx, len(WS_RECONNECT_BACKOFF) - 1)]
         backoff_idx += 1
         await asyncio.sleep(delay)
@@ -3480,7 +4128,10 @@ def build_ab_leaderboard() -> list:
             "id":            v["id"],
             "assetId":       v["assetId"],
             "label":         v["label"],
-            "strategyType":  "maker" if v.get("marketMakerOnly") else "taker",
+            "strategyType":  "rotation" if v.get("inventoryRotation") else (
+                "maker" if v.get("marketMakerOnly") else "taker"
+            ),
+            "inventoryRotation": bool(v.get("inventoryRotation")),
             "liveMirrorOnly": bool(v.get("liveMirrorOnly")),
             "dumpThenHedge": bool(v.get("dumpThenHedge")),
             "entryMaxPrice": v["entryMaxPrice"],
@@ -3506,6 +4157,16 @@ def build_ab_leaderboard() -> list:
             "maxDrawdown":   st.get("maxDrawdown", 0.0),
             "makerQuotes":   st.get("makerQuotes"),
             "makerStats":    _maker_stats(st) if v.get("marketMakerOnly") else None,
+            "rotationStats": _rotation_stats(st) if v.get("inventoryRotation") else None,
+            "sliceShares": v.get("sliceShares"),
+            "minEntryEdge": v.get("minEntryEdge"),
+            "maxGrossBudgetUsd": v.get("maxGrossBudgetUsd"),
+            "maxResidualShares": v.get("maxResidualShares"),
+            "hedgeOnlySeconds": v.get("hedgeOnlySeconds"),
+            "actionCooldownSeconds": v.get("actionCooldownSeconds"),
+            "residualRiskPremium": v.get("residualRiskPremium"),
+            "futureHedgeFeeReserve": v.get("futureHedgeFeeReserve"),
+            "requireChainlinkConfirm": bool(v.get("requireChainlinkConfirm")),
             "dumpHedgeStats": _dump_hedge_stats(st) if v.get("dumpThenHedge") else None,
             "lookbackSeconds": v.get("lookbackSeconds"),
             "minMovePct": v.get("minMovePct"),
