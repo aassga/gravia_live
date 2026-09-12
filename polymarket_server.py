@@ -86,6 +86,11 @@ log = logging.getLogger("polymarket")
 
 # ── 模擬策略設定（紙上交易）────────────────────────────────────────────────
 SIM_ENTRY_MAX_PRICE   = 0.40   # 主要策略：只有價格 <= 這個門檻才考慮先進場一邊
+# 2026-09-12 依使用者要求關回純兩腿直接鎖利。單邊進場 2026-09-11 重開 8.5 小時的結果：
+# btc-main 98 筆 -$4（74 筆補到腿 +$190、24 筆補不到 0/24 -$195），btc-loose 100 筆 -$47；
+# 而重開前 195 小時的 +$322／+$331 全部來自兩腿直接鎖利，跟 entryMaxPrice 無關。
+# 想再驗證單邊進場時把這個開關打開即可（變體的 entryMaxPrice 仍保留給 Dashboard 顯示）。
+SIM_SINGLE_LEG_ENTRY_ENABLED = False
 SIM_LOCK_MAX_SUM      = 0.95   # 主要策略：兩邊最差可成交限價 <= 門檻，且扣費用後達最低淨利才配對
                                 # （2026-09 從 0.90 放寬到 0.95，增加鎖利機會頻率——真正擋住虧損單的
                                 # 是 SIM_MIN_NET_LOCK_PER_SHARE 這個獨立的淨利門檻，不是這裡，所以
@@ -1682,6 +1687,8 @@ def _try_single_leg_entry(
     variant_id: str, slug: str, up_book: dict, down_book: dict, fair: dict | None
 ) -> bool:
     """找不到兩腿鎖利時，用公平價模型挑一邊先進場（之後由既有補鎖利邏輯嘗試補另一腿）。"""
+    if not SIM_SINGLE_LEG_ENTRY_ENABLED:
+        return False
     variant = AB_VARIANT_BY_ID[variant_id]
     max_price = variant.get("entryMaxPrice")
     if max_price is None:

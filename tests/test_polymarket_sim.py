@@ -130,7 +130,8 @@ class PolymarketSimulationTests(unittest.TestCase):
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": []}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.70, "size": 1_000.0}], "bids": []}
         fair = {"fairUp": 0.60, "fairDown": 0.40}
-        sim.simulate_trading("btc-main", "btc-window", up_book, down_book, 180.0, fair)
+        with patch.object(sim, "SIM_SINGLE_LEG_ENTRY_ENABLED", True):
+            sim.simulate_trading("btc-main", "btc-window", up_book, down_book, 180.0, fair)
         pos = sim.ab_states["btc-main"]["position"]
         self.assertIsNotNone(pos)
         self.assertEqual(pos["side"], "Up")
@@ -142,19 +143,30 @@ class PolymarketSimulationTests(unittest.TestCase):
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.45, "size": 1_000.0}], "bids": []}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.60, "size": 1_000.0}], "bids": []}
         fair = {"fairUp": 0.90, "fairDown": 0.10}
-        sim.simulate_trading("btc-main", "btc-window", up_book, down_book, 180.0, fair)
-        self.assertIsNone(sim.ab_states["btc-main"]["position"])
-        # loose 的 entryMaxPrice=0.45（decision price 會多讓 tick 變 0.47，仍超過）→ 也不進
-        sim.simulate_trading("btc-loose", "btc-window", up_book, down_book, 180.0, fair)
-        self.assertIsNone(sim.ab_states["btc-loose"]["position"])
+        with patch.object(sim, "SIM_SINGLE_LEG_ENTRY_ENABLED", True):
+            sim.simulate_trading("btc-main", "btc-window", up_book, down_book, 180.0, fair)
+            self.assertIsNone(sim.ab_states["btc-main"]["position"])
+            # loose 的 entryMaxPrice=0.45（decision price 會多讓 tick 變 0.47，仍超過）→ 也不進
+            sim.simulate_trading("btc-loose", "btc-window", up_book, down_book, 180.0, fair)
+            self.assertIsNone(sim.ab_states["btc-loose"]["position"])
 
     def test_single_leg_entry_skipped_for_variants_without_entry_max_price(self):
         # historical-hybrid（實盤用的那組）entryMaxPrice=None，就算條件再好也不能走單邊路
         up_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": []}
         down_book = {"tickSize": 0.01, "asks": [{"price": 0.70, "size": 1_000.0}], "bids": []}
         fair = {"fairUp": 0.60, "fairDown": 0.40}
-        self.assertFalse(sim._try_single_leg_entry("btc-historical-hybrid", "btc-window", up_book, down_book, fair))
+        with patch.object(sim, "SIM_SINGLE_LEG_ENTRY_ENABLED", True):
+            self.assertFalse(sim._try_single_leg_entry("btc-historical-hybrid", "btc-window", up_book, down_book, fair))
         self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
+
+    def test_single_leg_entry_disabled_by_default_keeps_lock_only_behaviour(self):
+        # 2026-09-12 預設關閉：鎖不到就空手，不走單邊
+        self.assertFalse(sim.SIM_SINGLE_LEG_ENTRY_ENABLED)
+        up_book = {"tickSize": 0.01, "asks": [{"price": 0.30, "size": 1_000.0}], "bids": []}
+        down_book = {"tickSize": 0.01, "asks": [{"price": 0.70, "size": 1_000.0}], "bids": []}
+        fair = {"fairUp": 0.60, "fairDown": 0.40}
+        sim.simulate_trading("btc-main", "btc-window", up_book, down_book, 180.0, fair)
+        self.assertIsNone(sim.ab_states["btc-main"]["position"])
 
     def test_live_lock_variant_mirrors_live_sizing_and_disables_directional_entry(self):
         variant = sim.AB_VARIANT_BY_ID["btc-live-lock"]
