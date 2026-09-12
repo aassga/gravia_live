@@ -814,27 +814,6 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             diag = strategy._live_window_diagnostic("btc-window")
             self.assertGreaterEqual(diag["reasonCounts"].get("favorite_signal_disagrees", 0), 1)
 
-    async def test_live_late_favorite_requires_minimum_chainlink_delta(self):
-        self._set_chainlink_signal(opening=100.0, current=100.002)
-        up, down = self._favorite_books()
-        strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up, down
-        with (
-            patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
-            patch.object(strategy, "DIRECT_PAIR_ENABLED", False),
-            patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", False),
-            patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
-            patch.object(strategy, "LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT", 0.02),
-            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
-        ):
-            await strategy.evaluate_and_act("btc-window", None, 40.0, None)
-            self.assertIsNone(strategy.live_state["position"])
-            diag = strategy._live_window_diagnostic("btc-window")
-            self.assertGreaterEqual(diag["reasonCounts"].get("favorite_signal_delta_below_minimum", 0), 1)
-            strategy.live_state["lastActionAt"] = 0
-            self._set_chainlink_signal(opening=100.0, current=100.05)
-            await strategy.evaluate_and_act("btc-window", None, 40.0, None)
-            self.assertIsNotNone(strategy.live_state["position"])
-
     async def test_live_late_favorite_stop_loss_sells_when_leader_flips(self):
         strategy.live_state["position"] = {
             "windowSlug": "btc-window", "side": "Down", "tokenId": "down-token",

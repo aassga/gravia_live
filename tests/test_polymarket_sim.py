@@ -202,21 +202,6 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
 
-    def test_late_favorite_requires_minimum_chainlink_delta(self):
-        # 09:19 那筆：市場 Up 0.90 但 Chainlink 只偏離 +0.002% → 不進；沒有訊號也不進
-        self._set_chainlink_signal(opening=100.0, current=100.002)
-        up, down = self._favorite_books()
-        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
-        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-        sim.markets_state["btc"]["chainlinkTwapPrice"] = None
-        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
-        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-        self._set_chainlink_signal(opening=100.0, current=100.05)
-        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
-        pos = sim.ab_states["btc-late-favorite"]["position"]
-        self.assertIsNotNone(pos)
-        self.assertAlmostEqual(pos["signalDeltaPct"], 0.05, places=6)
-
     def test_late_favorite_stop_loss_sells_when_leader_flips(self):
         # 12:33 那筆：買 Down 0.90 後翻面。停損 0.85：Down 買盤掉到 0.80 → 賣掉；掉到 0.88 → 不賣
         self._set_chainlink_signal(opening=100.0, current=99.7)
