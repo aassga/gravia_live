@@ -554,8 +554,11 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       const list=trades.length?trades.map(t=>{
         const win=t.pnl>=0;
         const dt=new Date(t.exitTime*1000).toTimeString().slice(0,8);
+        const rotUp=Number(t.upShares||0), rotDown=Number(t.downShares||0);
         const dir=t.strategyMode==='inventory_rotation'
-          ? `\u5eab\u5b58 Up ${Number(t.upShares||0).toFixed(0)} / Down ${Number(t.downShares||0).toFixed(0)}`
+          ? (rotUp>0&&rotDown>0
+              ? `Up ${rotUp.toFixed(0)} / Down ${rotDown.toFixed(0)} 配對鎖利`
+              : `${rotUp>0?'Up '+rotUp.toFixed(0):'Down '+rotDown.toFixed(0)} 未配對結算`)
           : t.maker
           ? (t.hedged?`${t.side}/${t.hedgeSide} Maker配對`:(t.exitReason==='maker_inventory_timeout'?`${t.side} Maker救援平倉`:`${t.side} Maker單腿`))
           : (t.strategyMode==='dump_then_hedge'
