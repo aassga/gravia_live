@@ -309,7 +309,7 @@ function onData(d){
       ? `已啟用；只使用 ${cfg.lateDirectionSignal||'Chainlink TWAP'} 判斷方向，偏移 ≥ ${Number(cfg.lateDirectionMinDeltaPct||0).toFixed(2)}%；沿用原策略，不要求 Polymarket 同向。`
       : '已停用，不會因預測 BTC 漲跌而單獨進場。'}`,
     `單邊進場：${cfg.singleLegEntryEnabled
-      ? `已啟用；兩腿鎖不到時，買價 ≤ $${Number(cfg.entryMaxPrice||0).toFixed(2)} 且公平價扣除成本後 edge ≥ $${Number(cfg.minEntryEdge||0).toFixed(3)}/股的那一腿先進場，之後補鎖利（合計 ≤ $${Number(cfg.rescueLockMaxSum||0.99).toFixed(2)}）或提早退出；最後 10 秒留給方向性判斷。${Number(cfg.singleLegStopLossPct||0)>0?`停損：持有腿可賣價 ≤ 進場價 × (1 − ${Number(cfg.singleLegStopLossPct).toFixed(0)}%) 時 FOK 賣出。`:'未設停損，補不到就抱到結算。'}`
+      ? `已啟用；兩腿鎖不到時，買價 ≤ $${Number(cfg.entryMaxPrice||0).toFixed(2)} 且公平價扣除成本後 edge ≥ $${Number(cfg.minEntryEdge||0).toFixed(3)}/股的那一腿先進場，之後補鎖利（合計 ≤ $${Number(cfg.rescueLockMaxSum||0.99).toFixed(2)}）或提早退出；每窗口最多 ${cfg.singleLegMaxEntriesPerWindow||1} 次、剩餘 < ${Number(cfg.singleLegMinRemainingSeconds||0).toFixed(0)} 秒不進；最後 10 秒留給方向性判斷。${Number(cfg.singleLegStopLossPct||0)>0?`停損：持有腿可賣價 ≤ 進場價 × (1 − ${Number(cfg.singleLegStopLossPct).toFixed(0)}%) 時 FOK 賣出。`:'未設停損，補不到就抱到結算。'}`
       : '已停用（POLY_LIVE_ENTRY_MAX_PRICE 未設）。'}`
   ] : ['等待策略設定...'];
   const tooltipList=document.getElementById('strategy-tooltip-list');

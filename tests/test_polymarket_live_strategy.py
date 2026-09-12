@@ -684,6 +684,67 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         close.assert_not_awaited()
         self.assertIsNotNone(strategy.live_state["position"])
 
+    def _lock_impossible_books(self):
+        strategy.live_state["lastActionAt"] = 0
+        strategy.sim.state["market"] = {
+            "conditionId": "condition-1",
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}],
+        })
+
+    async def test_single_leg_entry_limited_to_one_per_window(self):
+        # 02:03～02:08 停損後 10 秒又買同一邊、連環五次——同窗口第二次單邊進場必須被擋
+        self._lock_impossible_books()
+        common = (
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", True),
+            patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", True),
+            patch.object(strategy, "ENTRY_MAX_PRICE", 0.45),
+            patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
+            patch.object(strategy, "SINGLE_LEG_MIN_REMAINING_SECONDS", 0.0),
+            patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
+        )
+        with common[0], common[1], common[2], common[3], common[4], common[5]:
+            await strategy.evaluate_and_act("btc-window", None, 180.0, {"fairUp": 0.45, "fairDown": 0.55})
+            self.assertEqual(strategy.live_state["position"]["strategy"], "single_leg")
+            self.assertEqual(strategy.live_state["singleLegEntriesByWindow"]["btc-window"], 1)
+            # 模擬停損後空手，再評估同一窗口
+            strategy.live_state["position"] = None
+            strategy.live_state["lastActionAt"] = 0
+            await strategy.evaluate_and_act("btc-window", None, 150.0, {"fairUp": 0.45, "fairDown": 0.55})
+            self.assertIsNone(strategy.live_state["position"])
+            diag = strategy._live_window_diagnostic("btc-window")
+            self.assertGreaterEqual(diag["reasonCounts"].get("single_leg_window_limit_reached", 0), 1)
+            # 下一個窗口可以再進
+            await strategy.evaluate_and_act("btc-window-2", None, 180.0, {"fairUp": 0.45, "fairDown": 0.55})
+            self.assertIsNotNone(strategy.live_state["position"])
+            self.assertEqual(strategy.live_state["position"]["windowSlug"], "btc-window-2")
+
+    async def test_single_leg_entry_skipped_when_too_little_time_remains(self):
+        self._lock_impossible_books()
+        with (
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", True),
+            patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", True),
+            patch.object(strategy, "ENTRY_MAX_PRICE", 0.45),
+            patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
+            patch.object(strategy, "SINGLE_LEG_MIN_REMAINING_SECONDS", 90.0),
+            patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 60.0, {"fairUp": 0.45, "fairDown": 0.55})
+            self.assertIsNone(strategy.live_state["position"])
+            diag = strategy._live_window_diagnostic("btc-window")
+            self.assertGreaterEqual(diag["reasonCounts"].get("single_leg_too_late", 0), 1)
+            strategy.live_state["lastActionAt"] = 0
+            await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.45, "fairDown": 0.55})
+            self.assertIsNotNone(strategy.live_state["position"])
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (

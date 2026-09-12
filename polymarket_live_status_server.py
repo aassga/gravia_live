@@ -218,6 +218,8 @@ def _fetch_state() -> dict:
             "singleLegEntryEnabled": strategy.SINGLE_LEG_ENTRY_ENABLED,
             "entryMaxPrice": strategy.ENTRY_MAX_PRICE,
             "singleLegStopLossPct": strategy.SINGLE_LEG_STOP_LOSS_PCT,
+            "singleLegMaxEntriesPerWindow": strategy.SINGLE_LEG_MAX_ENTRIES_PER_WINDOW,
+            "singleLegMinRemainingSeconds": strategy.SINGLE_LEG_MIN_REMAINING_SECONDS,
             "minEntryEdge": strategy.sim.SIM_MIN_ENTRY_EDGE,
             "assetId": strategy.LIVE_ASSET_ID,
             "firstTradeGuard": strategy_state.get("firstTradeGuard"),

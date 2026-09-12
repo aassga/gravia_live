@@ -158,6 +158,11 @@ SINGLE_LEG_ENTRY_ENABLED = ENTRY_MAX_PRICE is not None
 # 路徑加一條：持有腿的保守可賣價 <= 進場成交價 × (1 − 停損%) 就用 FOK 賣掉。0 = 關閉。
 # 只套用 strategy=single_leg 的部位；晚進場方向性依設計抱到結算，不受影響。
 SINGLE_LEG_STOP_LOSS_PCT = max(0.0, min(95.0, float(os.environ.get("POLY_LIVE_SINGLE_LEG_STOP_LOSS_PCT", "0"))))
+# 2026-09-12：單邊進場兩條額外限制。02:03～02:08 DRY-RUN 在同一窗口停損後 10 秒又買同一邊，
+# 四分鐘內連環五次停損 -$9.3。(A) 每個窗口最多一次單邊進場（停損／結算後同窗口不再進）；
+# (C) 剩餘秒數低於門檻不做單邊進場——最後一兩分鐘價格跳動最劇烈、公平價模型最沒有資訊優勢。
+SINGLE_LEG_MAX_ENTRIES_PER_WINDOW = 1
+SINGLE_LEG_MIN_REMAINING_SECONDS = max(0.0, float(os.environ.get("POLY_LIVE_SINGLE_LEG_MIN_REMAINING", "90")))
 
 
 def _new_live_state() -> dict:
@@ -945,8 +950,31 @@ async def _try_single_leg_entry(
     result = await _enter_position(slug, plan, dry_run)
     if result == "filled":
         live_state["position"]["strategy"] = "single_leg"
+        counts = live_state.setdefault("singleLegEntriesByWindow", {})
+        counts[slug] = int(counts.get(slug, 0)) + 1
+        # 只留最近幾個窗口的計數，狀態檔不會無限長大。
+        for old_slug in sorted(counts)[:-5]:
+            counts.pop(old_slug, None)
         save_live_state()
     return result == "filled"
+
+
+def _single_leg_entry_allowed(slug: str, remaining_seconds: float) -> bool:
+    """(A) 同窗口已有單邊進場就不再進；(C) 剩餘時間太短不進。兩者都記進窗口診斷。"""
+    entries = int((live_state.get("singleLegEntriesByWindow") or {}).get(slug, 0))
+    if entries >= SINGLE_LEG_MAX_ENTRIES_PER_WINDOW:
+        record_live_window_diagnostic(
+            slug, "single_leg_window_limit_reached",
+            singleLegEntries=entries, singleLegMaxEntries=SINGLE_LEG_MAX_ENTRIES_PER_WINDOW,
+        )
+        return False
+    if remaining_seconds < SINGLE_LEG_MIN_REMAINING_SECONDS:
+        record_live_window_diagnostic(
+            slug, "single_leg_too_late",
+            remainingSeconds=remaining_seconds, singleLegMinRemaining=SINGLE_LEG_MIN_REMAINING_SECONDS,
+        )
+        return False
+    return True
 
 
 def _target_pair_order(cash: float) -> tuple[float, float]:
@@ -2293,8 +2321,10 @@ async def _evaluate_and_act_impl(
             sim.clear_pair_candidate("live:pair")
         # 單邊進場只在晚進場方向性的窗口之外嘗試：最後 10 秒留給方向性訊號，避免兩條
         # 單腿路徑在同一刻搶同一個部位、用不同標準各說各話。
-        if SINGLE_LEG_ENTRY_ENABLED and (
-            not ENABLE_LATE_DIRECTION or remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS
+        if (
+            SINGLE_LEG_ENTRY_ENABLED
+            and (not ENABLE_LATE_DIRECTION or remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS)
+            and _single_leg_entry_allowed(slug, remaining_seconds)
         ):
             if await _try_single_leg_entry(slug, up_book, down_book, shares, fair, cash, dry_run):
                 return
@@ -2716,6 +2746,10 @@ def _log_startup_banner(mode: str) -> None:
         log.warning(
             f"  單邊進場已啟用：兩腿鎖不到時買價<=${ENTRY_MAX_PRICE:.2f} 且 edge>="
             f"{sim.SIM_MIN_ENTRY_EDGE:.3f} 的那一腿先進場（之後補鎖利／提早退出）"
+        )
+        log.warning(
+            f"  單邊進場限制：每窗口最多 {SINGLE_LEG_MAX_ENTRIES_PER_WINDOW} 次、"
+            f"剩餘 < {SINGLE_LEG_MIN_REMAINING_SECONDS:.0f}s 不進"
         )
         if SINGLE_LEG_STOP_LOSS_PCT > 0:
             log.warning(f"  單邊停損已啟用：可賣價 <= 進場價 × (1 − {SINGLE_LEG_STOP_LOSS_PCT:.0f}%) 時 FOK 賣出")
