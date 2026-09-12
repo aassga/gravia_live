@@ -193,9 +193,7 @@ LATE_FAVORITE_STOP_LOSS_PRICE  = 0.85
 # 2026-09-12 09:19 那筆：進場時 Chainlink TWAP 只比開盤高 0.002%，市場卻定 Up 0.90——結算源根本
 # 還在擲硬幣，價格 0.90 → 0.70 → 0.83 → 0.28 → 0.79 來回甩，停損賣在最低點 -$10.05。
 # 要求 Chainlink 60s TWAP 偏離開盤價至少這麼多才進場；沒有訊號時也不進（不再「有訊號才檢查」）。
-# 2026-09-12 20:xx（台北）：0.02% 在橫盤時段把 38 個窗口全部擋掉（每窗 Δ 都在 ±0.013% 內），
-# 依使用者要求降到 0.005%——仍擋得掉 17:19 那筆 0.002% 的擲硬幣。
-LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT = 0.005
+LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT = 0.02
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # BTC 5m 暫時在窗口最後 10 秒使用 Binance window delta 做隔離測試：不是在窗口一開始就靠模型優勢
@@ -242,11 +240,7 @@ BTC_15M_DUMP_MIN_CASH_RESERVE_USD   = 5.0
 # 只是比較訊號來源是否影響下單率；Binance 並非結算來源，結果可能與市場最終判定不同。
 CHAINLINK_RTDS_URL = "wss://ws-live-data.polymarket.com"
 CHAINLINK_TWAP_WINDOW_SECONDS = 60
-# 2026-09-12 實測 RTDS：觀測值每秒一筆，但訊息抵達時間比觀測時間戳晚 1.7～2.3 秒（中位 1.68s、
-# p90 2.0s、max 2.3s）。舊上限 2.5s 以觀測時間戳算年齡，等於每秒有約三分之一的時間訊號被判定
-# 過期（favorite_missing_chainlink_signal 一萬多次的主因）。放寬到 4.0s：涵蓋 1s 週期 + 2.3s 傳輸
-# 延遲 + 抖動；真正斷線（實測 3 分鐘內出現一次 7 秒缺口、今天兩次重連）仍會判定為無訊號。
-CHAINLINK_TWAP_MAX_AGE_SECONDS = 4.0
+CHAINLINK_TWAP_MAX_AGE_SECONDS = 2.5
 CHAINLINK_BOUNDARY_TOLERANCE_MS = 250
 _chainlink_twap_history: deque[tuple[int, float]] = deque(maxlen=1200)
 _chainlink_twap_latest: dict = {}

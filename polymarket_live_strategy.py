@@ -134,7 +134,7 @@ LATE_FAVORITE_MIN_PRICE = float(_LIVE_VARIANT.get("favoriteMinPrice", 0.90))
 LATE_FAVORITE_MAX_PRICE = float(_LIVE_VARIANT.get("favoriteMaxPrice", 0.97))
 # Chainlink 60s TWAP 偏離開盤價的最低幅度；沒有訊號或偏離不足都不進（09:19 那筆 Δ=+0.002% 就是反例）。
 LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT = float(
-    os.environ.get("POLY_LIVE_FAVORITE_MIN_DELTA_PCT", _LIVE_VARIANT.get("favoriteMinSignalDeltaPct", 0.005))
+    os.environ.get("POLY_LIVE_FAVORITE_MIN_DELTA_PCT", _LIVE_VARIANT.get("favoriteMinSignalDeltaPct", 0.02))
 )
 # 領先方翻面時的停損：持有腿保守可賣價 <= 這個價就 FOK 賣出（WS tick 與 3 秒輪詢都檢查）。
 # POLY_LIVE_FAVORITE_STOP_LOSS_PRICE 可覆寫，0 = 關閉。
