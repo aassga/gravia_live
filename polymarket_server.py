@@ -171,6 +171,18 @@ MM_FIRST_LEG_MAX_PRICE    = 0.60
 MM_INVENTORY_RESCUE_SECONDS = 15.0
 MM_REQUOTE_SECONDS        = 2.0
 MM_STOP_QUOTING_SECONDS   = 20.0
+# 2026-09-12 依 4 小時公開成交掃描（48 窗、65,870 筆）加入兩組模擬：
+#  (2) BTC 被動雙邊掛單：成交額最大、最穩定獲利的機器人型態——兩邊都掛買單、加總 0.95～1.02、
+#      兩腿相隔 10～40 秒成交。沿用 ETH maker 紙上撮合引擎（真實 last_trade_price 消耗 queue），
+#      但參數放寬：首腿上限 0.70、存貨救援 45 秒、加總上限 0.99。
+#  (3) BTC 最後 60 秒買領先方：最後一分鐘買已經 >= 0.90 的那一邊，勝率 97～98%、利潤薄靠量。
+BTC_MAKER_MAX_PAIR_COST        = 0.99
+BTC_MAKER_FIRST_LEG_MAX_PRICE  = 0.70
+BTC_MAKER_RESCUE_SECONDS       = 45.0
+LATE_FAVORITE_WINDOW_SECONDS   = 60.0   # 剩餘 <= 60 秒才看
+LATE_FAVORITE_MIN_REMAINING    = 5.0    # 剩餘 < 5 秒不進（結算前交易所常關單）
+LATE_FAVORITE_MIN_PRICE        = 0.90   # 領先方買價下限
+LATE_FAVORITE_MAX_PRICE        = 0.97   # 超過就沒利潤空間
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # BTC 5m 暫時在窗口最後 10 秒使用 Binance window delta 做隔離測試：不是在窗口一開始就靠模型優勢
@@ -351,6 +363,31 @@ for _asset in ASSETS:
             "minCashReserveUsd":     LIVE_MIRROR_MIN_CASH_RESERVE_USD,
             "minDepthMultiplier":    LIVE_MIRROR_DEPTH_MULTIPLIER,
             "stabilitySeconds":      LIVE_MIRROR_STABILITY_SECONDS,
+        })
+        AB_VARIANTS.append({
+            "id":                    "btc-two-sided-maker",
+            "assetId":               "btc",
+            "label":                 "BTC 被動雙邊掛單（加總≤0.99）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            BTC_MAKER_MAX_PAIR_COST,
+            "marketMakerOnly":       True,
+            "simOnly":               True,
+            "mmMaxPairCost":         BTC_MAKER_MAX_PAIR_COST,
+            "mmFirstLegMaxPrice":    BTC_MAKER_FIRST_LEG_MAX_PRICE,
+            "mmRescueSeconds":       BTC_MAKER_RESCUE_SECONDS,
+        })
+        AB_VARIANTS.append({
+            "id":                    "btc-late-favorite",
+            "assetId":               "btc",
+            "label":                 "BTC 最後 60 秒買領先方（≥0.90）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateFavorite":          True,
+            "simOnly":               True,
+            "favoriteWindowSeconds": LATE_FAVORITE_WINDOW_SECONDS,
+            "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
+            "favoriteMinPrice":      LATE_FAVORITE_MIN_PRICE,
+            "favoriteMaxPrice":      LATE_FAVORITE_MAX_PRICE,
         })
         AB_VARIANTS.append({
             "id":                    "btc-inventory-rotation",
@@ -2345,6 +2382,88 @@ def _try_late_direction_entry(
     )
 
 
+def _try_late_favorite_entry(
+    variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float
+) -> None:
+    """最後 60 秒買已經明顯領先（ask >= 0.90）的那一邊，抱到結算。每窗口最多一次。
+    若 Chainlink 60s TWAP 訊號可用，方向必須一致（TWAP 高於開盤 → 只買 Up）。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    st = ab_states[variant_id]
+    if st.get("lateFavoriteWindowSlug") == slug:
+        record_window_diagnostic(variant_id, slug, "favorite_already_entered")
+        return
+    window_seconds = float(variant.get("favoriteWindowSeconds", LATE_FAVORITE_WINDOW_SECONDS))
+    min_remaining = float(variant.get("favoriteMinRemaining", LATE_FAVORITE_MIN_REMAINING))
+    if remaining_seconds > window_seconds or remaining_seconds < min_remaining:
+        record_window_diagnostic(variant_id, slug, "outside_entry_window", remainingSeconds=remaining_seconds)
+        return
+    min_price = float(variant.get("favoriteMinPrice", LATE_FAVORITE_MIN_PRICE))
+    max_price = float(variant.get("favoriteMaxPrice", LATE_FAVORITE_MAX_PRICE))
+    up_asks, down_asks = up_book.get("asks") or [], down_book.get("asks") or []
+    up_ask = float(up_asks[0]["price"]) if up_asks else None
+    down_ask = float(down_asks[0]["price"]) if down_asks else None
+    common = {"remainingSeconds": remaining_seconds, "upAsk": up_ask, "downAsk": down_ask}
+    if up_ask is not None and up_ask >= min_price:
+        side, book, ask = "Up", up_book, up_ask
+    elif down_ask is not None and down_ask >= min_price:
+        side, book, ask = "Down", down_book, down_ask
+    else:
+        record_window_diagnostic(variant_id, slug, "favorite_no_leader", favoriteMinPrice=min_price, **common)
+        return
+    if ask > max_price:
+        record_window_diagnostic(
+            variant_id, slug, "favorite_price_above_maximum",
+            selectedSide=side, selectedAsk=ask, favoriteMaxPrice=max_price, **common,
+        )
+        return
+    signal = get_chainlink_twap_signal(variant["assetId"])
+    if signal and signal.get("opening"):
+        delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
+        if (delta_pct > 0 and side == "Down") or (delta_pct < 0 and side == "Up"):
+            record_window_diagnostic(
+                variant_id, slug, "favorite_signal_disagrees",
+                selectedSide=side, signalDeltaPct=delta_pct, **common,
+            )
+            return
+    if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
+        record_window_diagnostic(
+            variant_id, slug, "selected_book_not_fresh",
+            selectedSide=side, dataGuardReason=_simulation_single_book_guard_reason(book), **common,
+        )
+        return
+    shares, budget = _target_order_size(variant_id)
+    if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_budget", targetShares=shares, budgetUsd=budget, **common)
+        return
+    # 領先方單價高，同樣預算買到的股數少；用預算 / 買價換算，不沿用兩腿的股數。
+    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    if shares < float(book.get("minOrderSize", 1) or 1):
+        record_window_diagnostic(
+            variant_id, slug, "below_minimum_shares",
+            targetShares=shares, minOrderSize=book.get("minOrderSize"), **common,
+        )
+        return
+    fill = simulate_buy_fill(book, shares)
+    if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_ask_depth", targetShares=shares, **common)
+        return
+    if fill["decisionPrice"] > max_price:
+        record_window_diagnostic(
+            variant_id, slug, "favorite_price_above_maximum",
+            selectedSide=side, decisionPrice=fill["decisionPrice"], favoriteMaxPrice=max_price, **common,
+        )
+        return
+    enter_position(variant_id, slug, side, fill, budget, None, None)
+    st["position"]["signalSource"] = "late_favorite"
+    st["lateFavoriteWindowSlug"] = slug
+    record_window_diagnostic(variant_id, slug, "favorite_entered", selectedSide=side, decisionPrice=fill["decisionPrice"], **common)
+    save_sim_state()
+    log.info(
+        f"[SIM:{variant_id}] 最後 {remaining_seconds:.0f}s 買領先方 {side} ask=${ask:.2f} "
+        f"VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f}"
+    )
+
+
 def _close_directional_position(variant_id: str, fill: dict, reason: str) -> None:
     st = ab_states[variant_id]
     pos = st["position"]
@@ -2406,7 +2525,9 @@ def _maker_quote_candidate(book: dict, price_cap: float | None = None) -> tuple[
     return candidate, queue_ahead
 
 
-def _maker_set_quote(st: dict, slug: str, side: str, candidate: tuple[float, float], shares: float) -> bool:
+def _maker_set_quote(
+    st: dict, slug: str, side: str, candidate: tuple[float, float], shares: float, variant_id: str = "eth-mm"
+) -> bool:
     quotes = st.setdefault("makerQuotes", {"windowSlug": slug, "Up": None, "Down": None})
     now = time.time()
     price, queue_ahead = candidate
@@ -2426,7 +2547,7 @@ def _maker_set_quote(st: dict, slug: str, side: str, candidate: tuple[float, flo
     }
     _maker_stats(st)["quotesPlaced"] += 1
     log.info(
-        f"[SIM:eth-mm] maker 掛價 {side} BUY ${price:.3f} x {shares:.2f} "
+        f"[SIM:{variant_id}] maker 掛價 {side} BUY ${price:.3f} x {shares:.2f} "
         f"queueAhead={queue_ahead:.2f}"
     )
     return True
@@ -2508,10 +2629,13 @@ def update_market_maker_quotes(
         quotes = st["makerQuotes"]
         changed = True
 
+    mm_max_pair_cost = float(variant.get("mmMaxPairCost", MM_MAX_PAIR_COST))
+    mm_first_leg_max_price = float(variant.get("mmFirstLegMaxPrice", MM_FIRST_LEG_MAX_PRICE))
+    mm_rescue_seconds = float(variant.get("mmRescueSeconds", MM_INVENTORY_RESCUE_SECONDS))
     pos = st.get("position")
     if pos and pos.get("windowSlug") == slug and not pos.get("hedged"):
         inventory_age = time.time() - float(pos.get("entryTime", time.time()))
-        if inventory_age >= MM_INVENTORY_RESCUE_SECONDS:
+        if inventory_age >= mm_rescue_seconds:
             _rescue_maker_inventory(variant_id, up_book, down_book)
             return
 
@@ -2536,7 +2660,7 @@ def update_market_maker_quotes(
     wanted = ["Up", "Down"] if pos is None else ["Down" if pos["side"] == "Up" else "Up"]
     candidates: dict[str, tuple[float, float]] = {}
     for side in wanted:
-        price_cap = MM_FIRST_LEG_MAX_PRICE
+        price_cap = mm_first_leg_max_price
         if pos:
             price_cap = 1.0 - float(pos.get("entryPrice", 0)) - MM_MIN_NET_PAIR_EDGE
         candidate = _maker_quote_candidate(books[side], price_cap)
@@ -2549,7 +2673,7 @@ def update_market_maker_quotes(
         candidates[side] = candidate
 
     if pos is None:
-        if set(candidates) != {"Up", "Down"} or sum(x[0] for x in candidates.values()) > MM_MAX_PAIR_COST + 1e-9:
+        if set(candidates) != {"Up", "Down"} or sum(x[0] for x in candidates.values()) > mm_max_pair_cost + 1e-9:
             if quotes.get("Up") is not None or quotes.get("Down") is not None:
                 quotes["Up"] = quotes["Down"] = None
                 changed = True
@@ -2562,7 +2686,7 @@ def update_market_maker_quotes(
     if required_cash > cash + 1e-9:
         return
     for side, candidate in candidates.items():
-        changed = _maker_set_quote(st, slug, side, candidate, shares) or changed
+        changed = _maker_set_quote(st, slug, side, candidate, shares, variant_id) or changed
     for side in ("Up", "Down"):
         if side not in wanted and quotes.get(side) is not None:
             quotes[side] = None
@@ -3060,6 +3184,12 @@ def _simulate_trading_impl(
 
     if variant.get("inventoryRotation"):
         _try_inventory_rotation(variant_id, slug, up_book, down_book, remaining_seconds, fair)
+        return
+
+    if variant.get("lateFavorite"):
+        # 買領先方後抱到結算：不補腿、不提早出場。
+        if pos is None and remaining_seconds is not None:
+            _try_late_favorite_entry(variant_id, slug, up_book, down_book, remaining_seconds)
         return
 
     if pos is None:
@@ -4134,6 +4264,13 @@ def build_ab_leaderboard() -> list:
             "inventoryRotation": bool(v.get("inventoryRotation")),
             "liveMirrorOnly": bool(v.get("liveMirrorOnly")),
             "dumpThenHedge": bool(v.get("dumpThenHedge")),
+            "lateFavorite":  bool(v.get("lateFavorite")),
+            "favoriteWindowSeconds": v.get("favoriteWindowSeconds"),
+            "favoriteMinPrice": v.get("favoriteMinPrice"),
+            "favoriteMaxPrice": v.get("favoriteMaxPrice"),
+            "mmMaxPairCost": v.get("mmMaxPairCost"),
+            "mmFirstLegMaxPrice": v.get("mmFirstLegMaxPrice"),
+            "mmRescueSeconds": v.get("mmRescueSeconds"),
             "entryMaxPrice": v["entryMaxPrice"],
             "lockMaxSum":    v["lockMaxSum"],
             "stakePct":      float(v.get("stakePct", shared_config["stakePct"])),

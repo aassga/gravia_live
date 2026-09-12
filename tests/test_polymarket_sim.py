@@ -159,6 +159,74 @@ class PolymarketSimulationTests(unittest.TestCase):
             self.assertFalse(sim._try_single_leg_entry("btc-historical-hybrid", "btc-window", up_book, down_book, fair))
         self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
 
+    def _favorite_books(self, up_ask=0.92, down_ask=0.09):
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": up_ask, "size": 500.0}], "bids": [{"price": round(up_ask - 0.01, 2), "size": 500.0}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": down_ask, "size": 500.0}], "bids": [{"price": max(0.01, round(down_ask - 0.01, 2)), "size": 500.0}]})
+        return up, down
+
+    def test_late_favorite_buys_leader_in_last_minute_and_holds(self):
+        # 最後 60 秒、Up 賣 0.92（>= 0.90、<= 0.97）、Chainlink 同向 → 買 Up，抱到結算
+        self._set_chainlink_signal(opening=100.0, current=100.3)
+        up, down = self._favorite_books()
+        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
+        pos = sim.ab_states["btc-late-favorite"]["position"]
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos["side"], "Up")
+        self.assertFalse(pos["hedged"])
+        self.assertEqual(pos.get("signalSource"), "late_favorite")
+        # 同窗口不再進第二次；之後對邊變便宜也不補腿
+        sim.ab_states["btc-late-favorite"]["position"] = None
+        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 30.0, None)
+        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
+
+    def test_late_favorite_skips_outside_window_or_no_leader_or_too_expensive(self):
+        self._set_chainlink_signal(opening=100.0, current=100.3)
+        up, down = self._favorite_books()
+        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 120.0, None)   # 還沒到最後 60 秒
+        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
+        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 3.0, None)     # 剩不到 5 秒
+        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
+        up2, down2 = self._favorite_books(up_ask=0.70, down_ask=0.31)                    # 沒有 >= 0.90 的領先方
+        sim.simulate_trading("btc-late-favorite", "btc-window", up2, down2, 40.0, None)
+        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
+        up3, down3 = self._favorite_books(up_ask=0.99, down_ask=0.02)                    # 超過 0.97 沒利潤
+        sim.simulate_trading("btc-late-favorite", "btc-window", up3, down3, 40.0, None)
+        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
+
+    def test_late_favorite_requires_chainlink_agreement_when_signal_present(self):
+        # 市場領先 Up 但 Chainlink TWAP 低於開盤 → 不進
+        self._set_chainlink_signal(opening=100.0, current=99.7)
+        up, down = self._favorite_books()
+        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
+        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
+
+    def test_btc_two_sided_maker_variant_uses_relaxed_parameters(self):
+        v = sim.AB_VARIANT_BY_ID["btc-two-sided-maker"]
+        self.assertTrue(v["marketMakerOnly"]); self.assertTrue(v["simOnly"])
+        self.assertIn(v, sim.MARKET_MAKER_VARIANTS)
+        self.assertEqual(v["mmMaxPairCost"], 0.99)
+        self.assertEqual(v["mmFirstLegMaxPrice"], 0.70)
+        self.assertEqual(v["mmRescueSeconds"], 45.0)
+        # 兩邊 bid/ask 0.47/0.49 與 0.49/0.51：掛 0.48 + 0.50 = 0.98 <= 0.99 → 兩邊都掛
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.49, "size": 300.0}], "bids": [{"price": 0.47, "size": 300.0}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.51, "size": 300.0}], "bids": [{"price": 0.49, "size": 300.0}]})
+        sim.simulate_trading("btc-two-sided-maker", "btc-window", up, down, 200.0, None)
+        quotes = sim.ab_states["btc-two-sided-maker"]["makerQuotes"]
+        self.assertIsNotNone(quotes["Up"]); self.assertIsNotNone(quotes["Down"])
+        self.assertLessEqual(quotes["Up"]["price"] + quotes["Down"]["price"], 0.99 + 1e-9)
+        # ETH 版 0.98 上限下同樣的 book：0.48+0.50=0.98 也掛得出來；把 Down 提高一檔則只有 BTC 版還掛
+        down_hi = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.52, "size": 300.0}], "bids": [{"price": 0.50, "size": 300.0}]})
+        sim.ab_states["btc-two-sided-maker"] = sim._new_variant_state()
+        sim.simulate_trading("btc-two-sided-maker", "btc-window", up, down_hi, 200.0, None)
+        quotes = sim.ab_states["btc-two-sided-maker"]["makerQuotes"]
+        self.assertIsNotNone(quotes["Up"]); self.assertIsNotNone(quotes["Down"])
+        self.assertAlmostEqual(quotes["Up"]["price"] + quotes["Down"]["price"], 0.99, places=6)
+
     def test_single_leg_entry_disabled_by_default_keeps_lock_only_behaviour(self):
         # 2026-09-12 預設關閉：鎖不到就空手，不走單邊
         self.assertFalse(sim.SIM_SINGLE_LEG_ENTRY_ENABLED)

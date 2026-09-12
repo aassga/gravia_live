@@ -544,7 +544,9 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
           ${isRotation
             ? `\u6bcf\u6b21 ${Number(v.sliceShares||0).toFixed(0)} \u80a1 | edge>=${Number(v.minEntryEdge||0).toFixed(2)} | T-${Number(v.hedgeOnlySeconds||0).toFixed(0)}s \u5f8c\u53ea\u88dc\u817f | \u6b98\u7559<=${Number(v.maxResidualShares||0).toFixed(0)} \u80a1 | \u7e3d\u6210\u672c<=$${Number(v.maxGrossBudgetUsd||0).toFixed(0)}`
             : isMaker
-            ? `Maker queue · Up ${makerQuotes.Up?'$'+makerQuotes.Up.price.toFixed(3):'—'} / Down ${makerQuotes.Down?'$'+makerQuotes.Down.price.toFixed(3):'—'} · 救援 對沖/平倉/失敗 ${makerStats.rescueHedges||0}/${makerStats.rescueUnwinds||0}/${makerStats.rescueFailures||0}`
+            ? `Maker queue · Up ${makerQuotes.Up?'$'+makerQuotes.Up.price.toFixed(3):'—'} / Down ${makerQuotes.Down?'$'+makerQuotes.Down.price.toFixed(3):'—'}${typeof v.mmMaxPairCost==='number'?` · 加總≤$${v.mmMaxPairCost.toFixed(2)} 首腿≤$${Number(v.mmFirstLegMaxPrice||0).toFixed(2)} 救援 ${Number(v.mmRescueSeconds||0).toFixed(0)}s`:''} · 救援 對沖/平倉/失敗 ${makerStats.rescueHedges||0}/${makerStats.rescueUnwinds||0}/${makerStats.rescueFailures||0}`
+            : v.lateFavorite
+            ? `最後 ${Number(v.favoriteWindowSeconds||0).toFixed(0)}s 買領先方 · 買價 $${Number(v.favoriteMinPrice||0).toFixed(2)}～$${Number(v.favoriteMaxPrice||0).toFixed(2)} · Chainlink 同向 · 抱到結算`
             : (isDump
               ? `前 ${Number(v.entryWindowSeconds||0).toFixed(0)}s · ${Number(v.lookbackSeconds||0).toFixed(0)}s 跌幅≥${Number(v.minMovePct||0).toFixed(0)}% · 固定 ${Number(v.targetShares||0).toFixed(0)}股 · 費後淨利≥${Number(v.minNetPerShare||0).toFixed(2)}/股`
               : `${v.liveMirrorOnly?`實盤鏡像 ${Number(v.stakePct||0).toFixed(1)}% · 深度≥${Number(v.minDepthMultiplier||1).toFixed(1)}x · 穩定≥${Number(v.stabilitySeconds||0).toFixed(2)}s · `:(typeof v.entryMaxPrice==='number'?'進場≤$'+v.entryMaxPrice.toFixed(2)+' · ':'只做鎖利／晚進場方向性 · ')}鎖利合計≤$${v.lockMaxSum.toFixed(2)}`)} · 資產 $${v.portfolio.toFixed(2)}
