@@ -218,15 +218,15 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertAlmostEqual(pos["signalDeltaPct"], 0.05, places=6)
 
     def test_late_favorite_stop_loss_sells_when_leader_flips(self):
-        # 12:33 那筆：買 Down 0.90 後翻面。停損 0.60：Down 買盤掉到 0.50 → 賣掉；掉到 0.80 → 不賣
+        # 12:33 那筆：買 Down 0.90 後翻面。停損 0.85：Down 買盤掉到 0.80 → 賣掉；掉到 0.88 → 不賣
         self._set_chainlink_signal(opening=100.0, current=99.7)
         up, down = self._favorite_books(up_ask=0.09, down_ask=0.92)
         sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
         self.assertEqual(sim.ab_states["btc-late-favorite"]["position"]["side"], "Down")
-        up2, down2 = self._favorite_books(up_ask=0.21, down_ask=0.81)
+        up2, down2 = self._favorite_books(up_ask=0.10, down_ask=0.89)
         sim.simulate_trading("btc-late-favorite", "btc-window", up2, down2, 30.0, None)
         self.assertIsNotNone(sim.ab_states["btc-late-favorite"]["position"])
-        up3, down3 = self._favorite_books(up_ask=0.51, down_ask=0.51)
+        up3, down3 = self._favorite_books(up_ask=0.21, down_ask=0.81)
         sim.simulate_trading("btc-late-favorite", "btc-window", up3, down3, 25.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
         last = sim.ab_states["btc-late-favorite"]["trades"][0]
