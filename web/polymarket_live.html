@@ -292,7 +292,9 @@ function onData(d){
   document.getElementById('strategy-name').textContent = cfg.label ? `策略：${cfg.label}` : '策略：—';
   document.getElementById('strategy-config').textContent = typeof cfg.stakePct==='number'
     ? `每注佔資產 ${cfg.stakePct.toFixed(1)}%（複利）・ 鎖利合計上限 $${Number(cfg.lockMaxSum||0).toFixed(2)}`+
-      ` ・ 單組上限 $${Number(cfg.maxPairBudgetUsd||0).toFixed(2)} ・ 現金保留 $${Number(cfg.minCashReserveUsd||0).toFixed(2)}`
+      ` ・ 單組上限 $${Number(cfg.maxPairBudgetUsd||0).toFixed(2)} ・ 現金保留 $${Number(cfg.minCashReserveUsd||0).toFixed(2)}`+
+      (cfg.singleLegEntryEnabled ? ` ・ 單邊進場上限 $${Number(cfg.entryMaxPrice||0).toFixed(2)}` : '')+
+      (cfg.singleLegEntryEnabled && Number(cfg.singleLegStopLossPct||0)>0 ? ` ・ 單邊停損 −${Number(cfg.singleLegStopLossPct).toFixed(0)}%` : '')
     : '每注佔資產 — ・ 鎖利合計上限 — ・ 單組上限 —';
   const tooltipItems = typeof cfg.stakePct==='number' ? [
     `市場：${String(cfg.assetId||'BTC').toUpperCase()} 5 分鐘 Up/Down。`,
@@ -305,7 +307,10 @@ function onData(d){
     `安全：整批結果不明會停止策略，避免重複下單；正常動作冷卻 ${Number(cfg.actionCooldownSeconds||0).toFixed(0)} 秒。`,
     `方向性：${cfg.lateDirectionEnabled
       ? `已啟用；只使用 ${cfg.lateDirectionSignal||'Chainlink TWAP'} 判斷方向，偏移 ≥ ${Number(cfg.lateDirectionMinDeltaPct||0).toFixed(2)}%；沿用原策略，不要求 Polymarket 同向。`
-      : '已停用，不會因預測 BTC 漲跌而單獨進場。'}`
+      : '已停用，不會因預測 BTC 漲跌而單獨進場。'}`,
+    `單邊進場：${cfg.singleLegEntryEnabled
+      ? `已啟用；兩腿鎖不到時，買價 ≤ $${Number(cfg.entryMaxPrice||0).toFixed(2)} 且公平價扣除成本後 edge ≥ $${Number(cfg.minEntryEdge||0).toFixed(3)}/股的那一腿先進場，之後補鎖利（合計 ≤ $${Number(cfg.rescueLockMaxSum||0.99).toFixed(2)}）或提早退出；最後 10 秒留給方向性判斷。${Number(cfg.singleLegStopLossPct||0)>0?`停損：持有腿可賣價 ≤ 進場價 × (1 − ${Number(cfg.singleLegStopLossPct).toFixed(0)}%) 時 FOK 賣出。`:'未設停損，補不到就抱到結算。'}`
+      : '已停用（POLY_LIVE_ENTRY_MAX_PRICE 未設）。'}`
   ] : ['等待策略設定...'];
   const tooltipList=document.getElementById('strategy-tooltip-list');
   tooltipList.replaceChildren(...tooltipItems.map(text=>{
@@ -330,7 +335,9 @@ function onData(d){
   document.getElementById('strategy-stats').textContent=
     `保守淨損益估計 ${Number(strategy.totalPnlEstimate||0)>=0?'+':''}$${Number(strategy.totalPnlEstimate||0).toFixed(2)}`+
     ` · 費用 $${Number(strategy.totalFeesEstimate||0).toFixed(2)} · 交易 ${strategy.totalTrades||0}`+
-    ` · 鎖利/方向/提早 ${strategy.lockedTrades||0}/${strategy.directionalTrades||0}/${strategy.earlyExits||0}`;
+    ` · 鎖利/方向/提早 ${strategy.lockedTrades||0}/${strategy.directionalTrades||0}/${strategy.earlyExits||0}`+
+    ` · 勝率 ${typeof strategy.winRatePct==='number'?strategy.winRatePct.toFixed(1)+'%':'—'}`+
+    `（${strategy.winningTrades||0} 勝 ${strategy.losingTrades||0} 敗）`;
   document.getElementById('strategy-reason').textContent=strategy.haltReason?`原因：${strategy.haltReason}`:'';
 
   const positions = d.openPositions || [];

@@ -96,6 +96,87 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(strategy.ENABLE_LATE_DIRECTION)
             self.assertFalse(strategy.DIRECT_PAIR_ENABLED)
 
+    def _first_trade_guard_position(self, slug="btc-window"):
+        return {
+            "windowSlug": slug,
+            "side": "Up",
+            "shares": 5.0,
+            "stakeUsd": 2.0,
+            "entryPrice": 0.40,
+            "entryNotional": 2.0,
+            "entryFee": 0.01,
+            "hedged": False,
+            "dryRun": False,
+            "entryTime": time.time(),
+        }
+
+    def test_first_real_trade_profit_keeps_execution_enabled(self):
+        strategy.REAL_EXECUTION_ENABLED = True
+        with (
+            patch.object(strategy, "FIRST_TRADE_GUARD_ID", "guard-profit"),
+            patch.object(strategy, "_write_env_flag") as write_env,
+        ):
+            strategy._configure_first_trade_guard()
+            strategy._record_trade(
+                self._first_trade_guard_position(),
+                0.25,
+                "Up",
+                "directional",
+            )
+
+        guard = strategy.live_state["firstTradeGuard"]
+        self.assertEqual(guard["status"], "profit_continue")
+        self.assertEqual(guard["resultPnl"], 0.25)
+        self.assertTrue(strategy._real_execution_enabled())
+        write_env.assert_not_called()
+
+    def test_first_real_trade_loss_switches_runtime_and_env_to_dry_run(self):
+        strategy.REAL_EXECUTION_ENABLED = True
+        with (
+            patch.object(strategy, "FIRST_TRADE_GUARD_ID", "guard-loss"),
+            patch.object(strategy, "_write_env_flag") as write_env,
+        ):
+            strategy._configure_first_trade_guard()
+            strategy._record_trade(
+                self._first_trade_guard_position(),
+                -0.25,
+                "Down",
+                "directional",
+            )
+
+        guard = strategy.live_state["firstTradeGuard"]
+        self.assertEqual(guard["status"], "loss_dry_run")
+        self.assertEqual(guard["resultPnl"], -0.25)
+        self.assertTrue(strategy.live_state["runtimeDryRun"])
+        self.assertFalse(strategy._real_execution_enabled())
+        write_env.assert_called_once_with("LIVE_TRADING", "false")
+
+    def test_dry_run_trade_does_not_resolve_first_real_trade_guard(self):
+        strategy.REAL_EXECUTION_ENABLED = True
+        position = self._first_trade_guard_position()
+        position["dryRun"] = True
+        with (
+            patch.object(strategy, "FIRST_TRADE_GUARD_ID", "guard-paper"),
+            patch.object(strategy, "_write_env_flag") as write_env,
+        ):
+            strategy._configure_first_trade_guard()
+            strategy._record_trade(position, -1.0, "Down", "directional")
+
+        self.assertEqual(strategy.live_state["firstTradeGuard"]["status"], "waiting")
+        self.assertFalse(strategy.live_state["runtimeDryRun"])
+        write_env.assert_not_called()
+
+    def test_first_trade_guard_blocks_a_second_real_entry_until_settled(self):
+        strategy.REAL_EXECUTION_ENABLED = True
+        with patch.object(strategy, "FIRST_TRADE_GUARD_ID", "guard-pending"):
+            strategy._configure_first_trade_guard()
+            strategy.live_state["pendingSettlements"] = [
+                self._first_trade_guard_position("first-window")
+            ]
+            self.assertTrue(strategy._first_trade_guard_blocks_new_entry())
+            strategy.live_state["pendingSettlements"][0]["dryRun"] = True
+            self.assertFalse(strategy._first_trade_guard_blocks_new_entry())
+
     def test_sdk_transaction_hash_polling_is_disabled_without_changing_initial_response(self):
         class FakeClient:
             def __init__(self):
@@ -383,6 +464,225 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pos["strategy"], "late_direction")
         self.assertEqual(pos["signalSource"], expected_source)
         self.assertFalse(pos["hedged"])
+
+    async def test_single_leg_entry_enters_cheap_side_with_edge(self):
+        up_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]})
+        down_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]})
+        fair = {"fairUp": 0.45, "fairDown": 0.55}
+        with patch.object(strategy, "ENTRY_MAX_PRICE", 0.45):
+            filled = await strategy._try_single_leg_entry(
+                "btc-window", up_book, down_book, shares=10.0, fair=fair, cash=100.0, dry_run=True
+            )
+        self.assertTrue(filled)
+        pos = strategy.live_state["position"]
+        self.assertEqual(pos["side"], "Down")
+        self.assertEqual(pos["strategy"], "single_leg")
+        self.assertFalse(pos["hedged"])
+        self.assertLessEqual(pos["entryLimitPrice"], 0.45)
+        self.assertGreaterEqual(pos["entryEdge"], strategy.sim.SIM_MIN_ENTRY_EDGE)
+
+    async def test_single_leg_entry_respects_entry_max_price_and_edge(self):
+        up_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]})
+        down_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]})
+        # 便宜腿買價 0.40（含 1 tick 緩衝 0.41）超過 0.35 的上限 → 不進場
+        with patch.object(strategy, "ENTRY_MAX_PRICE", 0.35):
+            filled = await strategy._try_single_leg_entry(
+                "btc-window", up_book, down_book, shares=10.0, fair={"fairUp": 0.45, "fairDown": 0.55}, cash=100.0, dry_run=True
+            )
+        self.assertFalse(filled)
+        self.assertIsNone(strategy.live_state["position"])
+        # 價格合格但公平機率沒有留下足夠 edge → 不進場
+        with patch.object(strategy, "ENTRY_MAX_PRICE", 0.45):
+            filled = await strategy._try_single_leg_entry(
+                "btc-window", up_book, down_book, shares=10.0, fair={"fairUp": 0.58, "fairDown": 0.42}, cash=100.0, dry_run=True
+            )
+        self.assertFalse(filled)
+        self.assertIsNone(strategy.live_state["position"])
+        diag = strategy._live_window_diagnostic("btc-window")
+        self.assertGreaterEqual(diag["reasonCounts"].get("single_leg_no_candidate", 0), 2)
+
+    async def test_single_leg_entry_disabled_without_entry_max_price(self):
+        up_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}]})
+        down_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}]})
+        with patch.object(strategy, "ENTRY_MAX_PRICE", None):
+            filled = await strategy._try_single_leg_entry(
+                "btc-window", up_book, down_book, shares=10.0, fair={"fairUp": 0.45, "fairDown": 0.55}, cash=100.0, dry_run=True
+            )
+        self.assertFalse(filled)
+        self.assertIsNone(strategy.live_state["position"])
+
+    async def test_poll_path_falls_back_to_single_leg_when_lock_impossible(self):
+        strategy.live_state["lastActionAt"] = 0
+        strategy.sim.state["market"] = {
+            "conditionId": "condition-1",
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        # 兩腿加總 1.01：鎖不到；Down 便宜且公平價偏向 Down → 走單邊進場
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}],
+        })
+        with (
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", True),
+            patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", True),
+            patch.object(strategy, "ENTRY_MAX_PRICE", 0.45),
+            patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
+            patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
+            patch.object(trader, "build_order", side_effect=AssertionError("dry-run must not sign")),
+        ):
+            await strategy.evaluate_and_act(
+                "btc-window", None, 180.0, {"fairUp": 0.45, "fairDown": 0.55}
+            )
+        pos = strategy.live_state["position"]
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos["side"], "Down")
+        self.assertEqual(pos["strategy"], "single_leg")
+        self.assertFalse(pos["hedged"])
+        self.assertTrue(pos["dryRun"])
+
+    async def test_poll_path_leaves_direction_window_to_late_direction(self):
+        # 有開晚進場方向性時，最後 10 秒不做單邊進場，留給方向性訊號判斷。
+        strategy.live_state["lastActionAt"] = 0
+        strategy.sim.state["market"] = {
+            "conditionId": "condition-1",
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}],
+        })
+        with (
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", True),
+            patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", True),
+            patch.object(strategy, "ENTRY_MAX_PRICE", 0.45),
+            patch.object(strategy, "ENABLE_LATE_DIRECTION", True),
+            patch.object(strategy, "PAIR_STABILITY_SECONDS", 0),
+            patch.object(strategy, "_try_single_leg_entry", AsyncMock(return_value=False)) as single_leg,
+            patch.object(strategy, "_try_late_direction_entry", AsyncMock(return_value=False)) as late,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 6.0, {"fairUp": 0.45, "fairDown": 0.55})
+        single_leg.assert_not_awaited()
+        late.assert_awaited_once()
+
+    async def test_hedge_order_floors_fractional_position_shares_to_integer(self):
+        # 2026-09-11 實盤：進場真實成交 5.357143 股後，補腿沿用小數股數被 CLOB 以
+        # invalid amounts 連續拒絕。補腿股數必須捨去到整數，零頭記成殘值。
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window", "side": "Down", "tokenId": "down-token",
+            "shares": 5.357143, "entryPrice": 0.28, "entryLimitPrice": 0.30,
+            "entryNotional": 1.5, "entryFee": 0.0757, "entryRiskNotional": 1.607, "entryRiskFee": 0.08,
+            "stakeUsd": 1.5757, "strategy": "single_leg", "hedged": False, "dryRun": True,
+        }
+        self.assertEqual(strategy._hedge_order_shares(strategy.live_state["position"]), 5.0)
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.40, "size": 100}], "bids": [{"price": 0.39, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.61, "size": 100}], "bids": [{"price": 0.60, "size": 100}],
+        })
+        with (
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_hedge_position", AsyncMock(return_value="filled")) as hedge,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.5, "fairDown": 0.5})
+        hedge.assert_awaited_once()
+        plan = hedge.await_args.args[0]
+        self.assertEqual(plan["side"], "Up")
+        self.assertEqual(plan["shares"], 5.0)
+
+    def _single_leg_position(self, side="Down", entry_price=0.33, strategy_name="single_leg"):
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window", "side": side, "tokenId": "down-token" if side == "Down" else "up-token",
+            "shares": 10.0, "entryPrice": entry_price, "entryLimitPrice": entry_price + 0.02,
+            "entryNotional": 10.0 * entry_price, "entryFee": 0.05, "entryRiskNotional": 10.0 * (entry_price + 0.02),
+            "entryRiskFee": 0.05, "stakeUsd": 10.0 * entry_price + 0.05, "strategy": strategy_name,
+            "hedged": False, "dryRun": True,
+        }
+
+    async def test_single_leg_stop_loss_sells_when_bid_falls_below_threshold(self):
+        # 進場 0.33、停損 40% → 停損價 0.198；Down 買盤 0.15 → 可賣價低於停損價 → 賣出
+        self._single_leg_position()
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.86, "size": 100}], "bids": [{"price": 0.84, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.16, "size": 100}], "bids": [{"price": 0.15, "size": 100}],
+        })
+        with (
+            patch.object(strategy, "SINGLE_LEG_STOP_LOSS_PCT", 40.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.85, "fairDown": 0.15})
+        close.assert_awaited_once()
+        plan, dry_run, reason = close.await_args.args
+        self.assertEqual(reason, "single_leg_stop_loss")
+        self.assertEqual(plan["side"], "Down")
+        self.assertLessEqual(plan["limitPrice"], 0.33 * 0.6)
+
+    async def test_single_leg_stop_loss_not_triggered_above_threshold_or_when_disabled(self):
+        self._single_leg_position()
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.76, "size": 100}], "bids": [{"price": 0.74, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.26, "size": 100}], "bids": [{"price": 0.25, "size": 100}],
+        })
+        # 買盤 0.25 → 可賣價約 0.24 > 停損價 0.198 → 不賣
+        with (
+            patch.object(strategy, "SINGLE_LEG_STOP_LOSS_PCT", 40.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.75, "fairDown": 0.25})
+        close.assert_not_awaited()
+        # 停損關閉（0）→ 即使買盤很低也不賣
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.06, "size": 100}], "bids": [{"price": 0.05, "size": 100}],
+        })
+        with (
+            patch.object(strategy, "SINGLE_LEG_STOP_LOSS_PCT", 0.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.95, "fairDown": 0.05})
+        close.assert_not_awaited()
+
+    async def test_single_leg_stop_loss_ignores_late_direction_positions(self):
+        self._single_leg_position(strategy_name="late_direction")
+        strategy.sim.state["upBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.96, "size": 100}], "bids": [{"price": 0.94, "size": 100}],
+        })
+        strategy.sim.state["downBook"] = self._fresh_ws_book({
+            "tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.06, "size": 100}], "bids": [{"price": 0.05, "size": 100}],
+        })
+        with (
+            patch.object(strategy, "SINGLE_LEG_STOP_LOSS_PCT", 40.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 5.0, {"fairUp": 0.95, "fairDown": 0.05})
+        close.assert_not_awaited()
+        self.assertIsNotNone(strategy.live_state["position"])
 
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)

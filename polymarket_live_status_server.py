@@ -67,6 +67,8 @@ def _load_strategy_state() -> dict:
             state = json.load(f)
         position = state.get("position")
         return {
+            "runtimeDryRun": bool(state.get("runtimeDryRun", False)),
+            "firstTradeGuard": state.get("firstTradeGuard"),
             "halted": bool(state.get("halted", False)),
             "haltReason": state.get("haltReason"),
             "position": position,
@@ -84,6 +86,22 @@ def _load_strategy_state() -> dict:
         }
     except Exception as exc:
         return {"halted": True, "haltReason": f"strategy_state_read_failed: {exc}"}
+
+
+def _backfill_win_loss(state: dict) -> None:
+    """策略狀態檔在加入 winningTrades／losingTrades 之前就有的舊交易沒有被計數；
+    這裡用狀態檔保留的最近交易（最多 100 筆）補算，讓 Dashboard 勝率涵蓋歷史。
+    只在計數器缺少或明顯落後於交易清單時補算，避免蓋掉策略程式自己維護的數字。"""
+    trades = state.get("trades") or []
+    wins = sum(1 for t in trades if float(t.get("pnlEstimate") or 0) > 0)
+    losses = sum(1 for t in trades if float(t.get("pnlEstimate") or 0) < 0)
+    if state.get("winningTrades") is None or state.get("losingTrades") is None or (
+        int(state.get("winningTrades", 0)) + int(state.get("losingTrades", 0)) < wins + losses
+    ):
+        state["winningTrades"] = wins
+        state["losingTrades"] = losses
+    decided = int(state.get("winningTrades", 0)) + int(state.get("losingTrades", 0))
+    state["winRatePct"] = (100.0 * int(state.get("winningTrades", 0)) / decided) if decided else None
 
 
 def _compute_open_positions(trades: list, max_tokens: int = 10) -> list:
@@ -161,6 +179,7 @@ def _fetch_state() -> dict:
     trades = live.get_trade_history(limit=30)
     positions = _compute_open_positions(trades)
     strategy_state = _load_strategy_state()
+    _backfill_win_loss(strategy_state)
 
     balance_usdc = int(balance_raw.get("balance", 0)) / 1_000_000
     baseline = _load_or_init_baseline(balance_usdc)
@@ -173,9 +192,12 @@ def _fetch_state() -> dict:
         "serverRegion": SERVER_REGION,
         "clobPingMs": ping_ms,
         "funderAddress": live.FUNDER_ADDRESS,
-        "liveTradingEnabled": live.LIVE_TRADING,
+        "liveTradingEnabled": live.LIVE_TRADING and not bool(strategy_state.get("runtimeDryRun")),
         "strategyArmed": os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true",
-        "strategyExecutionEnabled": live.LIVE_TRADING and os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true",
+        "strategyExecutionEnabled": (
+            live.LIVE_TRADING and os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
+            and not bool(strategy_state.get("runtimeDryRun"))
+        ),
         "balanceUsdc": balance_usdc,
         "baselineBalance": baseline["baselineBalance"],
         "baselineSetAt": baseline["baselineSetAt"],
@@ -185,9 +207,20 @@ def _fetch_state() -> dict:
         "trades": trades,
         "strategyState": strategy_state,
         "strategyConfig": {
-            "label": strategy._LIVE_VARIANT["label"],
+            # 2026-09-12：實盤單邊進場（POLY_LIVE_ENTRY_MAX_PRICE）是 .env 疊加在變體上的，
+            # 變體本身的 label 看不出來，所以顯示名稱把它接在後面，Dashboard 才對得上實際行為。
+            "label": (
+                f"{strategy._LIVE_VARIANT['label']}＋單邊進場 ≤${strategy.ENTRY_MAX_PRICE:.2f}"
+                if strategy.SINGLE_LEG_ENTRY_ENABLED
+                else strategy._LIVE_VARIANT["label"]
+            ),
             "variantId": strategy.LIVE_VARIANT_ID,
+            "singleLegEntryEnabled": strategy.SINGLE_LEG_ENTRY_ENABLED,
+            "entryMaxPrice": strategy.ENTRY_MAX_PRICE,
+            "singleLegStopLossPct": strategy.SINGLE_LEG_STOP_LOSS_PCT,
+            "minEntryEdge": strategy.sim.SIM_MIN_ENTRY_EDGE,
             "assetId": strategy.LIVE_ASSET_ID,
+            "firstTradeGuard": strategy_state.get("firstTradeGuard"),
             "stakePct": strategy.STAKE_PCT,
             "lockMaxSum": strategy.LOCK_MAX_SUM,
             "minDepthMultiplier": strategy.PAIR_MIN_DEPTH_MULTIPLIER,
