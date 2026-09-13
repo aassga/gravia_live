@@ -4,8 +4,8 @@ Telegram 查詢機器人：回報實盤／模擬盤目前狀態與損益。純�
     - 只讀本機兩個狀態伺服器的 WebSocket 快照（實盤 8767、模擬 8766），跟網頁同一份資料。
     - 不碰 .env 私鑰、不下單、不改任何設定；沒有任何指令能改變策略行為。
     - 只回應 TG_ALLOWED_USER_IDS 白名單內的 Telegram user id，其他人一律不理。
-    - 主動推播（每 15 秒比對一次快照）：只推「策略停機／恢復」與「REAL↔DRY-RUN 切換」；
-      真單進場／結算不推（2026-09-14 依使用者要求），要看用 /trades。
+    - 主動推播（每 15 秒比對一次快照）：「策略停機／恢復」、「REAL↔DRY-RUN 切換」、「新部位」（含 DRY-RUN）；
+      結算不推（2026-09-14 依使用者要求），要看用 /trades。
     - /scan 手動觸發每週市場掃描（polymarket_weekly_scan.py），/report 看最近一次報告摘要。
 
 環境變數（.env）：
@@ -157,7 +157,7 @@ HELP_TEXT = (
     "/scan [小時] — 立刻跑一次市場掃描（預設 24h，約 10～15 分鐘，完成後推播）\n"
     "/report — 最近一次市場掃描的建議摘要\n"
     "/help — 這份說明\n"
-    "（純查詢，沒有任何會改設定或下單的指令；主動推播只有停機／恢復與 REAL↔DRY-RUN 切換）"
+    "（純查詢，沒有任何會改設定或下單的指令；主動推播：停機／恢復、REAL↔DRY-RUN 切換、新部位）"
 )
 
 REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "weekly")
@@ -280,7 +280,15 @@ def diff_alerts(prev: dict | None, cur: dict) -> list[str]:
         alerts.append(f"⛔ 策略自動停機：{cs.get('haltReason')}" if cs.get("halted") else "✅ 策略已恢復下單")
     if bool(cur.get("strategyExecutionEnabled")) != bool(prev.get("strategyExecutionEnabled")):
         alerts.append("🔴 實盤切換為 REAL 真實下單" if cur.get("strategyExecutionEnabled") else "🟡 實盤切換為 DRY-RUN")
-    # 真單進場／結算不主動推播（2026-09-14 依使用者要求），要看請用 /trades。
+    # 2026-09-14 依使用者要求：新部位推播（含 DRY-RUN，標示模式）；結算不推，要看請用 /trades。
+    ppos, cpos = ps.get("position"), cs.get("position")
+    if cpos and (not ppos or (ppos.get("windowSlug"), ppos.get("entryTime")) != (cpos.get("windowSlug"), cpos.get("entryTime"))):
+        mode = "REAL" if cpos.get("dryRun") is False else "DRY-RUN"
+        alerts.append(
+            f"{'🟢' if mode == 'REAL' else '🟡'} 新部位（{mode}）{cpos.get('side')} "
+            f"{float(cpos.get('shares') or 0):.2f} 股 @ {float(cpos.get('entryPrice') or 0):.3f}"
+            f" · ${float(cpos.get('stakeUsd') or 0):.2f} · {cpos.get('strategy') or '—'} · {cpos.get('windowSlug')}"
+        )
     return alerts
 
 

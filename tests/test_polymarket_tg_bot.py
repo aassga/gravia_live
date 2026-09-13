@@ -68,15 +68,17 @@ class TelegramBotTests(unittest.TestCase):
         cur["strategyState"]["halted"] = True
         cur["strategyState"]["haltReason"] = "entry_order_unconfirmed"
         cur["strategyState"]["position"] = {"side": "Up", "shares": 16.0, "entryPrice": 0.96, "dryRun": False,
-                                            "entryOrderId": "0xabc", "windowSlug": "btc-updown-5m-9"}
+                                            "entryOrderId": "0xabc", "windowSlug": "btc-updown-5m-9", "entryTime": 1789301000.0,
+                                            "stakeUsd": 15.4, "strategy": "late_favorite"}
         cur["strategyState"]["trades"] = [
             {"windowSlug": "btc-updown-5m-2", "exitTime": 1789301000.0, "side": "Down", "entryPrice": 0.96,
              "shares": 12.0, "outcome": "Down", "pnlEstimate": 0.4, "tradeType": "directional", "dryRun": False},
         ] + prev["strategyState"]["trades"]
         alerts = bot.diff_alerts(prev, cur)
         self.assertTrue(any("停機" in a for a in alerts))
-        # 2026-09-14 依使用者要求：真單進場／結算不主動推播
-        self.assertFalse(any("真單進場" in a or "真單結算" in a for a in alerts))
+        # 2026-09-14 依使用者要求：新部位要推、結算不推
+        self.assertTrue(any("新部位（REAL）" in a and "Up" in a for a in alerts))
+        self.assertFalse(any("結算" in a for a in alerts))
         self.assertEqual(bot.diff_alerts(None, cur), [])
         self.assertEqual(bot.diff_alerts(cur, cur), [])
         cur2 = dict(cur); cur2["strategyExecutionEnabled"] = False
