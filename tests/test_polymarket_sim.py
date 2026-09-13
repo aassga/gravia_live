@@ -196,7 +196,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
 
     def test_late_favorite_stop_loss_sells_when_leader_flips(self):
-        # 買 Down 0.96 後翻面。停損 0.60：Down 買盤掉到 0.50 → 賣掉；掉到 0.80 → 不賣
+        # 買 Down 0.96 後翻面。停損 0.70：Down 買盤掉到 0.50 → 賣掉；掉到 0.80 → 不賣
         self._set_chainlink_signal(opening=100.0, current=99.7)
         up, down = self._favorite_books(up_ask=0.05, down_ask=0.96)
         sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
