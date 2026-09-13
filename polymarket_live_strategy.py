@@ -132,6 +132,8 @@ LATE_FAVORITE_WINDOW_SECONDS = float(_LIVE_VARIANT.get("favoriteWindowSeconds", 
 LATE_FAVORITE_MIN_REMAINING = float(_LIVE_VARIANT.get("favoriteMinRemaining", 5.0))
 LATE_FAVORITE_MIN_PRICE = float(_LIVE_VARIANT.get("favoriteMinPrice", 0.95))
 LATE_FAVORITE_MAX_PRICE = float(_LIVE_VARIANT.get("favoriteMaxPrice", 0.97))
+# (B) 同一邊的 ask 必須連續 >= 門檻這麼多秒才進（價格觸發變體用 10 秒）；0 = 看到就進。
+LATE_FAVORITE_STABLE_SECONDS = float(_LIVE_VARIANT.get("favoriteStableSeconds") or 0)
 # 領先方翻面時的停損：持有腿保守可賣價 <= 這個價就 FOK 賣出（WS tick 與 3 秒輪詢都檢查）。
 # POLY_LIVE_FAVORITE_STOP_LOSS_PRICE 可覆寫，0 = 關閉。
 _fav_stop_raw = os.environ.get("POLY_LIVE_FAVORITE_STOP_LOSS_PRICE", "").strip()
@@ -1021,11 +1023,24 @@ def _late_favorite_plan(
     elif down_ask is not None and down_ask >= LATE_FAVORITE_MIN_PRICE:
         side, book, ask = "Down", down_book, down_ask
     else:
+        live_state["favoriteStableSince"] = None
         diag("favorite_no_leader", upAsk=up_ask, downAsk=down_ask, favoriteMinPrice=LATE_FAVORITE_MIN_PRICE)
         return None
     if ask > LATE_FAVORITE_MAX_PRICE:
         diag("favorite_price_above_maximum", selectedSide=side, selectedAsk=ask, favoriteMaxPrice=LATE_FAVORITE_MAX_PRICE)
         return None
+    if LATE_FAVORITE_STABLE_SECONDS > 0:
+        # (B) 跟模擬版 _try_late_favorite_entry 同一套：換邊或領先方消失就重新計時。
+        now = time.time()
+        track = live_state.get("favoriteStableSince") or {}
+        if track.get("slug") != diagnostic_slug or track.get("side") != side:
+            track = {"slug": diagnostic_slug, "side": side, "since": now}
+            live_state["favoriteStableSince"] = track
+        held_for = now - float(track["since"])
+        if held_for < LATE_FAVORITE_STABLE_SECONDS:
+            diag("favorite_not_stable_yet", selectedSide=side, selectedAsk=ask, stableForSeconds=held_for,
+                 favoriteStableSeconds=LATE_FAVORITE_STABLE_SECONDS)
+            return None
     # 2026-09-13 依使用者要求：完全不看 Chainlink（不檢查方向、不看偏離幅度、無訊號照進）。
     # 只記錄偏離幅度供事後分析。
     signal = sim.get_chainlink_twap_signal(LIVE_ASSET_ID)
@@ -2900,7 +2915,9 @@ def _log_startup_banner(mode: str) -> None:
     if LATE_FAVORITE_ENABLED:
         log.warning(
             f"  買領先方已啟用：剩餘 {LATE_FAVORITE_MIN_REMAINING:.0f}~{LATE_FAVORITE_WINDOW_SECONDS:.0f}s、"
-            f"某邊 ask ${LATE_FAVORITE_MIN_PRICE:.2f}~${LATE_FAVORITE_MAX_PRICE:.2f}（不看 Chainlink）→ 買該邊抱到結算；"
+            f"某邊 ask ${LATE_FAVORITE_MIN_PRICE:.2f}~${LATE_FAVORITE_MAX_PRICE:.2f}"
+            f"{f'、連續 >= {LATE_FAVORITE_STABLE_SECONDS:.0f}s' if LATE_FAVORITE_STABLE_SECONDS > 0 else ''}"
+            f"（不看 Chainlink）→ 買該邊抱到結算；"
             "兩腿鎖利／晚進場方向性／單邊進場全部停用"
         )
         if LATE_FAVORITE_STOP_LOSS_PRICE is not None:

@@ -854,6 +854,29 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.live_state["losingTrades"], 1)
         self.assertAlmostEqual(strategy.live_state["totalPnlEstimate"], -1.5)
 
+    async def test_live_late_favorite_waits_for_stable_leader_when_configured(self):
+        up, down = self._favorite_books(up_ask=0.98, down_ask=0.03)
+        strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up, down
+        with (
+            patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", False),
+            patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", False),
+            patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
+            patch.object(strategy, "LATE_FAVORITE_WINDOW_SECONDS", 240.0),
+            patch.object(strategy, "LATE_FAVORITE_MIN_PRICE", 0.97),
+            patch.object(strategy, "LATE_FAVORITE_MAX_PRICE", 0.99),
+            patch.object(strategy, "LATE_FAVORITE_STABLE_SECONDS", 10.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 200.0, None)   # 第一次看到：開始計時，不進
+            self.assertIsNone(strategy.live_state["position"])
+            self.assertEqual(strategy.live_state["favoriteStableSince"]["side"], "Up")
+            strategy.live_state["favoriteStableSince"]["since"] -= 12          # 已穩定 12 秒
+            strategy.live_state["lastActionAt"] = 0
+            await strategy.evaluate_and_act("btc-window", None, 190.0, None)
+            pos = strategy.live_state["position"]
+            self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up"); self.assertEqual(pos["strategy"], "late_favorite")
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (

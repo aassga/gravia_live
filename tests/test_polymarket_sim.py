@@ -215,7 +215,7 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_price_triggered_favorite_requires_stable_leader_and_allows_mid_window(self):
         vid = "btc-price-triggered-favorite"
         v = sim.AB_VARIANT_BY_ID[vid]
-        self.assertTrue(v["simOnly"]); self.assertIsNone(v["favoriteStopLossPrice"])
+        self.assertFalse(v.get("simOnly")); self.assertIsNone(v["favoriteStopLossPrice"])  # 2026-09-14 起可供實盤選用
         up, down = self._favorite_books(up_ask=0.98, down_ask=0.03)
         # 剩 200 秒（窗口中段）就可以看；第一次看到領先方只是開始計時，不進
         sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)
