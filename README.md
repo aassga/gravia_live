@@ -181,6 +181,21 @@ py polymarket_live_strategy.py
 
 會自己開一條獨立 WS 連線（`strategy_loop()`），邏輯完全相同，但跟模擬盤之間會有上述的時間差，不建議再使用；保留只是為了不強制中斷既有的執行方式。
 
+## Telegram 查詢機器人（純唯讀）
+
+`polymarket_tg_bot.py` 讓你在 Telegram 查實盤／模擬盤狀態與損益，資料來源跟網頁一樣是本機兩個狀態伺服器
+（實盤 `ws://127.0.0.1:8767`、模擬 `ws://127.0.0.1:8766`）。不碰私鑰、不下單、沒有任何會改設定的指令，
+只回應 `TG_ALLOWED_USER_IDS` 白名單內的使用者。
+
+指令：`/status`（開關、策略、部位、餘額）、`/pnl`（損益、勝率、今日統計）、`/trades [n]`（最近 n 筆真單）、
+`/sim`（模擬盤各組）、`/help`。另外每 15 秒比對一次快照，遇到策略停機／恢復、真單進場、真單結算會主動推播。
+
+```bash
+# .env 加入 TG_BOT_TOKEN、TG_ALLOWED_USER_IDS 後：
+sudo cp gravia-tg.service /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo systemctl enable --now gravia-tg.service
+```
+
 ## 常見問題
 
 **Q: 左上角顯示 DISCONNECTED**
