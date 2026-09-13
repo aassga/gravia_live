@@ -190,6 +190,10 @@ LATE_FAVORITE_MAX_PRICE        = 0.97   # 超過就沒利潤空間
 # 第一個跌破的 tick 已經 0.2～0.3），0.85 才能在跳空前出場：總損益 -7.24 → +20.34，代價是 7 筆
 # 小幅回檔被震出（每筆約 -0.85）。依使用者要求改 0.85。
 LATE_FAVORITE_STOP_LOSS_PRICE  = 0.85
+# 2026-09-12 09:19 那筆：進場時 Chainlink TWAP 只比開盤高 0.002%，市場卻定 Up 0.90——結算源根本
+# 還在擲硬幣，價格 0.90 → 0.70 → 0.83 → 0.28 → 0.79 來回甩，停損賣在最低點 -$10.05。
+# 要求 Chainlink 60s TWAP 偏離開盤價至少這麼多才進場；沒有訊號時也不進（不再「有訊號才檢查」）。
+LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT = 0.02
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # BTC 5m 暫時在窗口最後 10 秒使用 Binance window delta 做隔離測試：不是在窗口一開始就靠模型優勢
@@ -395,6 +399,7 @@ for _asset in ASSETS:
             "favoriteMinPrice":      LATE_FAVORITE_MIN_PRICE,
             "favoriteMaxPrice":      LATE_FAVORITE_MAX_PRICE,
             "favoriteStopLossPrice": LATE_FAVORITE_STOP_LOSS_PRICE,
+            "favoriteMinSignalDeltaPct": LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT,
         })
         AB_VARIANTS.append({
             "id":                    "btc-inventory-rotation",
@@ -2424,14 +2429,23 @@ def _try_late_favorite_entry(
         )
         return
     signal = get_chainlink_twap_signal(variant["assetId"])
-    if signal and signal.get("opening"):
-        delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
-        if (delta_pct > 0 and side == "Down") or (delta_pct < 0 and side == "Up"):
-            record_window_diagnostic(
-                variant_id, slug, "favorite_signal_disagrees",
-                selectedSide=side, signalDeltaPct=delta_pct, **common,
-            )
-            return
+    if not signal or not signal.get("opening"):
+        record_window_diagnostic(variant_id, slug, "favorite_missing_chainlink_signal", selectedSide=side, **common)
+        return
+    delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
+    min_delta = float(variant.get("favoriteMinSignalDeltaPct", LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT))
+    if abs(delta_pct) < min_delta:
+        record_window_diagnostic(
+            variant_id, slug, "favorite_signal_delta_below_minimum",
+            selectedSide=side, signalDeltaPct=delta_pct, minimumSignalDeltaPct=min_delta, **common,
+        )
+        return
+    if (delta_pct > 0 and side == "Down") or (delta_pct < 0 and side == "Up"):
+        record_window_diagnostic(
+            variant_id, slug, "favorite_signal_disagrees",
+            selectedSide=side, signalDeltaPct=delta_pct, **common,
+        )
+        return
     if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
         record_window_diagnostic(
             variant_id, slug, "selected_book_not_fresh",
@@ -2462,12 +2476,13 @@ def _try_late_favorite_entry(
         return
     enter_position(variant_id, slug, side, fill, budget, None, None)
     st["position"]["signalSource"] = "late_favorite"
+    st["position"]["signalDeltaPct"] = delta_pct
     st["lateFavoriteWindowSlug"] = slug
     record_window_diagnostic(variant_id, slug, "favorite_entered", selectedSide=side, decisionPrice=fill["decisionPrice"], **common)
     save_sim_state()
     log.info(
         f"[SIM:{variant_id}] 最後 {remaining_seconds:.0f}s 買領先方 {side} ask=${ask:.2f} "
-        f"VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f}"
+        f"VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f} Δ={delta_pct:+.3f}%"
     )
 
 
@@ -4301,6 +4316,7 @@ def build_ab_leaderboard() -> list:
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
+            "favoriteMinSignalDeltaPct": v.get("favoriteMinSignalDeltaPct"),
             "mmMaxPairCost": v.get("mmMaxPairCost"),
             "mmFirstLegMaxPrice": v.get("mmFirstLegMaxPrice"),
             "mmRescueSeconds": v.get("mmRescueSeconds"),
