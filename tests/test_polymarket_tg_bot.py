@@ -61,7 +61,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertIn("favorite_stop_loss", text)
         self.assertNotIn("0.950", text)  # dry-run 那筆不列
 
-    def test_alerts_on_halt_new_real_trade_and_position(self):
+    def test_alerts_only_on_halt_and_mode_switch(self):
         prev = _live()
         cur = _live()
         cur["strategyState"] = dict(prev["strategyState"])
@@ -75,10 +75,12 @@ class TelegramBotTests(unittest.TestCase):
         ] + prev["strategyState"]["trades"]
         alerts = bot.diff_alerts(prev, cur)
         self.assertTrue(any("停機" in a for a in alerts))
-        self.assertTrue(any("真單進場" in a for a in alerts))
-        self.assertTrue(any("真單結算" in a and "+0.40" in a for a in alerts))
+        # 2026-09-14 依使用者要求：真單進場／結算不主動推播
+        self.assertFalse(any("真單進場" in a or "真單結算" in a for a in alerts))
         self.assertEqual(bot.diff_alerts(None, cur), [])
         self.assertEqual(bot.diff_alerts(cur, cur), [])
+        cur2 = dict(cur); cur2["strategyExecutionEnabled"] = False
+        self.assertTrue(any("DRY-RUN" in a for a in bot.diff_alerts(cur, cur2)))
 
     def test_sim_formatting_sorts_by_pnl(self):
         sim = {"abVariants": [

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Gravia weekly market scan every Monday 12:00 Asia/Taipei
+
+[Timer]
+OnCalendar=Mon *-*-* 12:00:00 Asia/Taipei
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

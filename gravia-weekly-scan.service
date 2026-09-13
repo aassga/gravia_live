@@ -1,0 +1,16 @@
+[Unit]
+Description=Gravia weekly Polymarket market scan (read-only, reports to Telegram)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_weekly_scan.py --hours 24
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

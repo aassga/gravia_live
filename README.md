@@ -196,6 +196,19 @@ sudo cp gravia-tg.service /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo systemctl enable --now gravia-tg.service
 ```
 
+### 每週市場掃描（`polymarket_weekly_scan.py`）
+
+每週一 12:00（台北）由 systemd timer 執行：抓最近 24 小時 BTC 5 分鐘所有窗口的公開成交，統計最多人使用的型態、
+買領先方各買價／進場秒數區間的勝率與每股淨利、全勤機器人的參數，存成 `reports/weekly/<日期>.json|.md`，
+再用規則式比對跟目前實盤設定的差異，附優缺點透過 Telegram 推給你——**只建議、不自動更改**。
+TG 指令 `/scan [小時]` 可隨時手動跑一次，`/report` 看最近一次結果。
+
+```bash
+sudo cp gravia-weekly-scan.service gravia-weekly-scan.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now gravia-weekly-scan.timer
+systemctl list-timers gravia-weekly-scan.timer
+```
+
 ## 常見問題
 
 **Q: 左上角顯示 DISCONNECTED**

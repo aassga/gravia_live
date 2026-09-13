@@ -4,7 +4,9 @@ Telegram 查詢機器人：回報實盤／模擬盤目前狀態與損益。純�
     - 只讀本機兩個狀態伺服器的 WebSocket 快照（實盤 8767、模擬 8766），跟網頁同一份資料。
     - 不碰 .env 私鑰、不下單、不改任何設定；沒有任何指令能改變策略行為。
     - 只回應 TG_ALLOWED_USER_IDS 白名單內的 Telegram user id，其他人一律不理。
-    - 主動推播（每 15 秒比對一次快照）：策略停機／恢復、真單進場、真單結算。
+    - 主動推播（每 15 秒比對一次快照）：只推「策略停機／恢復」與「REAL↔DRY-RUN 切換」；
+      真單進場／結算不推（2026-09-14 依使用者要求），要看用 /trades。
+    - /scan 手動觸發每週市場掃描（polymarket_weekly_scan.py），/report 看最近一次報告摘要。
 
 環境變數（.env）：
     TG_BOT_TOKEN          @BotFather 給的 token
@@ -151,9 +153,48 @@ HELP_TEXT = (
     "/pnl — 實盤損益、勝率、今日統計\n"
     "/trades [n] — 最近 n 筆真單（預設 10）\n"
     "/sim — 模擬盤各組損益\n"
+    "/scan [小時] — 立刻跑一次市場掃描（預設 24h，約 10～15 分鐘，完成後推播）\n"
+    "/report — 最近一次市場掃描的建議摘要\n"
     "/help — 這份說明\n"
-    "（純查詢，沒有任何會改設定或下單的指令）"
+    "（純查詢，沒有任何會改設定或下單的指令；主動推播只有停機／恢復與 REAL↔DRY-RUN 切換）"
 )
+
+REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "weekly")
+_scan_running = {"v": False}
+
+
+def latest_report_summary() -> str:
+    try:
+        files = sorted(f for f in os.listdir(REPORT_DIR) if f.endswith(".json"))
+    except FileNotFoundError:
+        files = []
+    if not files:
+        return "📈 還沒有掃描報告；用 /scan 產生一份，或等每週一 12:00（台北）的排程。"
+    with open(os.path.join(REPORT_DIR, files[-1]), encoding="utf-8") as f:
+        data = json.load(f)
+    lines = [f"📈 最近一次掃描：{files[-1][:-5]}（最近 {float(data.get('hours') or 0):.0f}h、{data['report']['windows']} 窗）"]
+    for k in data["report"]["kinds"][:4]:
+        wr = f" 勝率 {k['winRate']*100:.0f}%" if k.get("winRate") is not None else ""
+        lines.append(f"• {k['label']}：{k['share']*100:.0f}%{wr}")
+    for sug in data.get("suggestions", []):
+        lines.append(f"\n🔎 {sug['title']}\n{sug['finding']}\n👍 {sug['pros']}\n👎 {sug['cons']}")
+    return "\n".join(lines)
+
+
+async def run_scan_in_background(client: httpx.AsyncClient, chat_id: int, hours: float) -> None:
+    import sys
+    if _scan_running["v"]:
+        await tg_send(client, chat_id, "⏳ 已有一次掃描在跑，請稍候。")
+        return
+    _scan_running["v"] = True
+    try:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_weekly_scan.py")
+        proc = await asyncio.create_subprocess_exec(sys.executable, script, "--hours", str(hours))
+        code = await proc.wait()
+        if code != 0:
+            await tg_send(client, chat_id, f"⚠️ 掃描結束但回傳碼 {code}，請看 gravia-tg.service 日誌。")
+    finally:
+        _scan_running["v"] = False
 
 
 async def handle_command(text: str) -> str:
@@ -171,6 +212,8 @@ async def handle_command(text: str) -> str:
             return format_trades(await fetch_snapshot(LIVE_WS), max(1, min(limit, 30)))
         if cmd == "/sim":
             return format_sim(await fetch_snapshot(SIM_WS))
+        if cmd == "/report":
+            return latest_report_summary()
     except Exception as exc:  # 狀態伺服器沒開、逾時等
         log.warning(f"snapshot failed for {cmd}: {exc}")
         return f"⚠️ 讀不到狀態伺服器（{exc.__class__.__name__}），請確認 gravia-status.service / gravia.service 是否在跑。"
@@ -209,7 +252,15 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                 if not is_allowed(upd):
                     log.info(f"ignored message from user {((msg.get('from') or {}).get('id'))}")
                     continue
-                reply = await handle_command(msg.get("text") or "")
+                text = msg.get("text") or ""
+                parts = text.strip().split()
+                if parts and parts[0].split("@")[0].lower() == "/scan":
+                    hours = float(parts[1]) if len(parts) > 1 and parts[1].replace(".", "", 1).isdigit() else 24.0
+                    hours = max(1.0, min(hours, 72.0))
+                    await tg_send(client, chat_id, f"🔍 開始掃描最近 {hours:.0f} 小時，完成後會推播結果（約 10～15 分鐘）。")
+                    asyncio.get_running_loop().create_task(run_scan_in_background(client, chat_id, hours))
+                    continue
+                reply = await handle_command(text)
                 await tg_send(client, chat_id, reply)
         except Exception as exc:
             log.warning(f"getUpdates failed: {exc}")
@@ -228,21 +279,7 @@ def diff_alerts(prev: dict | None, cur: dict) -> list[str]:
         alerts.append(f"⛔ 策略自動停機：{cs.get('haltReason')}" if cs.get("halted") else "✅ 策略已恢復下單")
     if bool(cur.get("strategyExecutionEnabled")) != bool(prev.get("strategyExecutionEnabled")):
         alerts.append("🔴 實盤切換為 REAL 真實下單" if cur.get("strategyExecutionEnabled") else "🟡 實盤切換為 DRY-RUN")
-    ppos, cpos = ps.get("position"), cs.get("position")
-    if cpos and not cpos.get("dryRun", True) and (not ppos or ppos.get("entryOrderId") != cpos.get("entryOrderId")):
-        alerts.append(
-            f"🟢 真單進場 {cpos.get('side')} {float(cpos.get('shares') or 0):.2f} 股 @ {float(cpos.get('entryPrice') or 0):.3f}"
-            f"（{cpos.get('windowSlug')}）"
-        )
-    prev_trades = {(t.get("windowSlug"), t.get("exitTime")) for t in (ps.get("trades") or [])}
-    for t in reversed(cs.get("trades") or []):
-        if t.get("dryRun", True) or (t.get("windowSlug"), t.get("exitTime")) in prev_trades:
-            continue
-        alerts.append(
-            f"{'🟩' if float(t.get('pnlEstimate') or 0) > 0 else '🟥'} 真單結算 {t.get('side')} @{float(t.get('entryPrice') or 0):.3f}"
-            f" → {t.get('outcome')} {_money(t.get('pnlEstimate'))}"
-            f"{'（' + str(t.get('exitReason')) + '）' if t.get('exitReason') else ''}"
-        )
+    # 真單進場／結算不主動推播（2026-09-14 依使用者要求），要看請用 /trades。
     return alerts
 
 
