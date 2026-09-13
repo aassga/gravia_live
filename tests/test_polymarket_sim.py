@@ -260,6 +260,23 @@ class PolymarketSimulationTests(unittest.TestCase):
             sim.simulate_trading(vid, "btc-window-2", up, down, 200.0, None)
         self.assertEqual(sim.ab_states[vid]["position"]["shares"], 30.0)
 
+    def test_relaxed_lock_enters_where_mirror_is_blocked_by_tick_buffer(self):
+        # 兩邊 ask 0.90/0.08（加總 0.98）：實盤鏡像的判斷價各進位 +1 tick → 1.02 擋；
+        # 寬鬆鎖利四捨五入、無額外 tick → 0.98，扣費後每股淨利約 0.0085 >= 0.005 → 進。
+        # （用 0.49/0.49 不行：手續費在 0.5 附近最貴，兩腿各 ~1.75 分，0.98 的加總扣費後是負的。）
+        v = sim.AB_VARIANT_BY_ID["btc-relaxed-lock"]
+        self.assertTrue(v["simOnly"]); self.assertEqual(v["pairPriceBufferTicks"], 0)
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 5, "asks": [{"price": 0.90, "size": 20.0}], "bids": [{"price": 0.89, "size": 100}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 5, "asks": [{"price": 0.08, "size": 20.0}], "bids": [{"price": 0.07, "size": 100}]})
+        sim.simulate_trading("btc-live-lock", "btc-window", up, down, 200.0, None)
+        self.assertIsNone(sim.ab_states["btc-live-lock"]["position"])
+        sim.simulate_trading("btc-relaxed-lock", "btc-window", up, down, 200.0, None)
+        pos = sim.ab_states["btc-relaxed-lock"]["position"]
+        self.assertIsNotNone(pos); self.assertTrue(pos["hedged"])
+        # 預算 15% × $100 ≈ 14 股，深度 20 股足夠；股數受預算限制而非深度封頂（實盤鏡像會先按深度 50% 封頂）
+        self.assertEqual(pos["shares"], 14.0)
+        self.assertGreater(pos["lockedPnl"], 0)
+
     def test_btc_two_sided_maker_variant_uses_relaxed_parameters(self):
         v = sim.AB_VARIANT_BY_ID["btc-two-sided-maker"]
         self.assertTrue(v["marketMakerOnly"]); self.assertTrue(v["simOnly"])

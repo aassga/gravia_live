@@ -23,7 +23,7 @@ import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_UP
 from email.utils import parsedate_to_datetime
 from statistics import NormalDist, pstdev
 
@@ -204,6 +204,13 @@ PRICE_TRIGGERED_STABLE_SECONDS = 10.0
 # 2026-09-14 「跟單組 T」：照抄剖析出的吃單型錢包——開盤 60 秒後任何時候、領先方 ask >= 0.98 就買
 # 固定 100 股、不等穩定、不停損、每窗口一次。預期勝率 ~98%，每股毛利 1～2 分，驗證用。
 FOLLOW_TAKER_MIN_PRICE         = 0.98
+# 2026-09-14 「寬鬆鎖利」模擬組：24 小時 290 窗裡看得到的兩腿加總 <= 0.98 有 16 窗，但經「每腿進位 +1 tick」
+# 判斷價後只剩 1 窗。這組拿掉額外 tick、深度全吃（>= 5 股）、最低淨利 0.005、門檻 0.98、不做穩定／深度倍數
+# 檢查，先在模擬看能進幾筆、每筆賺多少；搬到實盤前必須先 DRY-RUN 驗證成交率。
+RELAXED_LOCK_MAX_SUM           = 0.98
+RELAXED_LOCK_BUFFER_TICKS      = 0
+RELAXED_LOCK_DEPTH_FRACTION    = 1.0
+RELAXED_LOCK_MIN_NET_PER_SHARE = 0.005
 FOLLOW_TAKER_FIXED_SHARES      = 100.0
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
@@ -413,6 +420,20 @@ for _asset in ASSETS:
             "favoriteMinPrice":      LATE_FAVORITE_MIN_PRICE,
             "favoriteMaxPrice":      LATE_FAVORITE_MAX_PRICE,
             "favoriteStopLossPrice": LATE_FAVORITE_STOP_LOSS_PRICE,
+        })
+        AB_VARIANTS.append({
+            "id":                    "btc-relaxed-lock",
+            "assetId":               "btc",
+            "label":                 (
+                f"BTC 寬鬆鎖利（≤{RELAXED_LOCK_MAX_SUM:.2f}、無額外 tick、深度全吃、淨利≥{RELAXED_LOCK_MIN_NET_PER_SHARE:.3f}）"
+            ),
+            "entryMaxPrice":         None,
+            "lockMaxSum":            RELAXED_LOCK_MAX_SUM,
+            "simOnly":               True,
+            "pairPriceBufferTicks":  RELAXED_LOCK_BUFFER_TICKS,
+            "pairPriceRoundNearest": True,
+            "pairDepthCapFraction":  RELAXED_LOCK_DEPTH_FRACTION,
+            "minNetLockPerShare":    RELAXED_LOCK_MIN_NET_PER_SHARE,
         })
         AB_VARIANTS.append({
             "id":                    "btc-follow-taker",
@@ -716,25 +737,32 @@ def taker_fee(shares: float, price: float) -> float:
     return fee if fee >= 0.00001 else 0.0
 
 
-def marketable_limit_price(book: dict, fill: dict, side: str) -> float:
-    """把含滑點的最差成交價向不利方向對齊 tick，作為模擬與實盤共用判斷價。"""
+def marketable_limit_price(
+    book: dict, fill: dict, side: str, buffer_ticks: int | None = None, round_nearest: bool = False
+) -> float:
+    """把含滑點的最差成交價向不利方向對齊 tick，作為模擬與實盤共用判斷價。
+    buffer_ticks 可覆寫預設的 SIM_PRICE_BUFFER_TICKS；round_nearest=True 改為四捨五入到最近 tick
+    （寬鬆鎖利模擬組用：ask 0.49 含 3bps 滑點是 0.49015，向上取整會直接變 0.50，等於白白多一個 tick）。"""
     tick_value = float(book.get("tickSize", 0.01) or 0.01)
     if not 0 < tick_value < 1:
         tick_value = 0.01
     tick = Decimal(str(tick_value))
     raw = Decimal(str(fill["worstPrice"]))
     is_buy = side.upper() == "BUY"
-    rounding = ROUND_UP if is_buy else ROUND_DOWN
+    rounding = ROUND_HALF_UP if round_nearest else (ROUND_UP if is_buy else ROUND_DOWN)
     units = (raw / tick).to_integral_value(rounding=rounding)
-    units += SIM_PRICE_BUFFER_TICKS if is_buy else -SIM_PRICE_BUFFER_TICKS
+    buffer = SIM_PRICE_BUFFER_TICKS if buffer_ticks is None else int(buffer_ticks)
+    units += buffer if is_buy else -buffer
     price = float(units * tick)
     return max(tick_value, min(1.0 - tick_value, price))
 
 
-def decision_fill(book: dict, fill: dict, side: str) -> dict:
+def decision_fill(
+    book: dict, fill: dict, side: str, buffer_ticks: int | None = None, round_nearest: bool = False
+) -> dict:
     """依最差限價建立保守成交假設；只供決策，實際/模擬損益仍用成交均價。"""
     shares = float(fill["shares"])
-    price = marketable_limit_price(book, fill, side)
+    price = marketable_limit_price(book, fill, side, buffer_ticks, round_nearest)
     notional = shares * price
     return {
         "observedVwap": float(fill["vwap"]),
@@ -1835,7 +1863,7 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
         return reject("pair_insufficient_budget", targetShares=shares, budgetUsd=budget)
     up_depth = sum(float(a.get("size", 0)) for a in (up_book.get("asks") or []))
     down_depth = sum(float(a.get("size", 0)) for a in (down_book.get("asks") or []))
-    depth_fraction = SIM_DEPTH_CAP_FRACTION
+    depth_fraction = float(variant.get("pairDepthCapFraction", SIM_DEPTH_CAP_FRACTION))
     if execution_safe:
         depth_fraction = min(depth_fraction, 1.0 / float(variant["minDepthMultiplier"]))
     depth_cap = min(up_depth, down_depth) * depth_fraction
@@ -1859,6 +1887,11 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
             upAskDepth=up_depth,
             downAskDepth=down_depth,
         )
+    buffer_override = variant.get("pairPriceBufferTicks")
+    if buffer_override is not None:
+        nearest = bool(variant.get("pairPriceRoundNearest"))
+        up_fill.update(decision_fill(up_book, up_fill, "BUY", int(buffer_override), nearest))
+        down_fill.update(decision_fill(down_book, down_fill, "BUY", int(buffer_override), nearest))
     price_sum = up_fill["decisionPrice"] + down_fill["decisionPrice"]
     total_decision_cost = (
         up_fill["decisionNotional"] + up_fill["decisionFee"]
@@ -1874,7 +1907,7 @@ def _try_direct_pair(variant_id: str, slug: str, up_book: dict, down_book: dict)
     }
     if price_sum > variant["lockMaxSum"]:
         return reject("pair_price_sum_above_maximum", **pair_details)
-    if net_per_share < SIM_MIN_NET_LOCK_PER_SHARE:
+    if net_per_share < float(variant.get("minNetLockPerShare", SIM_MIN_NET_LOCK_PER_SHARE)):
         return reject("pair_net_edge_below_minimum", **pair_details)
     if total_decision_cost > cash:
         return reject("pair_insufficient_cash", cashUsd=cash, **pair_details)
@@ -4374,6 +4407,9 @@ def build_ab_leaderboard() -> list:
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
             "favoriteStableSeconds": v.get("favoriteStableSeconds"),
             "favoriteFixedShares": v.get("favoriteFixedShares"),
+            "pairPriceBufferTicks": v.get("pairPriceBufferTicks"),
+            "pairDepthCapFraction": v.get("pairDepthCapFraction"),
+            "minNetLockPerShare": v.get("minNetLockPerShare"),
             "mmMaxPairCost": v.get("mmMaxPairCost"),
             "mmFirstLegMaxPrice": v.get("mmFirstLegMaxPrice"),
             "mmRescueSeconds": v.get("mmRescueSeconds"),
