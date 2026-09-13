@@ -390,7 +390,10 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-late-favorite",
             "assetId":               "btc",
-            "label":                 "BTC 最後 60 秒買領先方（≥0.90）",
+            "label":                 (
+                f"BTC 最後 {LATE_FAVORITE_WINDOW_SECONDS:.0f} 秒買領先方"
+                f"（{LATE_FAVORITE_MIN_PRICE:.2f}～{LATE_FAVORITE_MAX_PRICE:.2f}）"
+            ),
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateFavorite":          True,
