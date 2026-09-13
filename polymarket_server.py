@@ -463,6 +463,17 @@ for _asset in ASSETS:
             "lateDirectionMaxPrice": 0.92,
         })
 del _asset
+# 2026-09-14 依使用者要求從模擬盤移除 btc-main（0.40/0.95）、btc-loose（0.45/0.98）、
+# btc-binance-late-direction（Binance T-10s）。用環境變數過濾而不是刪定義：測試仍能用這些變體
+# 驗證共用的鎖利邏輯（tests/conftest.py 把清單設為空），歷史成交仍在 sqlite。
+_SIM_DISABLED_VARIANT_IDS = {
+    value.strip()
+    for value in os.environ.get(
+        "POLY_SIM_DISABLED_VARIANTS", "btc-main,btc-loose,btc-binance-late-direction"
+    ).split(",")
+    if value.strip()
+}
+AB_VARIANTS = [v for v in AB_VARIANTS if v["id"] not in _SIM_DISABLED_VARIANT_IDS]
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
 MARKET_MAKER_VARIANTS = [v for v in AB_VARIANTS if v.get("marketMakerOnly")]
 
