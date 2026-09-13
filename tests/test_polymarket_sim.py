@@ -243,6 +243,23 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading(vid, "btc-window-2", up, down, 190.0, None)   # 回來後要重新等 10 秒
         self.assertIsNone(sim.ab_states[vid]["position"])
 
+    def test_follow_taker_buys_fixed_shares_immediately_at_098(self):
+        vid = "btc-follow-taker"
+        v = sim.AB_VARIANT_BY_ID[vid]
+        self.assertTrue(v["simOnly"]); self.assertIsNone(v["favoriteStopLossPrice"]); self.assertEqual(v["favoriteFixedShares"], 100.0)
+        up, down = self._favorite_books(up_ask=0.97, down_ask=0.04)
+        sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)     # 0.97 < 0.98 不進
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        up, down = self._favorite_books(up_ask=0.98, down_ask=0.03)
+        sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)     # 看到就買，不等穩定
+        pos = sim.ab_states[vid]["position"]
+        self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up"); self.assertEqual(pos["shares"], 100.0)
+        # 現金不夠 100 股時退而買得起的股數
+        sim.ab_states[vid]["position"] = None; sim.ab_states[vid]["lateFavoriteWindowSlug"] = None
+        with patch.object(sim, "compute_cash_and_portfolio", return_value=(30.0, 30.0)):
+            sim.simulate_trading(vid, "btc-window-2", up, down, 200.0, None)
+        self.assertEqual(sim.ab_states[vid]["position"]["shares"], 30.0)
+
     def test_btc_two_sided_maker_variant_uses_relaxed_parameters(self):
         v = sim.AB_VARIANT_BY_ID["btc-two-sided-maker"]
         self.assertTrue(v["marketMakerOnly"]); self.assertTrue(v["simOnly"])

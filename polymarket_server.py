@@ -201,6 +201,10 @@ PRICE_TRIGGERED_WINDOW_SECONDS = 240.0
 PRICE_TRIGGERED_MIN_PRICE      = 0.97
 PRICE_TRIGGERED_MAX_PRICE      = 0.99
 PRICE_TRIGGERED_STABLE_SECONDS = 10.0
+# 2026-09-14 「跟單組 T」：照抄剖析出的吃單型錢包——開盤 60 秒後任何時候、領先方 ask >= 0.98 就買
+# 固定 100 股、不等穩定、不停損、每窗口一次。預期勝率 ~98%，每股毛利 1～2 分，驗證用。
+FOLLOW_TAKER_MIN_PRICE         = 0.98
+FOLLOW_TAKER_FIXED_SHARES      = 100.0
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # BTC 5m 暫時在窗口最後 10 秒使用 Binance window delta 做隔離測試：不是在窗口一開始就靠模型優勢
@@ -409,6 +413,24 @@ for _asset in ASSETS:
             "favoriteMinPrice":      LATE_FAVORITE_MIN_PRICE,
             "favoriteMaxPrice":      LATE_FAVORITE_MAX_PRICE,
             "favoriteStopLossPrice": LATE_FAVORITE_STOP_LOSS_PRICE,
+        })
+        AB_VARIANTS.append({
+            "id":                    "btc-follow-taker",
+            "assetId":               "btc",
+            "label":                 (
+                f"BTC 跟單 T（≥{FOLLOW_TAKER_MIN_PRICE:.2f} 即買、固定 {FOLLOW_TAKER_FIXED_SHARES:.0f} 股、不停損）"
+            ),
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateFavorite":          True,
+            "simOnly":               True,
+            "favoriteWindowSeconds": PRICE_TRIGGERED_WINDOW_SECONDS,
+            "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
+            "favoriteMinPrice":      FOLLOW_TAKER_MIN_PRICE,
+            "favoriteMaxPrice":      PRICE_TRIGGERED_MAX_PRICE,
+            "favoriteStopLossPrice": None,
+            "favoriteStableSeconds": 0.0,
+            "favoriteFixedShares":   FOLLOW_TAKER_FIXED_SHARES,
         })
         AB_VARIANTS.append({
             "id":                    "btc-price-triggered-favorite",
@@ -2467,12 +2489,21 @@ def _try_late_favorite_entry(
             selectedSide=side, dataGuardReason=_simulation_single_book_guard_reason(book), **common,
         )
         return
-    shares, budget = _target_order_size(variant_id)
-    if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
-        record_window_diagnostic(variant_id, slug, "insufficient_budget", targetShares=shares, budgetUsd=budget, **common)
-        return
-    # 領先方單價高，同樣預算買到的股數少；用預算 / 買價換算，不沿用兩腿的股數。
-    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    fixed_shares = variant.get("favoriteFixedShares")
+    if fixed_shares:
+        # 固定股數（跟單組）：不按餘額比例；現金不夠買固定股數時退而買得起的整數股，
+        # 避免一次虧損後整組停擺。
+        cash, _ = compute_cash_and_portfolio(variant_id)
+        affordable = float(Decimal(str(max(0.0, cash) / ask)).to_integral_value(rounding=ROUND_DOWN))
+        shares = min(float(fixed_shares), affordable)
+        budget = shares * ask
+    else:
+        shares, budget = _target_order_size(variant_id)
+        if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+            record_window_diagnostic(variant_id, slug, "insufficient_budget", targetShares=shares, budgetUsd=budget, **common)
+            return
+        # 領先方單價高，同樣預算買到的股數少；用預算 / 買價換算，不沿用兩腿的股數。
+        shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
     if shares < float(book.get("minOrderSize", 1) or 1):
         record_window_diagnostic(
             variant_id, slug, "below_minimum_shares",
@@ -4329,6 +4360,7 @@ def build_ab_leaderboard() -> list:
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
             "favoriteStableSeconds": v.get("favoriteStableSeconds"),
+            "favoriteFixedShares": v.get("favoriteFixedShares"),
             "mmMaxPairCost": v.get("mmMaxPairCost"),
             "mmFirstLegMaxPrice": v.get("mmFirstLegMaxPrice"),
             "mmRescueSeconds": v.get("mmRescueSeconds"),
