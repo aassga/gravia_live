@@ -70,6 +70,36 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
 .dn-b{background:#ff3a5c22;color:#ff3a5c;border:1px solid #ff3a5c44;border-radius:2px;padding:0 4px;font-size:10px;}
 .log-entry{animation:fadeIn .3s ease;}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:translateY(0)}}
+/* ── 科幻感 UP / DOWN 報價卡 ─────────────────────────────────────────── */
+.hud{--c:#00ff9d;--c2:#00ff9d55;--c3:#00ff9d12;position:relative;overflow:hidden;
+  background:radial-gradient(120% 140% at 0% 0%,var(--c3),transparent 60%),
+             repeating-linear-gradient(0deg,transparent 0 3px,#ffffff05 3px 4px),#0a0c0b;
+  border:1px solid var(--c2);border-radius:3px;padding:10px 12px 12px;isolation:isolate;}
+.hud.red{--c:#ff3a5c;--c2:#ff3a5c55;--c3:#ff3a5c12;background:radial-gradient(120% 140% at 100% 0%,var(--c3),transparent 60%),
+             repeating-linear-gradient(0deg,transparent 0 3px,#ffffff05 3px 4px),#0c0a0b;}
+.hud::before,.hud::after{content:"";position:absolute;width:14px;height:14px;pointer-events:none;
+  border:2px solid var(--c);}
+.hud::before{top:-1px;left:-1px;border-right:0;border-bottom:0;}
+.hud::after{bottom:-1px;right:-1px;border-left:0;border-top:0;}
+.hud .corner-tr,.hud .corner-bl{position:absolute;width:14px;height:14px;border:2px solid var(--c);pointer-events:none;}
+.hud .corner-tr{top:-1px;right:-1px;border-left:0;border-bottom:0;}
+.hud .corner-bl{bottom:-1px;left:-1px;border-right:0;border-top:0;}
+.hud .sweep{position:absolute;left:0;right:0;height:38%;top:-40%;pointer-events:none;
+  background:linear-gradient(180deg,transparent,var(--c3),transparent);animation:hudSweep 4.5s linear infinite;}
+@keyframes hudSweep{0%{top:-40%}100%{top:110%}}
+.hud .hud-lbl{font-family:'Share Tech Mono';font-size:11px;letter-spacing:3px;color:var(--c);text-transform:uppercase;
+  display:flex;align-items:center;gap:8px;opacity:.9;}
+.hud .hud-lbl::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--c2),transparent);}
+.hud .hud-price{font-size:38px;font-weight:700;letter-spacing:-1px;line-height:1.1;margin-top:4px;color:#fff;
+  text-shadow:0 0 6px var(--c2),0 0 18px var(--c3);font-variant-numeric:tabular-nums;}
+.hud .hud-price.tick{animation:hudTick .35s ease-out;}
+@keyframes hudTick{0%{text-shadow:0 0 10px var(--c),0 0 30px var(--c);color:var(--c)}100%{text-shadow:0 0 6px var(--c2),0 0 18px var(--c3);color:#fff}}
+.hud .hud-sub{font-size:10px;color:#6a6a6a;margin-top:6px;letter-spacing:.5px;}
+.hud .hud-sub b{color:var(--c);font-weight:600;}
+.hud .hud-bar{position:relative;height:3px;margin-top:8px;background:#ffffff10;border-radius:2px;overflow:hidden;}
+.hud .hud-bar i{position:absolute;left:0;top:0;bottom:0;width:0;background:linear-gradient(90deg,var(--c2),var(--c));
+  box-shadow:0 0 8px var(--c);transition:width .6s cubic-bezier(.2,.8,.2,1);}
+.hud .hud-ticks{position:absolute;left:0;right:0;top:0;bottom:0;background:repeating-linear-gradient(90deg,transparent 0 9%,#0008 9% 10%);}
 </style>
 </head>
 <body>
@@ -123,17 +153,21 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   <div class="row1">
 
     <!-- UP -->
-    <div class="panel panel-g">
-      <div class="lbl green" style="margin-bottom:4px;">◆ UP</div>
-      <div id="up-price" style="font-size:34px;font-weight:700;letter-spacing:-1px;">—</div>
-      <div style="font-size:10px;color:#444;margin-top:4px;">隱含機率 ≈ <span id="up-prob" class="green">—</span></div>
+    <div class="hud">
+      <span class="corner-tr"></span><span class="corner-bl"></span><span class="sweep"></span>
+      <div class="hud-lbl">◆ UP</div>
+      <div id="up-price" class="hud-price">—</div>
+      <div class="hud-sub">隱含機率 ≈ <b id="up-prob">—</b></div>
+      <div class="hud-bar"><i id="up-bar"></i><span class="hud-ticks"></span></div>
     </div>
 
     <!-- DOWN -->
-    <div class="panel panel-r">
-      <div class="lbl red" style="margin-bottom:4px;">◆ DOWN</div>
-      <div id="down-price" style="font-size:34px;font-weight:700;letter-spacing:-1px;">—</div>
-      <div style="font-size:10px;color:#444;margin-top:4px;">隱含機率 ≈ <span id="down-prob" class="red">—</span></div>
+    <div class="hud red">
+      <span class="corner-tr"></span><span class="corner-bl"></span><span class="sweep"></span>
+      <div class="hud-lbl">◆ DOWN</div>
+      <div id="down-price" class="hud-price">—</div>
+      <div class="hud-sub">隱含機率 ≈ <b id="down-prob">—</b></div>
+      <div class="hud-bar"><i id="down-bar"></i><span class="hud-ticks"></span></div>
     </div>
 
     <!-- ORDER BOOKS -->
@@ -363,14 +397,18 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       }
     }
 
+    const setHud=(id,price,probText)=>{
+      const el=$(id+'-price'); const txt=fmtUSD(price);
+      if(el.textContent!==txt){ el.textContent=txt; el.classList.remove('tick'); void el.offsetWidth; el.classList.add('tick'); }
+      $(id+'-prob').textContent=probText;
+      $(id+'-bar').style.width=Math.max(0,Math.min(100,price*100)).toFixed(1)+'%';
+    };
     if(typeof a.upPrice==='number'){
-      $('up-price').textContent=fmtUSD(a.upPrice);
       const fair=a.fair&&typeof a.fair.fairUp==='number' ? ` · 模型 ${(a.fair.fairUp*100).toFixed(1)}%` : '';
-      $('up-prob').textContent='市場 '+(a.upPrice*100).toFixed(1)+'%'+fair;
+      setHud('up',a.upPrice,'市場 '+(a.upPrice*100).toFixed(1)+'%'+fair);
     }
     if(typeof a.downPrice==='number'){
-      $('down-price').textContent=fmtUSD(a.downPrice);
-      $('down-prob').textContent=(a.downPrice*100).toFixed(1)+'%';
+      setHud('down',a.downPrice,(a.downPrice*100).toFixed(1)+'%');
     }
 
     if(a.upBook) renderBook('up',a.upBook);
