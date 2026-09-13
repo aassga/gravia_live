@@ -570,7 +570,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
         return `<div style="display:grid;grid-template-columns:58px minmax(0,1fr) 84px 60px;align-items:center;padding:2px 0;border-bottom:1px solid #ffffff08;font-size:9.5px;gap:6px;font-variant-numeric:tabular-nums;">
           <span style="color:#9a9a9a;">${dt}</span>
           <span class="${t.hedged?'up-b':(win?'up-b':'dn-b')}" style="font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${dir}</span>
-          <span style="color:#888;text-align:right;white-space:nowrap;">下注 $${(t.stakeUsd||0).toFixed(2)}</span>
+          <span style="color:#888;text-align:left;white-space:nowrap;">下注 $${(t.stakeUsd||0).toFixed(2)}</span>
           <span style="color:${win?'#00ff9d':'#ff3a5c'};font-weight:600;text-align:right;white-space:nowrap;">${fmtMoney(t.pnl)}</span>
         </div>`;
       }).join(''):'<div style="color:#444;padding:4px 0;font-size:9.5px;">尚無交易</div>';
