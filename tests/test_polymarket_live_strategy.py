@@ -840,6 +840,20 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan["side"], "Down")
             self.assertLessEqual(plan["limitPrice"], 0.60)
 
+    def test_dry_run_trades_are_listed_but_not_counted_in_totals(self):
+        pos = {"windowSlug": "btc-window", "side": "Up", "shares": 5.0, "entryPrice": 0.96, "stakeUsd": 4.8,
+               "entryFee": 0.01, "hedged": False, "dryRun": True, "entryTime": time.time()}
+        strategy._record_trade(pos, 0.2, "Up", "directional")
+        self.assertEqual(len(strategy.live_state["trades"]), 1)
+        self.assertEqual(strategy.live_state["totalTrades"], 0)
+        self.assertEqual(strategy.live_state["totalPnlEstimate"], 0.0)
+        self.assertEqual(strategy.live_state.get("winningTrades", 0), 0)
+        real = dict(pos, dryRun=False)
+        strategy._record_trade(real, -1.5, "Down", "directional")
+        self.assertEqual(strategy.live_state["totalTrades"], 1)
+        self.assertEqual(strategy.live_state["losingTrades"], 1)
+        self.assertAlmostEqual(strategy.live_state["totalPnlEstimate"], -1.5)
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (

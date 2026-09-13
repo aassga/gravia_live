@@ -92,7 +92,7 @@ def _backfill_win_loss(state: dict) -> None:
     """策略狀態檔在加入 winningTrades／losingTrades 之前就有的舊交易沒有被計數；
     這裡用狀態檔保留的最近交易（最多 100 筆）補算，讓 Dashboard 勝率涵蓋歷史。
     只在計數器缺少或明顯落後於交易清單時補算，避免蓋掉策略程式自己維護的數字。"""
-    trades = state.get("trades") or []
+    trades = [t for t in (state.get("trades") or []) if not t.get("dryRun", True)]  # DRY-RUN 不計入統計
     wins = sum(1 for t in trades if float(t.get("pnlEstimate") or 0) > 0)
     losses = sum(1 for t in trades if float(t.get("pnlEstimate") or 0) < 0)
     if state.get("winningTrades") is None or state.get("losingTrades") is None or (

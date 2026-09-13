@@ -1496,7 +1496,8 @@ async def fetch_outcome(session: aiohttp.ClientSession, slug: str) -> str | None
 # 2026-09-14 依使用者要求取消模擬盤每注硬上限（原 25），與實盤 .env 的 POLY_MAX_PAIR_BUDGET_USD=100000 一致；
 # 每注只受 stakePct × (現金 − 保留) 限制。
 SIM_MAX_PAIR_BUDGET_USD  = 100000.0
-SIM_MIN_CASH_RESERVE_USD = 5.0
+# 2026-09-14 依使用者要求移除現金保留（原 5.0）；實盤 .env 同步 POLY_MIN_CASH_RESERVE_USD=0。
+SIM_MIN_CASH_RESERVE_USD = 0.0
 
 
 def target_pair_order(

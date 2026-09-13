@@ -555,6 +555,10 @@ def _record_trade(pos: dict, pnl: float, outcome: str, trade_type: str) -> None:
     }
     live_state["trades"].insert(0, trade)
     live_state["trades"] = live_state["trades"][:100]
+    if trade["dryRun"]:
+        # 2026-09-14 依使用者要求：DRY-RUN 交易只留在清單供觀察（標 DRY），不計入任何累計統計。
+        _apply_first_trade_guard(trade)
+        return
     live_state["totalPnlEstimate"] += pnl
     live_state["totalFeesEstimate"] += fees
     live_state["totalTrades"] += 1
