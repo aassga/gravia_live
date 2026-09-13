@@ -1037,9 +1037,8 @@ def _late_favorite_plan(
     if not plan:
         diag("favorite_insufficient_depth", selectedSide=side, targetShares=shares)
         return None
-    if plan["limitPrice"] > LATE_FAVORITE_MAX_PRICE:
-        diag("favorite_price_above_maximum", selectedSide=side, directionLimitPrice=plan["limitPrice"], favoriteMaxPrice=LATE_FAVORITE_MAX_PRICE)
-        return None
+    # 2026-09-14 依使用者要求：上限只比對看得到的 ask（上面已檢查），不再用判斷價二次過濾；
+    # FOK 限價仍是判斷價，最差成交價可能到 max + 2 tick。
     if plan["riskNotional"] + plan["fee"] > cash:
         diag("favorite_insufficient_cash", cashUsd=cash, totalRiskCost=plan["riskNotional"] + plan["fee"])
         return None

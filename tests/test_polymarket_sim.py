@@ -159,7 +159,7 @@ class PolymarketSimulationTests(unittest.TestCase):
             self.assertFalse(sim._try_single_leg_entry("btc-historical-hybrid", "btc-window", up_book, down_book, fair))
         self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
 
-    def _favorite_books(self, up_ask=0.95, down_ask=0.05):
+    def _favorite_books(self, up_ask=0.96, down_ask=0.05):
         up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
             "asks": [{"price": up_ask, "size": 500.0}], "bids": [{"price": round(up_ask - 0.01, 2), "size": 500.0}]})
         down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
@@ -167,7 +167,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         return up, down
 
     def test_late_favorite_buys_leader_in_last_minute_and_holds(self):
-        # 最後 60 秒、Up 賣 0.95（>= 0.95、判斷價 0.97 <= 0.97）→ 買 Up，抱到結算；不看 Chainlink（反向也進）
+        # 最後 60 秒、Up 賣 0.96（ask 在 0.95～0.97 內；限價可到 0.98）→ 買 Up，抱到結算；不看 Chainlink（反向也進）
         self._set_chainlink_signal(opening=100.0, current=99.7)
         up, down = self._favorite_books()
         sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
@@ -196,9 +196,9 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
 
     def test_late_favorite_stop_loss_sells_when_leader_flips(self):
-        # 買 Down 0.95 後翻面。停損 0.85：Down 買盤掉到 0.80 → 賣掉；掉到 0.88 → 不賣
+        # 買 Down 0.96 後翻面。停損 0.85：Down 買盤掉到 0.80 → 賣掉；掉到 0.88 → 不賣
         self._set_chainlink_signal(opening=100.0, current=99.7)
-        up, down = self._favorite_books(up_ask=0.05, down_ask=0.95)
+        up, down = self._favorite_books(up_ask=0.05, down_ask=0.96)
         sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
         self.assertEqual(sim.ab_states["btc-late-favorite"]["position"]["side"], "Down")
         up2, down2 = self._favorite_books(up_ask=0.10, down_ask=0.89)

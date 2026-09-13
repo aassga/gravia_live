@@ -185,7 +185,7 @@ LATE_FAVORITE_MIN_REMAINING    = 5.0    # 剩餘 < 5 秒不進（結算前交易
 # 0.95～0.98 勝率 99.1% 且每股淨利反而較高（+0.036）；0.98 以上利潤薄到被 2% 的虧損吃掉。
 LATE_FAVORITE_MIN_PRICE        = 0.95   # 領先方買價下限
 # 2026-09-14 依使用者要求 0.99 → 0.97：0.99 那一格每股只賺 1 分、賠 99 分，實盤 51 筆有 8 筆買在 0.99。
-LATE_FAVORITE_MAX_PRICE        = 0.97   # 判斷價（VWAP + 1 tick）超過就沒利潤空間
+LATE_FAVORITE_MAX_PRICE        = 0.97   # 看得到的 ask 超過就沒利潤空間（比對 ask，不比對判斷價）
 # 2026-09-12 12:33 那筆：進場 Down 0.90 後 40 秒內 0.95 → 0.57 → 0.08（3 秒內翻面），整注歸零 -$15.41，
 # 把前面 8 筆各賺 $1.4 的利潤全吃掉。停損：持有腿的保守可賣價 <= 這個價就賣（每個 tick 檢查）。
 # 翻面通常只有 1～3 秒的窗口可以賣在 0.4～0.6，所以這個停損只救得到一部分，不是保證。
@@ -2455,12 +2455,9 @@ def _try_late_favorite_entry(
     if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
         record_window_diagnostic(variant_id, slug, "insufficient_ask_depth", targetShares=shares, **common)
         return
-    if fill["decisionPrice"] > max_price:
-        record_window_diagnostic(
-            variant_id, slug, "favorite_price_above_maximum",
-            selectedSide=side, decisionPrice=fill["decisionPrice"], favoriteMaxPrice=max_price, **common,
-        )
-        return
+    # 2026-09-14 依使用者要求：上限只比對看得到的 ask（上面已檢查），不再用判斷價（VWAP 進位 + 1 tick）
+    # 二次過濾——否則 ask 0.96 的判斷價 0.98 會被 0.97 擋掉，只剩 ask 剛好 0.95 能進。
+    # 送出的 FOK 限價仍是判斷價，最差成交價可能到 max + 2 tick。
     enter_position(variant_id, slug, side, fill, budget, None, None)
     st["position"]["signalSource"] = "late_favorite"
     st["position"]["signalDeltaPct"] = delta_pct
