@@ -768,7 +768,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(pos)
             self.assertEqual(pos["side"], "Up")
             self.assertEqual(pos["strategy"], "late_favorite")
-            self.assertLessEqual(pos["entryLimitPrice"], 0.98)
+            self.assertLessEqual(pos["entryLimitPrice"], 0.97)
             self.assertEqual(pos["shares"], float(int(pos["shares"])))
             self.assertEqual(strategy.live_state["lateFavoriteWindowSlug"], "btc-window")
             # 對邊變便宜也不補腿、不提早出場

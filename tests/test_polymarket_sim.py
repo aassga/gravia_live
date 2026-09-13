@@ -191,10 +191,8 @@ class PolymarketSimulationTests(unittest.TestCase):
         up2, down2 = self._favorite_books(up_ask=0.92, down_ask=0.09)                    # 沒有 >= 0.95 的領先方
         sim.simulate_trading("btc-late-favorite", "btc-window", up2, down2, 40.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-        # 上限現在是 0.99（tick 上限），改用較低的變體上限驗證「判斷價超過上限就不進」仍有效
-        up3, down3 = self._favorite_books(up_ask=0.99, down_ask=0.02)
-        with patch.dict(sim.AB_VARIANT_BY_ID["btc-late-favorite"], {"favoriteMaxPrice": 0.97}):
-            sim.simulate_trading("btc-late-favorite", "btc-window", up3, down3, 40.0, None)
+        up3, down3 = self._favorite_books(up_ask=0.98, down_ask=0.03)                    # 判斷價 0.99 > 0.97 沒利潤
+        sim.simulate_trading("btc-late-favorite", "btc-window", up3, down3, 40.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
 
     def test_late_favorite_stop_loss_sells_when_leader_flips(self):
