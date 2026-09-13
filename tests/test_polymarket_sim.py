@@ -159,7 +159,7 @@ class PolymarketSimulationTests(unittest.TestCase):
             self.assertFalse(sim._try_single_leg_entry("btc-historical-hybrid", "btc-window", up_book, down_book, fair))
         self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
 
-    def _favorite_books(self, up_ask=0.92, down_ask=0.09):
+    def _favorite_books(self, up_ask=0.96, down_ask=0.05):
         up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
             "asks": [{"price": up_ask, "size": 500.0}], "bids": [{"price": round(up_ask - 0.01, 2), "size": 500.0}]})
         down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
@@ -188,10 +188,10 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
         sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 3.0, None)     # 剩不到 5 秒
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-        up2, down2 = self._favorite_books(up_ask=0.70, down_ask=0.31)                    # 沒有 >= 0.90 的領先方
+        up2, down2 = self._favorite_books(up_ask=0.92, down_ask=0.09)                    # 沒有 >= 0.95 的領先方
         sim.simulate_trading("btc-late-favorite", "btc-window", up2, down2, 40.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-        up3, down3 = self._favorite_books(up_ask=0.99, down_ask=0.02)                    # 超過 0.97 沒利潤
+        up3, down3 = self._favorite_books(up_ask=0.99, down_ask=0.02)                    # 判斷價超過 0.98 沒利潤
         sim.simulate_trading("btc-late-favorite", "btc-window", up3, down3, 40.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
 
@@ -220,7 +220,7 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_late_favorite_stop_loss_sells_when_leader_flips(self):
         # 12:33 那筆：買 Down 0.90 後翻面。停損 0.85：Down 買盤掉到 0.80 → 賣掉；掉到 0.88 → 不賣
         self._set_chainlink_signal(opening=100.0, current=99.7)
-        up, down = self._favorite_books(up_ask=0.09, down_ask=0.92)
+        up, down = self._favorite_books(up_ask=0.05, down_ask=0.96)
         sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
         self.assertEqual(sim.ab_states["btc-late-favorite"]["position"]["side"], "Down")
         up2, down2 = self._favorite_books(up_ask=0.10, down_ask=0.89)

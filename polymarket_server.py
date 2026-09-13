@@ -181,8 +181,10 @@ BTC_MAKER_FIRST_LEG_MAX_PRICE  = 0.70
 BTC_MAKER_RESCUE_SECONDS       = 45.0
 LATE_FAVORITE_WINDOW_SECONDS   = 60.0   # 剩餘 <= 60 秒才看
 LATE_FAVORITE_MIN_REMAINING    = 5.0    # 剩餘 < 5 秒不進（結算前交易所常關單）
-LATE_FAVORITE_MIN_PRICE        = 0.90   # 領先方買價下限
-LATE_FAVORITE_MAX_PRICE        = 0.97   # 超過就沒利潤空間
+# 2026-09-13 依 12 小時公開成交掃描（223 個錢包、6,305 筆）改買價區間：0.88～0.92 勝率只有 89.1%、
+# 0.95～0.98 勝率 99.1% 且每股淨利反而較高（+0.036）；0.98 以上利潤薄到被 2% 的虧損吃掉。
+LATE_FAVORITE_MIN_PRICE        = 0.95   # 領先方買價下限
+LATE_FAVORITE_MAX_PRICE        = 0.98   # 判斷價（VWAP + 1 tick）超過就沒利潤空間
 # 2026-09-12 12:33 那筆：進場 Down 0.90 後 40 秒內 0.95 → 0.57 → 0.08（3 秒內翻面），整注歸零 -$15.41，
 # 把前面 8 筆各賺 $1.4 的利潤全吃掉。停損：持有腿的保守可賣價 <= 這個價就賣（每個 tick 檢查）。
 # 翻面通常只有 1～3 秒的窗口可以賣在 0.4～0.6，所以這個停損只救得到一部分，不是保證。

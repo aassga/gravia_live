@@ -745,7 +745,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.45, "fairDown": 0.55})
             self.assertIsNotNone(strategy.live_state["position"])
 
-    def _favorite_books(self, up_ask=0.92, down_ask=0.09):
+    def _favorite_books(self, up_ask=0.96, down_ask=0.05):
         up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
             "asks": [{"price": up_ask, "size": 500}], "bids": [{"price": round(up_ask - 0.01, 2), "size": 500}]})
         down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
@@ -768,7 +768,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(pos)
             self.assertEqual(pos["side"], "Up")
             self.assertEqual(pos["strategy"], "late_favorite")
-            self.assertLessEqual(pos["entryLimitPrice"], 0.97)
+            self.assertLessEqual(pos["entryLimitPrice"], 0.98)
             self.assertEqual(pos["shares"], float(int(pos["shares"])))
             self.assertEqual(strategy.live_state["lateFavoriteWindowSlug"], "btc-window")
             # 對邊變便宜也不補腿、不提早出場
@@ -802,7 +802,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             await strategy.evaluate_and_act("btc-window", None, 120.0, None)          # 還沒到最後 60 秒
             self.assertIsNone(strategy.live_state["position"])
             strategy.live_state["lastActionAt"] = 0
-            up2, down2 = self._favorite_books(up_ask=0.70, down_ask=0.31)              # 沒有領先方
+            up2, down2 = self._favorite_books(up_ask=0.92, down_ask=0.09)              # 沒有 >= 0.95 的領先方
             strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up2, down2
             await strategy.evaluate_and_act("btc-window", None, 40.0, None)
             self.assertIsNone(strategy.live_state["position"])

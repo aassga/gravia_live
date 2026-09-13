@@ -130,8 +130,8 @@ ENABLE_LATE_DIRECTION = _LATE_DIRECTION_REQUESTED and bool(_LIVE_VARIANT.get("la
 LATE_FAVORITE_ENABLED = bool(_LIVE_VARIANT.get("lateFavorite"))
 LATE_FAVORITE_WINDOW_SECONDS = float(_LIVE_VARIANT.get("favoriteWindowSeconds", 60.0))
 LATE_FAVORITE_MIN_REMAINING = float(_LIVE_VARIANT.get("favoriteMinRemaining", 5.0))
-LATE_FAVORITE_MIN_PRICE = float(_LIVE_VARIANT.get("favoriteMinPrice", 0.90))
-LATE_FAVORITE_MAX_PRICE = float(_LIVE_VARIANT.get("favoriteMaxPrice", 0.97))
+LATE_FAVORITE_MIN_PRICE = float(_LIVE_VARIANT.get("favoriteMinPrice", 0.95))
+LATE_FAVORITE_MAX_PRICE = float(_LIVE_VARIANT.get("favoriteMaxPrice", 0.98))
 # Chainlink 60s TWAP 偏離開盤價的最低幅度；沒有訊號或偏離不足都不進（09:19 那筆 Δ=+0.002% 就是反例）。
 LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT = float(
     os.environ.get("POLY_LIVE_FAVORITE_MIN_DELTA_PCT", _LIVE_VARIANT.get("favoriteMinSignalDeltaPct", 0.005))
