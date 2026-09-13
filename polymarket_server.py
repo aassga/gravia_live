@@ -258,7 +258,9 @@ BTC_15M_DUMP_MIN_CASH_RESERVE_USD   = 5.0
 # 只是比較訊號來源是否影響下單率；Binance 並非結算來源，結果可能與市場最終判定不同。
 CHAINLINK_RTDS_URL = "wss://ws-live-data.polymarket.com"
 CHAINLINK_TWAP_WINDOW_SECONDS = 60
-CHAINLINK_TWAP_MAX_AGE_SECONDS = 2.5
+# 2026-09-14 依使用者要求 2.5 → 4.0：RTDS 觀測每秒一筆但訊息晚 1.7～2.3 秒到，2.5s 讓歷史混合的 T-10s
+# 方向判斷約三分之一時間被判「沒訊號」（48h 內 328k 次 missing_chainlink_signal）。真正斷線仍會判無訊號。
+CHAINLINK_TWAP_MAX_AGE_SECONDS = 4.0
 CHAINLINK_BOUNDARY_TOLERANCE_MS = 250
 _chainlink_twap_history: deque[tuple[int, float]] = deque(maxlen=1200)
 _chainlink_twap_latest: dict = {}
@@ -2446,6 +2448,12 @@ def _try_late_direction_entry(
     if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
         record_window_diagnostic(variant_id, slug, "insufficient_budget", targetShares=shares, budgetUsd=budget, **common)
         return
+    # 2026-09-14 依使用者要求：最後幾秒的 book 很薄，目標股數吃不滿就改買「深度允許的整數股」
+    # （仍須 >= 最小單量），不再全有全無。實盤 _late_direction_plan 同步。
+    visible_depth = float(Decimal(str(selected_depth)).to_integral_value(rounding=ROUND_DOWN))
+    if 0 < visible_depth < shares:
+        record_window_diagnostic(variant_id, slug, "direction_size_capped_by_depth", targetShares=shares, cappedShares=visible_depth, **common)
+        shares = visible_depth
     fill = simulate_buy_fill(book, shares)
     if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
         record_window_diagnostic(variant_id, slug, "insufficient_ask_depth", targetShares=shares, budgetUsd=budget, **common)

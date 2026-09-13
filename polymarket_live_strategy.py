@@ -800,10 +800,16 @@ def _late_direction_plan(
                 dataGuardReason=sim._simulation_single_book_guard_reason(book),
             )
         return None
-    # 跟模擬版對齊：不把股數縮到「當下看得到的深度」——真正的 FOK 語意是要嘛整筆用
-    # 目標股數成交、要嘛深度不夠就整筆不成交，不會自動改成「有多少吃多少」。這裡故意
-    # 不呼叫 _ask_depth 縮股，讓 _buy_plan 內部的 simulate_buy_fill 用同一套全有全無
-    # 判斷，深度不足就直接放棄這次機會，跟模擬版的驗證結果一致。
+    # 2026-09-14 依使用者要求（跟模擬版 _try_late_direction_entry 同步）：最後幾秒 book 很薄，
+    # 目標股數吃不滿就改買「看得到的深度」允許的整數股（仍須 >= 最小單量），不再全有全無。
+    visible_depth = float(Decimal(str(_ask_depth(book))).to_integral_value(rounding=ROUND_DOWN))
+    if 0 < visible_depth < shares:
+        if diagnostic_slug:
+            record_live_window_diagnostic(
+                diagnostic_slug, "direction_size_capped_by_depth",
+                remainingSeconds=remaining_seconds, targetShares=shares, cappedShares=visible_depth,
+            )
+        shares = visible_depth
     plan = _buy_plan(side, book, shares)
     if not plan:
         if diagnostic_slug:

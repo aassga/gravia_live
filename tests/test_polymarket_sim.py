@@ -277,6 +277,20 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual(pos["shares"], 14.0)
         self.assertGreater(pos["lockedPnl"], 0)
 
+    def test_late_direction_buys_visible_depth_when_target_exceeds_it(self):
+        # 最後 10 秒領先方只剩 6 股深度、目標 14 股 → 買 6 股而不是放棄
+        self._set_chainlink_signal(opening=100.0, current=100.3)
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 5, "asks": [{"price": 0.80, "size": 6.0}], "bids": [{"price": 0.79, "size": 100}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 5, "asks": [{"price": 0.21, "size": 100.0}], "bids": [{"price": 0.20, "size": 100}]})
+        sim.simulate_trading("btc-historical-hybrid", "btc-window", up, down, 6.0, None)
+        pos = sim.ab_states["btc-historical-hybrid"]["position"]
+        self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up"); self.assertEqual(pos["shares"], 6.0)
+        # 深度 3 股 < 最小單量 5 → 仍不進
+        sim.ab_states["btc-historical-hybrid"]["position"] = None
+        up2 = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 5, "asks": [{"price": 0.80, "size": 3.0}], "bids": [{"price": 0.79, "size": 100}]})
+        sim.simulate_trading("btc-historical-hybrid", "btc-window-2", up2, down, 6.0, None)
+        self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
+
     def test_btc_two_sided_maker_variant_uses_relaxed_parameters(self):
         v = sim.AB_VARIANT_BY_ID["btc-two-sided-maker"]
         self.assertTrue(v["marketMakerOnly"]); self.assertTrue(v["simOnly"])
