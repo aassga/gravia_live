@@ -855,7 +855,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(strategy.live_state["totalPnlEstimate"], -1.5)
 
     async def test_live_late_favorite_waits_for_stable_leader_when_configured(self):
-        up, down = self._favorite_books(up_ask=0.98, down_ask=0.03)
+        up, down = self._favorite_books(up_ask=0.97, down_ask=0.04)
         strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up, down
         with (
             patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
@@ -863,8 +863,8 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", False),
             patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
             patch.object(strategy, "LATE_FAVORITE_WINDOW_SECONDS", 240.0),
-            patch.object(strategy, "LATE_FAVORITE_MIN_PRICE", 0.97),
-            patch.object(strategy, "LATE_FAVORITE_MAX_PRICE", 0.99),
+            patch.object(strategy, "LATE_FAVORITE_MIN_PRICE", 0.95),
+            patch.object(strategy, "LATE_FAVORITE_MAX_PRICE", 0.98),
             patch.object(strategy, "LATE_FAVORITE_STABLE_SECONDS", 10.0),
             patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
         ):
