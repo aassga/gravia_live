@@ -184,18 +184,15 @@ LATE_FAVORITE_MIN_REMAINING    = 5.0    # 剩餘 < 5 秒不進（結算前交易
 # 2026-09-13 依 12 小時公開成交掃描（223 個錢包、6,305 筆）改買價區間：0.88～0.92 勝率只有 89.1%、
 # 0.95～0.98 勝率 99.1% 且每股淨利反而較高（+0.036）；0.98 以上利潤薄到被 2% 的虧損吃掉。
 LATE_FAVORITE_MIN_PRICE        = 0.95   # 領先方買價下限
-LATE_FAVORITE_MAX_PRICE        = 0.98   # 判斷價（VWAP + 1 tick）超過就沒利潤空間
+LATE_FAVORITE_MAX_PRICE        = 0.99   # 判斷價（VWAP + 1 tick）超過就沒利潤空間（2026-09-13 依使用者要求 0.98 → 0.99）
 # 2026-09-12 12:33 那筆：進場 Down 0.90 後 40 秒內 0.95 → 0.57 → 0.08（3 秒內翻面），整注歸零 -$15.41，
 # 把前面 8 筆各賺 $1.4 的利潤全吃掉。停損：持有腿的保守可賣價 <= 這個價就賣（每個 tick 檢查）。
 # 翻面通常只有 1～3 秒的窗口可以賣在 0.4～0.6，所以這個停損只救得到一部分，不是保證。
 # 2026-09-12 23:xx（台北）：用 48 筆逐 tick 回放比較停損價——0.60～0.80 幾乎沒差（翻面是跳空，
 # 第一個跌破的 tick 已經 0.2～0.3），0.85 才能在跳空前出場：總損益 -7.24 → +20.34，代價是 7 筆
 # 小幅回檔被震出（每筆約 -0.85）。依使用者要求改 0.85。
-LATE_FAVORITE_STOP_LOSS_PRICE  = 0.85
-# 2026-09-12 09:19 那筆：進場時 Chainlink TWAP 只比開盤高 0.002%，市場卻定 Up 0.90——結算源根本
-# 還在擲硬幣，價格 0.90 → 0.70 → 0.83 → 0.28 → 0.79 來回甩，停損賣在最低點 -$10.05。
-# 要求 Chainlink 60s TWAP 偏離開盤價至少這麼多才進場；沒有訊號時也不進（不再「有訊號才檢查」）。
-LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT = 0.02
+# 2026-09-13 依使用者要求改回 0.60：早上 4 筆虧損有 3 筆是 0.85 被雜訊震出的假停損。
+LATE_FAVORITE_STOP_LOSS_PRICE  = 0.60
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # BTC 5m 暫時在窗口最後 10 秒使用 Binance window delta 做隔離測試：不是在窗口一開始就靠模型優勢
@@ -401,7 +398,6 @@ for _asset in ASSETS:
             "favoriteMinPrice":      LATE_FAVORITE_MIN_PRICE,
             "favoriteMaxPrice":      LATE_FAVORITE_MAX_PRICE,
             "favoriteStopLossPrice": LATE_FAVORITE_STOP_LOSS_PRICE,
-            "favoriteMinSignalDeltaPct": LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT,
         })
         AB_VARIANTS.append({
             "id":                    "btc-inventory-rotation",
@@ -2430,24 +2426,12 @@ def _try_late_favorite_entry(
             selectedSide=side, selectedAsk=ask, favoriteMaxPrice=max_price, **common,
         )
         return
+    # 2026-09-13 依使用者要求：完全不看 Chainlink（不檢查方向、不看偏離幅度、無訊號照進）。
+    # 只把偏離幅度記進部位供事後分析。
     signal = get_chainlink_twap_signal(variant["assetId"])
-    if not signal or not signal.get("opening"):
-        record_window_diagnostic(variant_id, slug, "favorite_missing_chainlink_signal", selectedSide=side, **common)
-        return
-    delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
-    min_delta = float(variant.get("favoriteMinSignalDeltaPct", LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT))
-    if abs(delta_pct) < min_delta:
-        record_window_diagnostic(
-            variant_id, slug, "favorite_signal_delta_below_minimum",
-            selectedSide=side, signalDeltaPct=delta_pct, minimumSignalDeltaPct=min_delta, **common,
-        )
-        return
-    if (delta_pct > 0 and side == "Down") or (delta_pct < 0 and side == "Up"):
-        record_window_diagnostic(
-            variant_id, slug, "favorite_signal_disagrees",
-            selectedSide=side, signalDeltaPct=delta_pct, **common,
-        )
-        return
+    delta_pct = None
+    if signal and signal.get("opening"):
+        delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
     if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
         record_window_diagnostic(
             variant_id, slug, "selected_book_not_fresh",
@@ -2484,7 +2468,7 @@ def _try_late_favorite_entry(
     save_sim_state()
     log.info(
         f"[SIM:{variant_id}] 最後 {remaining_seconds:.0f}s 買領先方 {side} ask=${ask:.2f} "
-        f"VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f} Δ={delta_pct:+.3f}%"
+        f"VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f}"
     )
 
 
@@ -4318,7 +4302,6 @@ def build_ab_leaderboard() -> list:
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
-            "favoriteMinSignalDeltaPct": v.get("favoriteMinSignalDeltaPct"),
             "mmMaxPairCost": v.get("mmMaxPairCost"),
             "mmFirstLegMaxPrice": v.get("mmFirstLegMaxPrice"),
             "mmRescueSeconds": v.get("mmRescueSeconds"),

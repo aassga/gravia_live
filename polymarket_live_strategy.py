@@ -131,11 +131,7 @@ LATE_FAVORITE_ENABLED = bool(_LIVE_VARIANT.get("lateFavorite"))
 LATE_FAVORITE_WINDOW_SECONDS = float(_LIVE_VARIANT.get("favoriteWindowSeconds", 60.0))
 LATE_FAVORITE_MIN_REMAINING = float(_LIVE_VARIANT.get("favoriteMinRemaining", 5.0))
 LATE_FAVORITE_MIN_PRICE = float(_LIVE_VARIANT.get("favoriteMinPrice", 0.95))
-LATE_FAVORITE_MAX_PRICE = float(_LIVE_VARIANT.get("favoriteMaxPrice", 0.98))
-# Chainlink 60s TWAP 偏離開盤價的最低幅度；沒有訊號或偏離不足都不進（09:19 那筆 Δ=+0.002% 就是反例）。
-LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT = float(
-    os.environ.get("POLY_LIVE_FAVORITE_MIN_DELTA_PCT", _LIVE_VARIANT.get("favoriteMinSignalDeltaPct", 0.02))
-)
+LATE_FAVORITE_MAX_PRICE = float(_LIVE_VARIANT.get("favoriteMaxPrice", 0.99))
 # 領先方翻面時的停損：持有腿保守可賣價 <= 這個價就 FOK 賣出（WS tick 與 3 秒輪詢都檢查）。
 # POLY_LIVE_FAVORITE_STOP_LOSS_PRICE 可覆寫，0 = 關閉。
 _fav_stop_raw = os.environ.get("POLY_LIVE_FAVORITE_STOP_LOSS_PRICE", "").strip()
@@ -1020,18 +1016,12 @@ def _late_favorite_plan(
     if ask > LATE_FAVORITE_MAX_PRICE:
         diag("favorite_price_above_maximum", selectedSide=side, selectedAsk=ask, favoriteMaxPrice=LATE_FAVORITE_MAX_PRICE)
         return None
+    # 2026-09-13 依使用者要求：完全不看 Chainlink（不檢查方向、不看偏離幅度、無訊號照進）。
+    # 只記錄偏離幅度供事後分析。
     signal = sim.get_chainlink_twap_signal(LIVE_ASSET_ID)
-    if not signal or not signal.get("opening"):
-        diag("favorite_missing_chainlink_signal", selectedSide=side)
-        return None
-    delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
-    if abs(delta_pct) < LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT:
-        diag("favorite_signal_delta_below_minimum", selectedSide=side, signalDeltaPct=delta_pct,
-             minimumSignalDeltaPct=LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT)
-        return None
-    if (delta_pct > 0 and side == "Down") or (delta_pct < 0 and side == "Up"):
-        diag("favorite_signal_disagrees", selectedSide=side, signalDeltaPct=delta_pct)
-        return None
+    delta_pct = None
+    if signal and signal.get("opening"):
+        delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
     if not _live_direction_book_is_fresh(side, book):
         diag("favorite_book_not_fresh", selectedSide=side, dataGuardReason=sim._simulation_single_book_guard_reason(book))
         return None
@@ -2901,8 +2891,7 @@ def _log_startup_banner(mode: str) -> None:
     if LATE_FAVORITE_ENABLED:
         log.warning(
             f"  買領先方已啟用：剩餘 {LATE_FAVORITE_MIN_REMAINING:.0f}~{LATE_FAVORITE_WINDOW_SECONDS:.0f}s、"
-            f"某邊 ask ${LATE_FAVORITE_MIN_PRICE:.2f}~${LATE_FAVORITE_MAX_PRICE:.2f}、"
-            f"Chainlink 同向且偏離開盤價 >= {LATE_FAVORITE_MIN_SIGNAL_DELTA_PCT:.3f}% → 買該邊抱到結算；"
+            f"某邊 ask ${LATE_FAVORITE_MIN_PRICE:.2f}~${LATE_FAVORITE_MAX_PRICE:.2f}（不看 Chainlink）→ 買該邊抱到結算；"
             "兩腿鎖利／晚進場方向性／單邊進場全部停用"
         )
         if LATE_FAVORITE_STOP_LOSS_PRICE is not None:

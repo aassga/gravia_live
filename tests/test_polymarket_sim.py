@@ -167,8 +167,8 @@ class PolymarketSimulationTests(unittest.TestCase):
         return up, down
 
     def test_late_favorite_buys_leader_in_last_minute_and_holds(self):
-        # 最後 60 秒、Up 賣 0.92（>= 0.90、<= 0.97）、Chainlink 同向 → 買 Up，抱到結算
-        self._set_chainlink_signal(opening=100.0, current=100.3)
+        # 最後 60 秒、Up 賣 0.96（>= 0.95、判斷價 <= 0.99）→ 買 Up，抱到結算；不看 Chainlink（反向也進）
+        self._set_chainlink_signal(opening=100.0, current=99.7)
         up, down = self._favorite_books()
         sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
         pos = sim.ab_states["btc-late-favorite"]["position"]
@@ -191,42 +191,22 @@ class PolymarketSimulationTests(unittest.TestCase):
         up2, down2 = self._favorite_books(up_ask=0.92, down_ask=0.09)                    # 沒有 >= 0.95 的領先方
         sim.simulate_trading("btc-late-favorite", "btc-window", up2, down2, 40.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-        up3, down3 = self._favorite_books(up_ask=0.99, down_ask=0.02)                    # 判斷價超過 0.98 沒利潤
-        sim.simulate_trading("btc-late-favorite", "btc-window", up3, down3, 40.0, None)
+        # 上限現在是 0.99（tick 上限），改用較低的變體上限驗證「判斷價超過上限就不進」仍有效
+        up3, down3 = self._favorite_books(up_ask=0.99, down_ask=0.02)
+        with patch.dict(sim.AB_VARIANT_BY_ID["btc-late-favorite"], {"favoriteMaxPrice": 0.97}):
+            sim.simulate_trading("btc-late-favorite", "btc-window", up3, down3, 40.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-
-    def test_late_favorite_requires_chainlink_agreement_when_signal_present(self):
-        # 市場領先 Up 但 Chainlink TWAP 低於開盤 → 不進
-        self._set_chainlink_signal(opening=100.0, current=99.7)
-        up, down = self._favorite_books()
-        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
-        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-
-    def test_late_favorite_requires_minimum_chainlink_delta(self):
-        # 09:19 那筆：市場 Up 0.90 但 Chainlink 只偏離 +0.002% → 不進；沒有訊號也不進
-        self._set_chainlink_signal(opening=100.0, current=100.002)
-        up, down = self._favorite_books()
-        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
-        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-        sim.markets_state["btc"]["chainlinkTwapPrice"] = None
-        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
-        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
-        self._set_chainlink_signal(opening=100.0, current=100.05)
-        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
-        pos = sim.ab_states["btc-late-favorite"]["position"]
-        self.assertIsNotNone(pos)
-        self.assertAlmostEqual(pos["signalDeltaPct"], 0.05, places=6)
 
     def test_late_favorite_stop_loss_sells_when_leader_flips(self):
-        # 12:33 那筆：買 Down 0.90 後翻面。停損 0.85：Down 買盤掉到 0.80 → 賣掉；掉到 0.88 → 不賣
+        # 買 Down 0.96 後翻面。停損 0.60：Down 買盤掉到 0.50 → 賣掉；掉到 0.80 → 不賣
         self._set_chainlink_signal(opening=100.0, current=99.7)
         up, down = self._favorite_books(up_ask=0.05, down_ask=0.96)
         sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
         self.assertEqual(sim.ab_states["btc-late-favorite"]["position"]["side"], "Down")
-        up2, down2 = self._favorite_books(up_ask=0.10, down_ask=0.89)
+        up2, down2 = self._favorite_books(up_ask=0.21, down_ask=0.81)
         sim.simulate_trading("btc-late-favorite", "btc-window", up2, down2, 30.0, None)
         self.assertIsNotNone(sim.ab_states["btc-late-favorite"]["position"])
-        up3, down3 = self._favorite_books(up_ask=0.21, down_ask=0.81)
+        up3, down3 = self._favorite_books(up_ask=0.51, down_ask=0.51)
         sim.simulate_trading("btc-late-favorite", "btc-window", up3, down3, 25.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
         last = sim.ab_states["btc-late-favorite"]["trades"][0]
