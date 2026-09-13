@@ -194,6 +194,13 @@ LATE_FAVORITE_MAX_PRICE        = 0.97   # 看得到的 ask 超過就沒利潤空
 # 小幅回檔被震出（每筆約 -0.85）。依使用者要求改 0.85。
 # 2026-09-14 依使用者要求：0.85 → 0.60 → 0.70（02:09 那筆 Down 停損 -3.18 後決定折衷）。
 LATE_FAVORITE_STOP_LOSS_PRICE  = 0.70
+# 2026-09-14 依 12 小時錢包剖析（12 個勝率 100% 的錢包）另開一組模擬：他們是「價格觸發」——整個窗口
+# 只要領先方 ask >= 0.97～0.98 就買一筆、不限最後 60 秒、不停損、只做有明顯領先方的窗口。
+# (A) 剩餘 <= 240 秒（開盤 60 秒後）皆可進；(B) ask 連續 >= 門檻 10 秒才進，避免剛翻上來就追。
+PRICE_TRIGGERED_WINDOW_SECONDS = 240.0
+PRICE_TRIGGERED_MIN_PRICE      = 0.97
+PRICE_TRIGGERED_MAX_PRICE      = 0.99
+PRICE_TRIGGERED_STABLE_SECONDS = 10.0
 
 # ── 晚進場方向性策略（"late-direction" 變體專用）──────────────────────────
 # BTC 5m 暫時在窗口最後 10 秒使用 Binance window delta 做隔離測試：不是在窗口一開始就靠模型優勢
@@ -402,6 +409,24 @@ for _asset in ASSETS:
             "favoriteMinPrice":      LATE_FAVORITE_MIN_PRICE,
             "favoriteMaxPrice":      LATE_FAVORITE_MAX_PRICE,
             "favoriteStopLossPrice": LATE_FAVORITE_STOP_LOSS_PRICE,
+        })
+        AB_VARIANTS.append({
+            "id":                    "btc-price-triggered-favorite",
+            "assetId":               "btc",
+            "label":                 (
+                f"BTC 價格觸發買領先方（≥{PRICE_TRIGGERED_MIN_PRICE:.2f} 穩定 "
+                f"{PRICE_TRIGGERED_STABLE_SECONDS:.0f}s、不限最後 60s、不停損）"
+            ),
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateFavorite":          True,
+            "simOnly":               True,
+            "favoriteWindowSeconds": PRICE_TRIGGERED_WINDOW_SECONDS,
+            "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
+            "favoriteMinPrice":      PRICE_TRIGGERED_MIN_PRICE,
+            "favoriteMaxPrice":      PRICE_TRIGGERED_MAX_PRICE,
+            "favoriteStopLossPrice": None,
+            "favoriteStableSeconds": PRICE_TRIGGERED_STABLE_SECONDS,
         })
         AB_VARIANTS.append({
             "id":                    "btc-inventory-rotation",
@@ -2422,6 +2447,7 @@ def _try_late_favorite_entry(
     elif down_ask is not None and down_ask >= min_price:
         side, book, ask = "Down", down_book, down_ask
     else:
+        st["favoriteStableSince"] = None
         record_window_diagnostic(variant_id, slug, "favorite_no_leader", favoriteMinPrice=min_price, **common)
         return
     if ask > max_price:
@@ -2430,6 +2456,21 @@ def _try_late_favorite_entry(
             selectedSide=side, selectedAsk=ask, favoriteMaxPrice=max_price, **common,
         )
         return
+    stable_seconds = float(variant.get("favoriteStableSeconds") or 0)
+    if stable_seconds > 0:
+        # (B) 同一邊的 ask 必須連續 >= 門檻 stable_seconds 秒；換邊或掉到門檻下就重新計時。
+        now = time.time()
+        track = st.get("favoriteStableSince") or {}
+        if track.get("slug") != slug or track.get("side") != side:
+            track = {"slug": slug, "side": side, "since": now}
+            st["favoriteStableSince"] = track
+        held_for = now - float(track["since"])
+        if held_for < stable_seconds:
+            record_window_diagnostic(
+                variant_id, slug, "favorite_not_stable_yet",
+                selectedSide=side, selectedAsk=ask, stableForSeconds=held_for, favoriteStableSeconds=stable_seconds, **common,
+            )
+            return
     # 2026-09-13 依使用者要求：完全不看 Chainlink（不檢查方向、不看偏離幅度、無訊號照進）。
     # 只把偏離幅度記進部位供事後分析。
     signal = get_chainlink_twap_signal(variant["assetId"])
@@ -4303,6 +4344,7 @@ def build_ab_leaderboard() -> list:
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
+            "favoriteStableSeconds": v.get("favoriteStableSeconds"),
             "mmMaxPairCost": v.get("mmMaxPairCost"),
             "mmFirstLegMaxPrice": v.get("mmFirstLegMaxPrice"),
             "mmRescueSeconds": v.get("mmRescueSeconds"),

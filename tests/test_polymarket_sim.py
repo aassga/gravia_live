@@ -212,6 +212,37 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertLess(last["pnl"], 0)
         self.assertGreater(last["pnl"], -last["stakeUsd"])
 
+    def test_price_triggered_favorite_requires_stable_leader_and_allows_mid_window(self):
+        vid = "btc-price-triggered-favorite"
+        v = sim.AB_VARIANT_BY_ID[vid]
+        self.assertTrue(v["simOnly"]); self.assertIsNone(v["favoriteStopLossPrice"])
+        up, down = self._favorite_books(up_ask=0.98, down_ask=0.03)
+        # 剩 200 秒（窗口中段）就可以看；第一次看到領先方只是開始計時，不進
+        sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        self.assertEqual(sim.ab_states[vid]["favoriteStableSince"]["side"], "Up")
+        # 假裝已經穩定 12 秒 → 進場
+        sim.ab_states[vid]["favoriteStableSince"]["since"] -= 12
+        sim.simulate_trading(vid, "btc-window", up, down, 190.0, None)
+        pos = sim.ab_states[vid]["position"]
+        self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up")
+        # 不停損：對邊翻上來也不賣
+        up2, down2 = self._favorite_books(up_ask=0.30, down_ask=0.71)
+        sim.simulate_trading(vid, "btc-window", up2, down2, 100.0, None)
+        self.assertIsNotNone(sim.ab_states[vid]["position"])
+        # 剩 250 秒（開盤後 50 秒）不進；領先方消失會重置計時
+        sim.ab_states[vid]["position"] = None
+        sim.ab_states[vid]["lateFavoriteWindowSlug"] = None
+        sim.simulate_trading(vid, "btc-window-2", up, down, 250.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        sim.simulate_trading(vid, "btc-window-2", up, down, 200.0, None)
+        sim.ab_states[vid]["favoriteStableSince"]["since"] -= 12
+        up3, down3 = self._favorite_books(up_ask=0.80, down_ask=0.21)      # 領先方掉下去
+        sim.simulate_trading(vid, "btc-window-2", up3, down3, 195.0, None)
+        self.assertIsNone(sim.ab_states[vid]["favoriteStableSince"])
+        sim.simulate_trading(vid, "btc-window-2", up, down, 190.0, None)   # 回來後要重新等 10 秒
+        self.assertIsNone(sim.ab_states[vid]["position"])
+
     def test_btc_two_sided_maker_variant_uses_relaxed_parameters(self):
         v = sim.AB_VARIANT_BY_ID["btc-two-sided-maker"]
         self.assertTrue(v["marketMakerOnly"]); self.assertTrue(v["simOnly"])
