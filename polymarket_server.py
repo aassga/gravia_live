@@ -428,24 +428,8 @@ for _asset in ASSETS:
             "favoriteStopLossPrice": None,
             "favoriteStableSeconds": PRICE_TRIGGERED_STABLE_SECONDS,
         })
-        AB_VARIANTS.append({
-            "id":                    "btc-inventory-rotation",
-            "assetId":               "btc",
-            "label":                 "BTC \u52d5\u614b\u5eab\u5b58\u65cb\u8f49\uff08\u5206\u6279\u2192\u88dc\u817f\uff09",
-            "entryMaxPrice":         None,
-            "lockMaxSum":            ROTATION_PAIR_MAX_SUM,
-            "inventoryRotation":     True,
-            "simOnly":               True,
-            "sliceShares":           ROTATION_SLICE_SHARES,
-            "minEntryEdge":          ROTATION_MIN_EDGE,
-            "maxGrossBudgetUsd":     ROTATION_MAX_GROSS_USD,
-            "maxResidualShares":     ROTATION_MAX_RESIDUAL_SHARES,
-            "hedgeOnlySeconds":      ROTATION_HEDGE_ONLY_SECONDS,
-            "actionCooldownSeconds": ROTATION_ACTION_COOLDOWN,
-            "residualRiskPremium":   ROTATION_RESIDUAL_RISK_PREMIUM,
-            "futureHedgeFeeReserve": ROTATION_FUTURE_HEDGE_FEE_RESERVE,
-            "requireChainlinkConfirm": True,
-        })
+        # 2026-09-14 依使用者要求移除 btc-inventory-rotation（動態庫存旋轉）變體；
+        # _try_inventory_rotation 等邏輯保留，歷史成交仍在 sqlite。
     elif _asset["id"] != "btc-15m" and _asset["binanceSymbol"] == "BTCUSDT":
         AB_VARIANTS.append({
             "id":                    f"{_asset['id']}-chainlink-late-direction",
