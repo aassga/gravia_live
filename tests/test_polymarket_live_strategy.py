@@ -745,7 +745,7 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             await strategy.evaluate_and_act("btc-window", None, 120.0, {"fairUp": 0.45, "fairDown": 0.55})
             self.assertIsNotNone(strategy.live_state["position"])
 
-    def _favorite_books(self, up_ask=0.96, down_ask=0.05):
+    def _favorite_books(self, up_ask=0.95, down_ask=0.05):
         up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
             "asks": [{"price": up_ask, "size": 500}], "bids": [{"price": round(up_ask - 0.01, 2), "size": 500}]})
         down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
