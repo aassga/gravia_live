@@ -27,6 +27,7 @@ import httpx
 
 log = logging.getLogger("weekly-scan")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # httpx 的 INFO 會把含 token 的 URL 印進日誌
 
 TAIPEI = timezone(timedelta(hours=8))
 REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "weekly")

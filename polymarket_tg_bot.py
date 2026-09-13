@@ -28,6 +28,7 @@ import websockets
 
 log = logging.getLogger("tg-bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # httpx 的 INFO 會把含 token 的 URL 印進日誌
 
 BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "").strip()
 ALLOWED_USER_IDS = {
