@@ -215,7 +215,7 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_price_triggered_favorite_requires_stable_leader_and_allows_mid_window(self):
         vid = "btc-price-triggered-favorite"
         v = sim.AB_VARIANT_BY_ID[vid]
-        self.assertFalse(v.get("simOnly")); self.assertIsNone(v["favoriteStopLossPrice"])  # 2026-09-14 起可供實盤選用
+        self.assertFalse(v.get("simOnly")); self.assertEqual(v["favoriteStopLossPrice"], 0.85)  # 2026-09-14 起可供實盤選用、停損 0.85
         up, down = self._favorite_books(up_ask=0.98, down_ask=0.03)
         # 剩 200 秒（窗口中段）就可以看；第一次看到領先方只是開始計時，不進
         sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)
@@ -226,10 +226,11 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading(vid, "btc-window", up, down, 190.0, None)
         pos = sim.ab_states[vid]["position"]
         self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up")
-        # 不停損：對邊翻上來也不賣
+        # 停損 0.85：對邊翻上來、持有腿可賣價跌破 0.85 就賣掉
         up2, down2 = self._favorite_books(up_ask=0.30, down_ask=0.71)
         sim.simulate_trading(vid, "btc-window", up2, down2, 100.0, None)
-        self.assertIsNotNone(sim.ab_states[vid]["position"])
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        self.assertEqual(sim.ab_states[vid]["trades"][0]["exitReason"], "favorite_stop_loss")
         # 剩 250 秒（開盤後 50 秒）不進；領先方消失會重置計時
         sim.ab_states[vid]["position"] = None
         sim.ab_states[vid]["lateFavoriteWindowSlug"] = None
