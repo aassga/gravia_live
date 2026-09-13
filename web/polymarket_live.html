@@ -160,8 +160,8 @@
   <div class="panel">
     <div class="panel-title">策略成交紀錄（跟模擬盤同一套記帳方式）</div>
     <table>
-      <thead><tr><th>時間</th><th>方向</th><th>下注</th><th>損益</th><th></th></tr></thead>
-      <tbody id="trades-body"><tr><td colspan="5" class="empty-row">目前沒有成交紀錄</td></tr></tbody>
+      <thead><tr><th>時間</th><th>方向</th><th>股數</th><th>下注</th><th>損益</th><th></th></tr></thead>
+      <tbody id="trades-body"><tr><td colspan="6" class="empty-row">目前沒有成交紀錄</td></tr></tbody>
     </table>
   </div>
 
@@ -217,7 +217,7 @@ function renderTrades(trades){
   // 時間、方向＋類型（鎖利／方向性／提早退出）、下注金額、損益。
   const body = document.getElementById('trades-body');
   if(!trades || trades.length === 0){
-    body.innerHTML = '<tr><td colspan="5" class="empty-row">目前沒有成交紀錄</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" class="empty-row">目前沒有成交紀錄</td></tr>';
     return;
   }
   body.innerHTML = trades.map(t => {
@@ -233,6 +233,7 @@ function renderTrades(trades){
     <tr>
       <td>${fmtTime(t.exitTime)}</td>
       <td><span class="${badgeClass}">${dir}</span></td>
+      <td>${Number(t.shares || 0).toFixed(2)}${t.hedged && t.hedgeShares != null ? ` / ${Number(t.hedgeShares).toFixed(2)}` : ''} @ ${Number(t.entryPrice || 0).toFixed(3)}</td>
       <td>$${Number(t.stakeUsd || 0).toFixed(2)}</td>
       <td class="${win ? 'side-buy' : 'side-sell'}" style="font-weight:600;">${pnlText}</td>
       <td class="addr">${t.dryRun === false ? 'REAL' : 'DRY-RUN'}</td>
