@@ -470,7 +470,8 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     // 每組獨立卡片：部位 + 損益總計 + 成交紀錄，維持原本 conservative/main/loose
     // 順序（不跟著排名跳動），方便固定位置比對
     $('rt-count').textContent=variants.reduce((sum,v)=>sum+v.totalTrades,0);
-    $('rt-list').innerHTML=variants.map(v=>{
+    // 個別策略卡片依損益由高到低排列（排行榜 rows 已排序，直接沿用同一順序）
+    $('rt-list').innerHTML=rows.map(v=>{
       const isBest=v.id===best && v.totalTrades>0;
       const pnlColor=v.totalPnl>0?'#00ff9d':(v.totalPnl<0?'#ff3a5c':'#888');
 
