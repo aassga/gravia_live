@@ -1452,7 +1452,9 @@ async def fetch_outcome(session: aiohttp.ClientSession, slug: str) -> str | None
 # 單組兩腿的資金上限與現金保留額。模擬版與真實下單版共用同一套計算公式
 # （target_pair_order），只有這兩個數字、stake_pct 各自可能設定不同的值——
 # 真實版可以用更保守的上限，但「怎麼從現金換算成股數」這件事本身完全一致。
-SIM_MAX_PAIR_BUDGET_USD  = 25.0
+# 2026-09-14 依使用者要求取消模擬盤每注硬上限（原 25），與實盤 .env 的 POLY_MAX_PAIR_BUDGET_USD=100000 一致；
+# 每注只受 stakePct × (現金 − 保留) 限制。
+SIM_MAX_PAIR_BUDGET_USD  = 100000.0
 SIM_MIN_CASH_RESERVE_USD = 5.0
 
 
