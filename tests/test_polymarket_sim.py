@@ -216,7 +216,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         vid = "btc-price-triggered-favorite"
         v = sim.AB_VARIANT_BY_ID[vid]
         self.assertFalse(v.get("simOnly")); self.assertEqual(v["favoriteStopLossPrice"], 0.60)  # 2026-09-14 起可供實盤選用、停損 0.60
-        up, down = self._favorite_books(up_ask=0.90, down_ask=0.11)
+        up, down = self._favorite_books(up_ask=0.97, down_ask=0.04)
         # 剩 200 秒（窗口中段）就可以看；第一次看到領先方只是開始計時，不進
         sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)
         self.assertIsNone(sim.ab_states[vid]["position"])

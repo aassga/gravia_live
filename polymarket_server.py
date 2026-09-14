@@ -201,9 +201,9 @@ LATE_FAVORITE_TAKE_PROFIT_PRICE = 0.99
 # (A) 剩餘 <= 240 秒（開盤 60 秒後）皆可進；(B) ask 連續 >= 門檻 10 秒才進，避免剛翻上來就追。
 PRICE_TRIGGERED_WINDOW_SECONDS = 240.0
 # 2026-09-14 依使用者要求：0.97～0.99 → 0.95～0.98 → 0.97～0.99 → 0.95～0.98 → 改回 0.97～0.99（04:25～06:51 那段的設定）。
-# 2026-09-14 12:5x 依使用者要求改為 0.88～0.92（6h 掃描該區間 100%／每股 +0.093；停損 0.85 保留，緩衝只剩 3～7 分）。
-PRICE_TRIGGERED_MIN_PRICE      = 0.88
-PRICE_TRIGGERED_MAX_PRICE      = 0.92
+# 2026-09-14 13:0x 依使用者要求調回 04:25～06:51 那段的設定：0.97～0.99（停損 0.60 保留、不做獲利了結）。
+PRICE_TRIGGERED_MIN_PRICE      = 0.97
+PRICE_TRIGGERED_MAX_PRICE      = 0.99
 PRICE_TRIGGERED_STABLE_SECONDS = 10.0
 # 2026-09-14 「跟單組 T」：照抄剖析出的吃單型錢包——開盤 60 秒後任何時候、領先方 ask >= 0.98 就買
 # 固定 100 股、不等穩定、不停損、每窗口一次。預期勝率 ~98%，每股毛利 1～2 分，驗證用。
@@ -476,7 +476,7 @@ for _asset in ASSETS:
             "favoriteMaxPrice":      PRICE_TRIGGERED_MAX_PRICE,
             # 2026-09-14 依使用者要求加上 0.85 停損；買價改 0.88～0.92 後緩衝太小，再依要求下調為 0.60。
             "favoriteStopLossPrice": 0.60,
-            "favoriteTakeProfitPrice": LATE_FAVORITE_TAKE_PROFIT_PRICE,
+            "favoriteTakeProfitPrice": None,   # 2026-09-14 調回 04:25～06:51 的設定：不做獲利了結
             "favoriteStableSeconds": PRICE_TRIGGERED_STABLE_SECONDS,
         })
         # 2026-09-14 依使用者要求移除 btc-inventory-rotation（動態庫存旋轉）變體；
