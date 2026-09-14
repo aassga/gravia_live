@@ -473,7 +473,7 @@ for _asset in ASSETS:
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateFavorite":          True,
-            "simOnly":               True,
+            # 2026-09-14 開放給實盤選用
             "favoriteWindowSeconds": 60.0,
             "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
             "favoriteMinPrice":      0.98,
