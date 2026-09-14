@@ -453,9 +453,7 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-follow-taker",
             "assetId":               "btc",
-            "label":                 (
-                f"BTC 跟單 T（≥{FOLLOW_TAKER_MIN_PRICE:.2f} 即買、固定 {FOLLOW_TAKER_FIXED_SHARES:.0f} 股、不停損）"
-            ),
+            "label":                 f"BTC 跟單 T（≥{FOLLOW_TAKER_MIN_PRICE:.2f} 即買、不停損）",
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateFavorite":          True,
@@ -466,7 +464,7 @@ for _asset in ASSETS:
             "favoriteMaxPrice":      0.99,
             "favoriteStopLossPrice": None,
             "favoriteStableSeconds": 0.0,
-            "favoriteFixedShares":   FOLLOW_TAKER_FIXED_SHARES,
+            # 2026-09-14 依使用者要求移除固定 100 股，改回每注比例（favoriteFixedShares 機制保留給其他變體）。
         })
         AB_VARIANTS.append({
             "id":                    "btc-last60-098-hold",
