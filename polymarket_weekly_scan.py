@@ -117,14 +117,16 @@ def classify_wallet_window(ws: int, outcome: str, ts: list[dict]) -> dict:
     won = outcome == side
     info.update({"side": side, "vwap": vw, "shares": shares, "won": won, "sold": bool(sold),
                  "pnl": (held if won else 0.0) + sold_val - cost, "tBeforeClose": WINDOW_SECONDS - min(rel)})
-    if sells and not sold:
+    # 2026-09-14 修正：買領先方型態只看買單決定，之後有沒有賣出（停損／獲利了結）記在 sold 屬性；
+    # 原本一有賣單就歸到「買了再賣」，導致買領先方的「曾賣出比例」永遠是 0%。
+    if max(rel) >= WINDOW_SECONDS - LATE_SECONDS and min(rel) >= 0 and vw >= FAVORITE_MIN_ASK:
+        info["kind"] = "late_favorite"
+    elif sells and not sold:
         info["kind"] = "buy_then_sell_other"
     elif sold:
         info["kind"] = "buy_then_sell"
     elif min(rel) < 0:
         info["kind"] = "pre_open"
-    elif max(rel) >= WINDOW_SECONDS - LATE_SECONDS and vw >= FAVORITE_MIN_ASK:
-        info["kind"] = "late_favorite"
     elif max(rel) >= WINDOW_SECONDS - 10:
         info["kind"] = "last_10s_directional"
     elif max(rel) >= WINDOW_SECONDS - LATE_SECONDS:
@@ -183,9 +185,13 @@ def analyze(windows: list[dict]) -> dict:
         for lo, hi in zip(edges, edges[1:]):
             g = [i for i in items if lo <= i[key] < hi]
             if g:
-                sh = sum(i["shares"] for i in g)
+                # 2026-09-14 修正：每股淨利改為「每個錢包窗口各算一次、等權平均」並附中位數；
+                # 原本用總損益 ÷ 總股數，會被一兩個巨鯨的大額虧損拉偏（出現 99% 勝率卻每股為負）。
+                per = [i["pnl"] / i["shares"] for i in g if i["shares"] > 0]
                 out.append({"lo": lo, "hi": hi, "n": len(g), "winRate": sum(i["won"] for i in g) / len(g),
-                            "pnlPerShare": sum(i["pnl"] for i in g) / sh if sh else 0.0})
+                            "pnlPerShare": statistics.mean(per) if per else 0.0,
+                            "pnlPerShareMedian": statistics.median(per) if per else 0.0,
+                            "pnlPerShareSizeWeighted": sum(i["pnl"] for i in g) / sum(i["shares"] for i in g)})
         return out
     fav_price = bucket(fav, "vwap", [0.88, 0.92, 0.95, 0.98, 1.01])
     fav_time = bucket(fav, "tBeforeClose", [0, 10, 20, 30, 45, 61])
@@ -237,8 +243,8 @@ def compare(report: dict, cfg: dict) -> list[dict]:
     if cfg.get("lateFavoriteEnabled") and fav["priceBuckets"]:
         best = max(fav["priceBuckets"], key=lambda b: b["pnlPerShare"])
         ours = [b for b in fav["priceBuckets"] if ours_min is not None and b["lo"] <= ours_min < b["hi"]]
-        finding = "市場買價區間表現：" + "；".join(
-            f"{b['lo']:.2f}～{b['hi']:.2f} 勝率 {b['winRate']*100:.1f}%、每股 {b['pnlPerShare']:+.4f}（n={b['n']}）" for b in fav["priceBuckets"])
+        finding = "市場買價區間表現（每股淨利＝各錢包窗口等權平均／中位數）：" + "；".join(
+            f"{b['lo']:.2f}～{b['hi']:.2f} 勝率 {b['winRate']*100:.1f}%、每股 {b['pnlPerShare']:+.4f}／{b.get('pnlPerShareMedian', 0):+.4f}（n={b['n']}）" for b in fav["priceBuckets"])
         if ours and best is not ours[0]:
             out.append({
                 "title": "買價區間",
@@ -297,12 +303,12 @@ def render_markdown(report: dict, suggestions: list[dict], cfg: dict, hours: flo
         wr = f"{k['winRate']*100:.1f}%" if k["winRate"] is not None else "—"
         lines.append(f"| {k['label']} | {k['count']} | {k['share']*100:.1f}% | {k['wallets']} | {wr} | {k['pnl']:+.0f} |")
     fav = report["lateFavorite"]
-    lines += ["", f"## 最後 60 秒買領先方細分（n={fav['n']}）", "", "| 買價 | n | 勝率 | 每股淨利 |", "|---|---|---|---|"]
+    lines += ["", f"## 最後 60 秒買領先方細分（n={fav['n']}）", "", "| 買價 | n | 勝率 | 每股淨利（等權平均） | 中位數 | 依股數加權 |", "|---|---|---|---|---|---|"]
     for b in fav["priceBuckets"]:
-        lines.append(f"| {b['lo']:.2f}～{b['hi']:.2f} | {b['n']} | {b['winRate']*100:.1f}% | {b['pnlPerShare']:+.4f} |")
-    lines += ["", "| 進場前秒數 | n | 勝率 | 每股淨利 |", "|---|---|---|---|"]
+        lines.append(f"| {b['lo']:.2f}～{b['hi']:.2f} | {b['n']} | {b['winRate']*100:.1f}% | {b['pnlPerShare']:+.4f} | {b.get('pnlPerShareMedian', 0):+.4f} | {b.get('pnlPerShareSizeWeighted', 0):+.4f} |")
+    lines += ["", "| 進場前秒數 | n | 勝率 | 每股淨利（等權平均） | 中位數 |", "|---|---|---|---|---|"]
     for b in fav["timeBuckets"]:
-        lines.append(f"| {b['lo']}～{b['hi']}s | {b['n']} | {b['winRate']*100:.1f}% | {b['pnlPerShare']:+.4f} |")
+        lines.append(f"| {b['lo']}～{b['hi']}s | {b['n']} | {b['winRate']*100:.1f}% | {b['pnlPerShare']:+.4f} | {b.get('pnlPerShareMedian', 0):+.4f} |")
     lines += ["", f"## 我們目前的實盤設定", "", f"`{json.dumps({k: cfg.get(k) for k in ('label','lateFavoriteMinPrice','lateFavoriteMaxPrice','lateFavoriteStopLossPrice','lateFavoriteWindowSeconds','stakePct')}, ensure_ascii=False)}`", "",
               "## 比對與建議（由使用者決定，不會自動更改）", ""]
     for s in suggestions:

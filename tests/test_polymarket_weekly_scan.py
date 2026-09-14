@@ -20,8 +20,11 @@ class WeeklyScanTests(unittest.TestCase):
         self.assertEqual(lock["kind"], "both_sides_lock")
         self.assertAlmostEqual(lock["pnl"], 10 - (4.8 + 4.9), places=6)
         stopped = scan.classify_wallet_window(ws, "Down", [_t("c", "Up", 0.95, 10, 250), _t("c", "Up", 0.60, 10, 270, buy=False)])
-        self.assertEqual(stopped["kind"], "buy_then_sell")
+        self.assertEqual(stopped["kind"], "late_favorite")   # 買單符合買領先方型態；賣出記在 sold
+        self.assertTrue(stopped["sold"])
         self.assertAlmostEqual(stopped["pnl"], 6.0 - 9.5, places=6)
+        early_sold = scan.classify_wallet_window(ws, "Down", [_t("e", "Up", 0.55, 10, 100), _t("e", "Up", 0.50, 10, 150, buy=False)])
+        self.assertEqual(early_sold["kind"], "buy_then_sell")
         mid = scan.classify_wallet_window(ws, "Up", [_t("d", "Down", 0.40, 5, 120)])
         self.assertEqual(mid["kind"], "mid_directional")
         self.assertFalse(mid["won"])
@@ -37,6 +40,9 @@ class WeeklyScanTests(unittest.TestCase):
         kinds = {k["kind"]: k for k in report["kinds"]}
         self.assertIn("late_favorite", kinds)
         self.assertEqual(report["lateFavorite"]["n"], 3)          # bot + r2 + r3（同一窗口同錢包算一次）
+        for b in report["lateFavorite"]["priceBuckets"]:
+            self.assertIn("pnlPerShareMedian", b)
+            self.assertGreaterEqual(b["pnlPerShare"], -1.0)
         self.assertEqual(report["botCount"], 0)                   # 只有 1 個窗口，沒人達到 10 窗門檻
         cfg = {"lateFavoriteEnabled": True, "lateFavoriteMinPrice": 0.95, "lateFavoriteMaxPrice": 0.97,
                "lateFavoriteStopLossPrice": 0.6, "lateFavoriteMinRemaining": 5, "lateFavoriteWindowSeconds": 60}
