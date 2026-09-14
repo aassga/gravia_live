@@ -335,6 +335,24 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading(vid, "btc-window-2", up, down, 295.0, None)
         self.assertIsNone(sim.ab_states[vid]["position"])
 
+    def test_last60_hold_blocks_entry_after_recent_flip_and_waits_for_stability(self):
+        vid = "btc-last60-098-hold"
+        v = sim.AB_VARIANT_BY_ID[vid]
+        self.assertEqual((v["favoriteStableSeconds"], v["favoriteFlipLookbackSeconds"]), (10.0, 60.0))
+        # T-100s Down 領先（0.95）→ 記錄；T-40s Up 0.98 → 60 秒內另一邊曾領先 → 不進
+        up_d, down_d = self._favorite_books(up_ask=0.05, down_ask=0.95)
+        sim.simulate_trading(vid, "btc-window", up_d, down_d, 100.0, None)
+        up, down = self._favorite_books(up_ask=0.98, down_ask=0.03)
+        sim.simulate_trading(vid, "btc-window", up, down, 40.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        # 把 Down 的紀錄推到 70 秒前 → 不算翻面；但穩定 10 秒還沒到 → 仍不進
+        sim.ab_states[vid]["favoriteLeaderSeen"]["Down"] -= 70
+        sim.simulate_trading(vid, "btc-window", up, down, 38.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        sim.ab_states[vid]["favoriteStableSince"]["since"] -= 12
+        sim.simulate_trading(vid, "btc-window", up, down, 30.0, None)
+        self.assertEqual(sim.ab_states[vid]["position"]["side"], "Up")
+
     def test_btc_two_sided_maker_variant_uses_relaxed_parameters(self):
         v = sim.AB_VARIANT_BY_ID["btc-two-sided-maker"]
         self.assertTrue(v["marketMakerOnly"]); self.assertTrue(v["simOnly"])

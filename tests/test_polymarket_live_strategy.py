@@ -904,6 +904,34 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan["side"], "Up")
             self.assertGreaterEqual(plan["_bestBid"], 0.99)
 
+    async def test_live_late_favorite_blocks_entry_after_recent_flip(self):
+        common = (
+            patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", False),
+            patch.object(strategy, "SINGLE_LEG_ENTRY_ENABLED", False),
+            patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
+            patch.object(strategy, "LATE_FAVORITE_MIN_PRICE", 0.98),
+            patch.object(strategy, "LATE_FAVORITE_MAX_PRICE", 0.99),
+            patch.object(strategy, "LATE_FAVORITE_FLIP_LOOKBACK_SECONDS", 60.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+        )
+        with common[0], common[1], common[2], common[3], common[4], common[5], common[6], common[7]:
+            up_d, down_d = self._favorite_books(up_ask=0.05, down_ask=0.95)     # 先是 Down 領先
+            strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up_d, down_d
+            await strategy.evaluate_and_act("btc-window", None, 55.0, None)
+            self.assertIsNone(strategy.live_state["position"])
+            up, down = self._favorite_books(up_ask=0.98, down_ask=0.03)         # 翻成 Up 0.98
+            strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up, down
+            strategy.live_state["lastActionAt"] = 0
+            await strategy.evaluate_and_act("btc-window", None, 40.0, None)
+            self.assertIsNone(strategy.live_state["position"])
+            diag = strategy._live_window_diagnostic("btc-window")
+            self.assertGreaterEqual(diag["reasonCounts"].get("favorite_recent_flip", 0), 1)
+            strategy.live_state["favoriteLeaderSeen"]["Down"] -= 70              # 超過 60 秒 → 放行
+            strategy.live_state["lastActionAt"] = 0
+            await strategy.evaluate_and_act("btc-window", None, 35.0, None)
+            self.assertEqual(strategy.live_state["position"]["side"], "Up")
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (

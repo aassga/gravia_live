@@ -141,6 +141,11 @@ LATE_FAVORITE_TAKE_PROFIT_PRICE = (
 )
 # (B) 同一邊的 ask 必須連續 >= 門檻這麼多秒才進（價格觸發變體用 10 秒）；0 = 看到就進。
 LATE_FAVORITE_STABLE_SECONDS = float(_LIVE_VARIANT.get("favoriteStableSeconds") or 0)
+# (A) 翻面偵測：進場前 N 秒內另一邊曾 >= 門檻就不進（0 = 關閉）。POLY_LIVE_FAVORITE_FLIP_LOOKBACK 可覆寫。
+LATE_FAVORITE_FLIP_LOOKBACK_SECONDS = float(
+    os.environ.get("POLY_LIVE_FAVORITE_FLIP_LOOKBACK") or _LIVE_VARIANT.get("favoriteFlipLookbackSeconds") or 0
+)
+LATE_FAVORITE_FLIP_THRESHOLD = float(_LIVE_VARIANT.get("favoriteFlipThreshold") or 0.90)
 # 領先方翻面時的停損：持有腿保守可賣價 <= 這個價就 FOK 賣出（WS tick 與 3 秒輪詢都檢查）。
 # POLY_LIVE_FAVORITE_STOP_LOSS_PRICE 可覆寫，0 = 關閉。
 _fav_stop_raw = os.environ.get("POLY_LIVE_FAVORITE_STOP_LOSS_PRICE", "").strip()
@@ -1036,6 +1041,14 @@ def _late_favorite_plan(
     if ask > LATE_FAVORITE_MAX_PRICE:
         diag("favorite_price_above_maximum", selectedSide=side, selectedAsk=ask, favoriteMaxPrice=LATE_FAVORITE_MAX_PRICE)
         return None
+    if LATE_FAVORITE_FLIP_LOOKBACK_SECONDS > 0:
+        other = "Down" if side == "Up" else "Up"
+        seen = (live_state.get("favoriteLeaderSeen") or {})
+        if seen.get("slug") == diagnostic_slug and seen.get(other) is not None \
+                and time.time() - float(seen[other]) <= LATE_FAVORITE_FLIP_LOOKBACK_SECONDS:
+            diag("favorite_recent_flip", selectedSide=side, otherSideLeaderAgoSeconds=time.time() - float(seen[other]),
+                 flipLookbackSeconds=LATE_FAVORITE_FLIP_LOOKBACK_SECONDS)
+            return None
     if LATE_FAVORITE_STABLE_SECONDS > 0:
         # (B) 跟模擬版 _try_late_favorite_entry 同一套：換邊或領先方消失就重新計時。
         now = time.time()
@@ -1084,6 +1097,19 @@ def _late_favorite_plan(
     return plan
 
 
+def _track_live_favorite_leaders(slug: str, up_book: dict, down_book: dict) -> None:
+    """(A) 記錄本窗口每一邊最後一次 ask >= 門檻的時間；換窗口就重置。"""
+    seen = live_state.get("favoriteLeaderSeen")
+    if not isinstance(seen, dict) or seen.get("slug") != slug:
+        seen = {"slug": slug, "Up": None, "Down": None}
+        live_state["favoriteLeaderSeen"] = seen
+    now = time.time()
+    for side, book in (("Up", up_book), ("Down", down_book)):
+        asks = book.get("asks") or []
+        if asks and float(asks[0]["price"]) >= LATE_FAVORITE_FLIP_THRESHOLD:
+            seen[side] = now
+
+
 async def _try_late_favorite_entry(
     slug: str, up_book: dict, down_book: dict, remaining_seconds: float, cash: float, dry_run: bool
 ) -> bool:
@@ -1091,6 +1117,8 @@ async def _try_late_favorite_entry(
     if live_state.get("lateFavoriteWindowSlug") == slug:
         record_live_window_diagnostic(slug, "favorite_already_entered")
         return False
+    if LATE_FAVORITE_FLIP_LOOKBACK_SECONDS > 0:
+        _track_live_favorite_leaders(slug, up_book, down_book)
     plan = _late_favorite_plan(up_book, down_book, remaining_seconds, cash, diagnostic_slug=slug)
     if not plan:
         return False
@@ -2990,6 +3018,7 @@ def _log_startup_banner(mode: str) -> None:
             f"  買領先方已啟用：剩餘 {LATE_FAVORITE_MIN_REMAINING:.0f}~{LATE_FAVORITE_WINDOW_SECONDS:.0f}s、"
             f"某邊 ask ${LATE_FAVORITE_MIN_PRICE:.2f}~${LATE_FAVORITE_MAX_PRICE:.2f}"
             f"{f'、連續 >= {LATE_FAVORITE_STABLE_SECONDS:.0f}s' if LATE_FAVORITE_STABLE_SECONDS > 0 else ''}"
+            f"{f'、{LATE_FAVORITE_FLIP_LOOKBACK_SECONDS:.0f}s 內另一邊曾 >= {LATE_FAVORITE_FLIP_THRESHOLD:.2f} 不進' if LATE_FAVORITE_FLIP_LOOKBACK_SECONDS > 0 else ''}"
             f"（不看 Chainlink）→ 買該邊抱到結算；"
             "兩腿鎖利／晚進場方向性／單邊進場全部停用"
         )

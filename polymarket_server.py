@@ -216,6 +216,10 @@ FOLLOW_TAKER_MIN_PRICE         = 0.98
 OPEN_MOMENTUM_MAX_ELAPSED_SECONDS = 10.0
 OPEN_MOMENTUM_MAX_PRICE           = 0.55
 OPEN_MOMENTUM_MIN_MOVE_PCT        = 0.01   # 前一分鐘 Binance 漲跌至少這麼多才算有動能
+# 2026-09-14 21:04 真單 -$10.90：進場前 60 秒內領先方換邊三次（Up 0.85→0.20→0.78→0.96），買 0.99 後又翻回 Down。
+# (A) 翻面偵測：進場前 favoriteFlipLookbackSeconds 秒內另一邊曾 >= favoriteFlipThreshold 就不進。
+FAVORITE_FLIP_LOOKBACK_SECONDS = 60.0
+FAVORITE_FLIP_THRESHOLD        = 0.90
 # 2026-09-14 「寬鬆鎖利」模擬組：24 小時 290 窗裡看得到的兩腿加總 <= 0.98 有 16 窗，但經「每腿進位 +1 tick」
 # 判斷價後只剩 1 窗。這組拿掉額外 tick、深度全吃（>= 5 股）、最低淨利 0.005、門檻 0.98、不做穩定／深度倍數
 # 檢查，先在模擬看能進幾筆、每筆賺多少；搬到實盤前必須先 DRY-RUN 驗證成交率。
@@ -469,18 +473,20 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-last60-098-hold",
             "assetId":               "btc",
-            "label":                 "BTC 最後 60 秒買 ≥0.98 抱到結算（照抄 0x806f）",
+            "label":                 "BTC 最後 60 秒買 ≥0.98 抱到結算（穩定 10s、翻面偵測）",
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateFavorite":          True,
-            # 2026-09-14 開放給實盤選用
+            # 2026-09-14 開放給實盤選用；21:04 真單 -$10.90 後依使用者要求加 (A) 翻面偵測 + (C) 穩定 10 秒
             "favoriteWindowSeconds": 60.0,
             "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
             "favoriteMinPrice":      0.98,
             "favoriteMaxPrice":      0.99,
             "favoriteStopLossPrice": None,
             "favoriteTakeProfitPrice": None,
-            "favoriteStableSeconds": 0.0,
+            "favoriteStableSeconds": 10.0,
+            "favoriteFlipLookbackSeconds": FAVORITE_FLIP_LOOKBACK_SECONDS,
+            "favoriteFlipThreshold": FAVORITE_FLIP_THRESHOLD,
         })
         AB_VARIANTS.append({
             "id":                    "btc-last30-45-088-092",
@@ -2549,6 +2555,10 @@ def _try_late_favorite_entry(
     if st.get("lateFavoriteWindowSlug") == slug:
         record_window_diagnostic(variant_id, slug, "favorite_already_entered")
         return
+    flip_lookback = float(variant.get("favoriteFlipLookbackSeconds") or 0)
+    if flip_lookback > 0:
+        # (A) 翻面偵測：整個窗口都在記「哪一邊最後一次 >= 門檻是什麼時候」，進場時檢查另一邊。
+        _track_favorite_leaders(st, slug, up_book, down_book, float(variant.get("favoriteFlipThreshold", FAVORITE_FLIP_THRESHOLD)))
     window_seconds = float(variant.get("favoriteWindowSeconds", LATE_FAVORITE_WINDOW_SECONDS))
     min_remaining = float(variant.get("favoriteMinRemaining", LATE_FAVORITE_MIN_REMAINING))
     if remaining_seconds > window_seconds or remaining_seconds < min_remaining:
@@ -2574,6 +2584,15 @@ def _try_late_favorite_entry(
             selectedSide=side, selectedAsk=ask, favoriteMaxPrice=max_price, **common,
         )
         return
+    if flip_lookback > 0:
+        other = "Down" if side == "Up" else "Up"
+        seen = (st.get("favoriteLeaderSeen") or {}).get(other)
+        if seen is not None and time.time() - float(seen) <= flip_lookback:
+            record_window_diagnostic(
+                variant_id, slug, "favorite_recent_flip",
+                selectedSide=side, otherSideLeaderAgoSeconds=time.time() - float(seen), flipLookbackSeconds=flip_lookback, **common,
+            )
+            return
     stable_seconds = float(variant.get("favoriteStableSeconds") or 0)
     if stable_seconds > 0:
         # (B) 同一邊的 ask 必須連續 >= 門檻 stable_seconds 秒；換邊或掉到門檻下就重新計時。
@@ -2695,6 +2714,19 @@ def _try_open_momentum_entry(
     record_window_diagnostic(variant_id, slug, "momentum_entered", selectedSide=side, momentumPct=move_pct, decisionPrice=fill["decisionPrice"])
     save_sim_state()
     log.info(f"[SIM:{variant_id}] 開盤動能 {side} 前一分鐘 {move_pct:+.3f}% ask=${ask:.2f} VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f}")
+
+
+def _track_favorite_leaders(st: dict, slug: str, up_book: dict, down_book: dict, threshold: float) -> None:
+    """記錄本窗口每一邊最後一次 ask >= threshold 的時間（翻面偵測用）；換窗口就重置。"""
+    seen = st.get("favoriteLeaderSeen")
+    if not isinstance(seen, dict) or seen.get("slug") != slug:
+        seen = {"slug": slug, "Up": None, "Down": None}
+        st["favoriteLeaderSeen"] = seen
+    now = time.time()
+    for side, book in (("Up", up_book), ("Down", down_book)):
+        asks = book.get("asks") or []
+        if asks and float(asks[0]["price"]) >= threshold:
+            seen[side] = now
 
 
 def _try_late_favorite_take_profit(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
@@ -4567,6 +4599,7 @@ def build_ab_leaderboard() -> list:
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
             "favoriteTakeProfitPrice": v.get("favoriteTakeProfitPrice"),
             "favoriteStableSeconds": v.get("favoriteStableSeconds"),
+            "favoriteFlipLookbackSeconds": v.get("favoriteFlipLookbackSeconds"),
             "favoriteFixedShares": v.get("favoriteFixedShares"),
             "pairPriceBufferTicks": v.get("pairPriceBufferTicks"),
             "pairDepthCapFraction": v.get("pairDepthCapFraction"),
