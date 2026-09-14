@@ -465,7 +465,7 @@ for _asset in ASSETS:
             "assetId":               "btc",
             "label":                 (
                 f"BTC 價格觸發買領先方（≥{PRICE_TRIGGERED_MIN_PRICE:.2f} 穩定 "
-                f"{PRICE_TRIGGERED_STABLE_SECONDS:.0f}s、不限最後 60s、停損 0.85）"
+                f"{PRICE_TRIGGERED_STABLE_SECONDS:.0f}s、不限最後 60s、停損 0.60）"
             ),
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
@@ -474,8 +474,8 @@ for _asset in ASSETS:
             "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
             "favoriteMinPrice":      PRICE_TRIGGERED_MIN_PRICE,
             "favoriteMaxPrice":      PRICE_TRIGGERED_MAX_PRICE,
-            # 2026-09-14 依使用者要求加上 0.85 停損（模擬幾乎全贏、但一次翻面就整注歸零）。
-            "favoriteStopLossPrice": 0.85,
+            # 2026-09-14 依使用者要求加上 0.85 停損；買價改 0.88～0.92 後緩衝太小，再依要求下調為 0.60。
+            "favoriteStopLossPrice": 0.60,
             "favoriteTakeProfitPrice": LATE_FAVORITE_TAKE_PROFIT_PRICE,
             "favoriteStableSeconds": PRICE_TRIGGERED_STABLE_SECONDS,
         })
