@@ -524,6 +524,23 @@ for _asset in ASSETS:
             "favoriteStableSeconds": 0.0,
         })
         AB_VARIANTS.append({
+            # 2026-09-15 依使用者要求：最後 30～90 秒、0.92～0.95、不停損（比 10～30 秒版早進場、機會較多）。
+            "id":                    "btc-last30-90-092-095",
+            "assetId":               "btc",
+            "label":                 "BTC 最後 30～90 秒買領先方（0.92～0.95、不停損）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateFavorite":          True,
+            "simOnly":               True,
+            "favoriteWindowSeconds": 90.0,
+            "favoriteMinRemaining":  30.0,
+            "favoriteMinPrice":      0.92,
+            "favoriteMaxPrice":      0.95,
+            "favoriteStopLossPrice": None,
+            "favoriteTakeProfitPrice": None,
+            "favoriteStableSeconds": 0.0,
+        })
+        AB_VARIANTS.append({
             "id":                    "btc-open-momentum",
             "assetId":               "btc",
             "label":                 "BTC 開盤動能方向性（開盤 10s 內、ask≤0.55、抱到結算）",
