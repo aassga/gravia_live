@@ -247,7 +247,7 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_follow_taker_buys_fixed_shares_immediately_at_098(self):
         vid = "btc-follow-taker"
         v = sim.AB_VARIANT_BY_ID[vid]
-        self.assertTrue(v["simOnly"]); self.assertIsNone(v["favoriteStopLossPrice"]); self.assertEqual(v["favoriteFixedShares"], 100.0)
+        self.assertFalse(v.get("simOnly")); self.assertIsNone(v["favoriteStopLossPrice"]); self.assertEqual(v["favoriteFixedShares"], 100.0)
         up, down = self._favorite_books(up_ask=0.97, down_ask=0.04)
         sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)     # 0.97 < 0.98 不進
         self.assertIsNone(sim.ab_states[vid]["position"])

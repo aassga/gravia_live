@@ -451,7 +451,7 @@ for _asset in ASSETS:
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateFavorite":          True,
-            "simOnly":               True,
+            # 2026-09-14 開放給實盤選用：實盤端不套用固定股數（照每注比例），停損用 .env 覆寫。
             "favoriteWindowSeconds": PRICE_TRIGGERED_WINDOW_SECONDS,
             "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
             "favoriteMinPrice":      FOLLOW_TAKER_MIN_PRICE,
