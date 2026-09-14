@@ -357,6 +357,20 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading(vid, "btc-window", up, down, 30.0, None)
         self.assertEqual(sim.ab_states[vid]["position"]["side"], "Up")
 
+    def test_favorite_family_is_generated_for_other_assets_with_scaled_windows(self):
+        # 測試環境的 POLY_SIM_ASSETS 預設含 btc-15m：時間參數 ×3、穩定秒數不變，另有 120 秒 0.92～0.98 專屬組
+        ids = {v["id"] for v in sim.AB_VARIANTS}
+        for suffix in ("follow-taker", "price-triggered-favorite", "last60-098-hold", "last30-45-088-092", "last10-30-092-095", "relaxed-lock"):
+            self.assertIn(f"btc-15m-{suffix}", ids)
+        v = sim.AB_VARIANT_BY_ID["btc-15m-last60-098-hold"]
+        self.assertEqual((v["favoriteWindowSeconds"], v["favoriteStableSeconds"], v["favoriteFlipLookbackSeconds"]), (180.0, 10.0, 180.0))
+        v2 = sim.AB_VARIANT_BY_ID["btc-15m-price-triggered-favorite"]
+        self.assertEqual((v2["favoriteWindowSeconds"], v2["favoriteStableSeconds"], v2["favoriteStopLossPrice"]), (720.0, 10.0, 0.60))
+        v3 = sim.AB_VARIANT_BY_ID["btc-15m-last120-092-098-hold"]
+        self.assertEqual((v3["favoriteWindowSeconds"], v3["favoriteMinPrice"], v3["favoriteMaxPrice"], v3["favoriteStopLossPrice"]), (120.0, 0.92, 0.98, None))
+        self.assertNotIn("btc-follow-taker-x", ids)   # BTC 5m 沿用既有獨立定義，不重複生成
+        self.assertEqual(sum(1 for v in sim.AB_VARIANTS if v["id"] == "btc-follow-taker"), 1)
+
     def test_btc_two_sided_maker_variant_uses_relaxed_parameters(self):
         v = sim.AB_VARIANT_BY_ID["btc-two-sided-maker"]
         self.assertTrue(v["marketMakerOnly"]); self.assertTrue(v["simOnly"])
@@ -649,10 +663,10 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertEqual(pos["side"], "Down")
 
-    def test_btc_15m_uses_only_dump_then_hedge_variant(self):
+    def test_btc_15m_has_dump_then_hedge_plus_favorite_family(self):
         self.assertNotIn("btc-4h", [asset["id"] for asset in sim.ASSETS])
         variants = [v for v in sim.AB_VARIANTS if v["assetId"] == "btc-15m"]
-        self.assertEqual([v["id"] for v in variants], ["btc-15m-dump-then-hedge"])
+        self.assertEqual([v["id"] for v in variants][0], "btc-15m-dump-then-hedge")   # 2026-09-14 起另加買領先方系列
         variant = variants[0]
         self.assertTrue(variant["dumpThenHedge"])
         self.assertEqual(variant["lookbackSeconds"], 3.0)

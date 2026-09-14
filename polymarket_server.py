@@ -566,6 +566,52 @@ for _asset in ASSETS:
             "lateDirectionOnly":     True,
             "lateDirectionMaxPrice": 0.92,
         })
+
+
+def _favorite_family_for_asset(asset: dict) -> list[dict]:
+    """2026-09-14 依使用者要求：把 BTC 5m 上的買領先方系列（跟單 T／價格觸發／最後 N 秒 ≥0.98 抱到結算／
+    最後 30～45 秒 0.88～0.92／最後 10～30 秒 0.92～0.95）與寬鬆鎖利複製到其他資產（BTC 15m、SOL…）。
+    時間參數依窗口長度等比放大（15 分鐘 ×3），穩定秒數不放大；BTC 15m 另加「最後 120 秒 0.92～0.98
+    不停損」（3 小時掃描該區間 100%／每股 +0.121）。BTC 5m 本身沿用上面既有的獨立定義。"""
+    aid, label, wsec = asset["id"], asset["label"], float(asset.get("windowSeconds", 300))
+    k = wsec / 300.0
+    common = {"assetId": aid, "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "lateFavorite": True, "simOnly": True,
+              "favoriteMinRemaining": LATE_FAVORITE_MIN_REMAINING, "favoriteTakeProfitPrice": None}
+    fam = [
+        dict(common, id=f"{aid}-follow-taker", label=f"{label} 跟單 T（≥{FOLLOW_TAKER_MIN_PRICE:.2f} 即買、不停損）",
+             favoriteWindowSeconds=PRICE_TRIGGERED_WINDOW_SECONDS * k, favoriteMinPrice=FOLLOW_TAKER_MIN_PRICE, favoriteMaxPrice=0.99,
+             favoriteStopLossPrice=None, favoriteStableSeconds=0.0),
+        dict(common, id=f"{aid}-price-triggered-favorite",
+             label=f"{label} 價格觸發買領先方（≥{PRICE_TRIGGERED_MIN_PRICE:.2f} 穩定 {PRICE_TRIGGERED_STABLE_SECONDS:.0f}s、停損 0.60）",
+             favoriteWindowSeconds=PRICE_TRIGGERED_WINDOW_SECONDS * k, favoriteMinPrice=PRICE_TRIGGERED_MIN_PRICE,
+             favoriteMaxPrice=PRICE_TRIGGERED_MAX_PRICE, favoriteStopLossPrice=0.60, favoriteStableSeconds=PRICE_TRIGGERED_STABLE_SECONDS),
+        dict(common, id=f"{aid}-last60-098-hold", label=f"{label} 最後 {60 * k:.0f} 秒買 ≥0.98 抱到結算（穩定 10s、翻面偵測）",
+             favoriteWindowSeconds=60.0 * k, favoriteMinPrice=0.98, favoriteMaxPrice=0.99, favoriteStopLossPrice=None,
+             favoriteStableSeconds=10.0, favoriteFlipLookbackSeconds=FAVORITE_FLIP_LOOKBACK_SECONDS * k, favoriteFlipThreshold=FAVORITE_FLIP_THRESHOLD),
+        dict(common, id=f"{aid}-last30-45-088-092", label=f"{label} 最後 {30 * k:.0f}～{45 * k:.0f} 秒買領先方（0.88～0.92、停損 0.60）",
+             favoriteWindowSeconds=45.0 * k, favoriteMinRemaining=30.0 * k, favoriteMinPrice=0.88, favoriteMaxPrice=0.92,
+             favoriteStopLossPrice=0.60, favoriteStableSeconds=0.0),
+        dict(common, id=f"{aid}-last10-30-092-095", label=f"{label} 最後 {10 * k:.0f}～{30 * k:.0f} 秒買領先方（0.92～0.95、不停損）",
+             favoriteWindowSeconds=30.0 * k, favoriteMinRemaining=10.0 * k, favoriteMinPrice=0.92, favoriteMaxPrice=0.95,
+             favoriteStopLossPrice=None, favoriteStableSeconds=0.0),
+        {
+            "id": f"{aid}-relaxed-lock", "assetId": aid,
+            "label": f"{label} 寬鬆鎖利（≤{RELAXED_LOCK_MAX_SUM:.2f}、無額外 tick、深度全吃、淨利≥{RELAXED_LOCK_MIN_NET_PER_SHARE:.3f}）",
+            "entryMaxPrice": None, "lockMaxSum": RELAXED_LOCK_MAX_SUM, "simOnly": True,
+            "pairPriceBufferTicks": RELAXED_LOCK_BUFFER_TICKS, "pairPriceRoundNearest": True,
+            "pairDepthCapFraction": RELAXED_LOCK_DEPTH_FRACTION, "minNetLockPerShare": RELAXED_LOCK_MIN_NET_PER_SHARE,
+        },
+    ]
+    if aid == "btc-15m":
+        fam.append(dict(common, id="btc-15m-last120-092-098-hold", label="BTC 15m 最後 120 秒買領先方（0.92～0.98、不停損）",
+                        favoriteWindowSeconds=120.0, favoriteMinPrice=0.92, favoriteMaxPrice=0.98,
+                        favoriteStopLossPrice=None, favoriteStableSeconds=0.0))
+    return fam
+
+
+for _asset in ASSETS:
+    if _asset["id"] != "btc" and not _asset.get("marketMakerOnly"):
+        AB_VARIANTS.extend(_favorite_family_for_asset(_asset))
 del _asset
 # 2026-09-14 依使用者要求從模擬盤移除 btc-main（0.40/0.95）、btc-loose（0.45/0.98）、
 # btc-binance-late-direction（Binance T-10s）、btc-two-sided-maker（被動雙邊掛單，212 筆 -$62）、
