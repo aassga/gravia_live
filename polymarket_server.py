@@ -569,12 +569,12 @@ for _asset in ASSETS:
 del _asset
 # 2026-09-14 依使用者要求從模擬盤移除 btc-main（0.40/0.95）、btc-loose（0.45/0.98）、
 # btc-binance-late-direction（Binance T-10s）、btc-two-sided-maker（被動雙邊掛單，212 筆 -$62）、
-# btc-open-momentum（開盤動能方向性，2026-09-14 依使用者要求移除）。用環境變數過濾而不是刪定義：測試仍能用這些變體
+# btc-open-momentum（開盤動能方向性）、btc-late-favorite（最後 60 秒 0.95～0.97 原版，24h -$2,022），2026-09-14 依使用者要求移除。用環境變數過濾而不是刪定義：測試仍能用這些變體
 # 驗證共用的鎖利邏輯（tests/conftest.py 把清單設為空），歷史成交仍在 sqlite。
 _SIM_DISABLED_VARIANT_IDS = {
     value.strip()
     for value in os.environ.get(
-        "POLY_SIM_DISABLED_VARIANTS", "btc-main,btc-loose,btc-binance-late-direction,btc-two-sided-maker,btc-open-momentum"
+        "POLY_SIM_DISABLED_VARIANTS", "btc-main,btc-loose,btc-binance-late-direction,btc-two-sided-maker,btc-open-momentum,btc-late-favorite"
     ).split(",")
     if value.strip()
 }
