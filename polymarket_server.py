@@ -198,9 +198,9 @@ LATE_FAVORITE_STOP_LOSS_PRICE  = 0.85
 # 只要領先方 ask >= 0.97～0.98 就買一筆、不限最後 60 秒、不停損、只做有明顯領先方的窗口。
 # (A) 剩餘 <= 240 秒（開盤 60 秒後）皆可進；(B) ask 連續 >= 門檻 10 秒才進，避免剛翻上來就追。
 PRICE_TRIGGERED_WINDOW_SECONDS = 240.0
-# 2026-09-14 依使用者要求 0.97～0.99 → 0.95～0.98（避掉買 0.99 只賺 1 分的窗口）。
-PRICE_TRIGGERED_MIN_PRICE      = 0.95
-PRICE_TRIGGERED_MAX_PRICE      = 0.98
+# 2026-09-14 依使用者要求：0.97～0.99 → 0.95～0.98 → 改回 0.97～0.99（停損 0.85 保留）。
+PRICE_TRIGGERED_MIN_PRICE      = 0.97
+PRICE_TRIGGERED_MAX_PRICE      = 0.99
 PRICE_TRIGGERED_STABLE_SECONDS = 10.0
 # 2026-09-14 「跟單組 T」：照抄剖析出的吃單型錢包——開盤 60 秒後任何時候、領先方 ask >= 0.98 就買
 # 固定 100 股、不等穩定、不停損、每窗口一次。預期勝率 ~98%，每股毛利 1～2 分，驗證用。
