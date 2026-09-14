@@ -306,6 +306,39 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual(last["exitReason"], "favorite_take_profit")
         self.assertGreater(last["pnl"], 0)
 
+    def test_report_driven_variants_exist_with_expected_windows(self):
+        a = sim.AB_VARIANT_BY_ID["btc-last60-098-hold"]
+        self.assertEqual((a["favoriteWindowSeconds"], a["favoriteMinPrice"], a["favoriteStopLossPrice"]), (60.0, 0.98, None))
+        b = sim.AB_VARIANT_BY_ID["btc-last30-45-088-092"]
+        self.assertEqual((b["favoriteWindowSeconds"], b["favoriteMinRemaining"], b["favoriteMinPrice"], b["favoriteMaxPrice"], b["favoriteStopLossPrice"]), (45.0, 30.0, 0.88, 0.92, 0.60))
+        # (2) 只在剩 30～45 秒進：剩 50 秒不進、剩 40 秒進
+        up, down = self._favorite_books(up_ask=0.90, down_ask=0.11)
+        sim.simulate_trading("btc-last30-45-088-092", "btc-window", up, down, 50.0, None)
+        self.assertIsNone(sim.ab_states["btc-last30-45-088-092"]["position"])
+        sim.simulate_trading("btc-last30-45-088-092", "btc-window", up, down, 40.0, None)
+        self.assertEqual(sim.ab_states["btc-last30-45-088-092"]["position"]["side"], "Up")
+
+    def test_open_momentum_buys_direction_of_previous_minute_within_first_seconds(self):
+        vid = "btc-open-momentum"
+        ms = sim.markets_state["btc"]
+        ms["klines"] = [{"t": 1_000, "o": 100.0, "c": 100.0}, {"t": 61_000, "o": 100.0, "c": 100.05}]  # 前一分鐘 +0.05%
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.52, "size": 500}], "bids": [{"price": 0.51, "size": 500}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.49, "size": 500}], "bids": [{"price": 0.48, "size": 500}]})
+        sim.simulate_trading(vid, "btc-window", up, down, 240.0, None)      # 開盤 60 秒後：不進
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        sim.simulate_trading(vid, "btc-window", up, down, 295.0, None)      # 開盤 5 秒：買 Up
+        pos = sim.ab_states[vid]["position"]
+        self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up"); self.assertEqual(pos["signalSource"], "open_momentum")
+        # 之後不補腿、不停損
+        up2 = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.10, "size": 500}], "bids": [{"price": 0.09, "size": 500}]})
+        sim.simulate_trading(vid, "btc-window", up2, down, 100.0, None)
+        self.assertIsNotNone(sim.ab_states[vid]["position"])
+        # 動能不足不進
+        sim.ab_states[vid]["position"] = None; sim.ab_states[vid]["openMomentumWindowSlug"] = None
+        ms["klines"] = [{"t": 1_000, "o": 100.0, "c": 100.0}, {"t": 61_000, "o": 100.0, "c": 100.001}]
+        sim.simulate_trading(vid, "btc-window-2", up, down, 295.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+
     def test_btc_two_sided_maker_variant_uses_relaxed_parameters(self):
         v = sim.AB_VARIANT_BY_ID["btc-two-sided-maker"]
         self.assertTrue(v["marketMakerOnly"]); self.assertTrue(v["simOnly"])

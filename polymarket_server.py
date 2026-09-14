@@ -208,6 +208,14 @@ PRICE_TRIGGERED_STABLE_SECONDS = 10.0
 # 2026-09-14 「跟單組 T」：照抄剖析出的吃單型錢包——開盤 60 秒後任何時候、領先方 ask >= 0.98 就買
 # 固定 100 股、不等穩定、不停損、每窗口一次。預期勝率 ~98%，每股毛利 1～2 分，驗證用。
 FOLLOW_TAKER_MIN_PRICE         = 0.98
+# 2026-09-14 依 24h 每週掃描報告再開三組觀察：
+#  (1) 照抄 0x806ffbfb（121 窗 +$2,146）：最後 60 秒、領先方 >= 0.98 看到就買、抱到結算、不停損。
+#  (2) 報告裡兩個「最佳」條件疊加：最後 30～45 秒 + 買價 0.88～0.92（勝率 99.7% / 每股 +0.077），停損 0.60。
+#  (3) 「開盤前先買」近似版：開盤後 10 秒內依 Binance 前一分鐘動能押方向（ask <= 0.55），抱到結算、不停損。
+#      本週最賺的錢包是這型（30 窗 +$2,498），但整體型態勝率只有 43%，純觀察用。
+OPEN_MOMENTUM_MAX_ELAPSED_SECONDS = 10.0
+OPEN_MOMENTUM_MAX_PRICE           = 0.55
+OPEN_MOMENTUM_MIN_MOVE_PCT        = 0.01   # 前一分鐘 Binance 漲跌至少這麼多才算有動能
 # 2026-09-14 「寬鬆鎖利」模擬組：24 小時 290 窗裡看得到的兩腿加總 <= 0.98 有 16 窗，但經「每腿進位 +1 tick」
 # 判斷價後只剩 1 窗。這組拿掉額外 tick、深度全吃（>= 5 股）、最低淨利 0.005、門檻 0.98、不做穩定／深度倍數
 # 檢查，先在模擬看能進幾筆、每筆賺多少；搬到實盤前必須先 DRY-RUN 驗證成交率。
@@ -459,6 +467,50 @@ for _asset in ASSETS:
             "favoriteStopLossPrice": None,
             "favoriteStableSeconds": 0.0,
             "favoriteFixedShares":   FOLLOW_TAKER_FIXED_SHARES,
+        })
+        AB_VARIANTS.append({
+            "id":                    "btc-last60-098-hold",
+            "assetId":               "btc",
+            "label":                 "BTC 最後 60 秒買 ≥0.98 抱到結算（照抄 0x806f）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateFavorite":          True,
+            "simOnly":               True,
+            "favoriteWindowSeconds": 60.0,
+            "favoriteMinRemaining":  LATE_FAVORITE_MIN_REMAINING,
+            "favoriteMinPrice":      0.98,
+            "favoriteMaxPrice":      0.99,
+            "favoriteStopLossPrice": None,
+            "favoriteTakeProfitPrice": None,
+            "favoriteStableSeconds": 0.0,
+        })
+        AB_VARIANTS.append({
+            "id":                    "btc-last30-45-088-092",
+            "assetId":               "btc",
+            "label":                 "BTC 最後 30～45 秒買領先方（0.88～0.92、停損 0.60）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateFavorite":          True,
+            "simOnly":               True,
+            "favoriteWindowSeconds": 45.0,
+            "favoriteMinRemaining":  30.0,
+            "favoriteMinPrice":      0.88,
+            "favoriteMaxPrice":      0.92,
+            "favoriteStopLossPrice": 0.60,
+            "favoriteTakeProfitPrice": None,
+            "favoriteStableSeconds": 0.0,
+        })
+        AB_VARIANTS.append({
+            "id":                    "btc-open-momentum",
+            "assetId":               "btc",
+            "label":                 "BTC 開盤動能方向性（開盤 10s 內、ask≤0.55、抱到結算）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "openMomentum":          True,
+            "simOnly":               True,
+            "openMaxElapsedSeconds": OPEN_MOMENTUM_MAX_ELAPSED_SECONDS,
+            "openMaxPrice":          OPEN_MOMENTUM_MAX_PRICE,
+            "openMinMovePct":        OPEN_MOMENTUM_MIN_MOVE_PCT,
         })
         AB_VARIANTS.append({
             "id":                    "btc-price-triggered-favorite",
@@ -2590,6 +2642,62 @@ def _try_late_favorite_entry(
     )
 
 
+def _try_open_momentum_entry(
+    variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float
+) -> None:
+    """「開盤前先買」的近似版：開盤後 openMaxElapsedSeconds 秒內，依 Binance 前一分鐘 1m K 線的漲跌方向
+    買對應那邊（ask <= openMaxPrice），每窗口一次、抱到結算。純觀察用。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    st = ab_states[variant_id]
+    if st.get("openMomentumWindowSlug") == slug:
+        return
+    asset = next((a for a in ASSETS if a["id"] == variant["assetId"]), {})
+    window_seconds = float(asset.get("windowSeconds", WINDOW_SECONDS))
+    elapsed = window_seconds - remaining_seconds
+    if elapsed < 0 or elapsed > float(variant.get("openMaxElapsedSeconds", OPEN_MOMENTUM_MAX_ELAPSED_SECONDS)):
+        record_window_diagnostic(variant_id, slug, "outside_entry_window", remainingSeconds=remaining_seconds)
+        return
+    klines = markets_state[variant["assetId"]].get("klines") or []
+    if len(klines) < 2:
+        record_window_diagnostic(variant_id, slug, "momentum_missing_klines")
+        return
+    prev, last = klines[-2], klines[-1]
+    try:
+        move_pct = (float(last["c"]) - float(prev["c"])) / float(prev["c"]) * 100
+    except (KeyError, TypeError, ZeroDivisionError):
+        record_window_diagnostic(variant_id, slug, "momentum_missing_klines")
+        return
+    if abs(move_pct) < float(variant.get("openMinMovePct", OPEN_MOMENTUM_MIN_MOVE_PCT)):
+        record_window_diagnostic(variant_id, slug, "momentum_below_minimum", momentumPct=move_pct)
+        return
+    side, book = ("Up", up_book) if move_pct > 0 else ("Down", down_book)
+    asks = book.get("asks") or []
+    ask = float(asks[0]["price"]) if asks else None
+    max_price = float(variant.get("openMaxPrice", OPEN_MOMENTUM_MAX_PRICE))
+    if ask is None or ask > max_price:
+        record_window_diagnostic(variant_id, slug, "momentum_price_above_maximum", selectedSide=side, selectedAsk=ask, momentumPct=move_pct)
+        return
+    if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
+        record_window_diagnostic(variant_id, slug, "selected_book_not_fresh", selectedSide=side)
+        return
+    shares, budget = _target_order_size(variant_id)
+    if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_budget", targetShares=shares, budgetUsd=budget)
+        return
+    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    fill = simulate_buy_fill(book, shares) if shares >= float(book.get("minOrderSize", 1) or 1) else None
+    if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_ask_depth", targetShares=shares, selectedSide=side)
+        return
+    enter_position(variant_id, slug, side, fill, budget, None, None)
+    st["position"]["signalSource"] = "open_momentum"
+    st["position"]["signalDeltaPct"] = move_pct
+    st["openMomentumWindowSlug"] = slug
+    record_window_diagnostic(variant_id, slug, "momentum_entered", selectedSide=side, momentumPct=move_pct, decisionPrice=fill["decisionPrice"])
+    save_sim_state()
+    log.info(f"[SIM:{variant_id}] 開盤動能 {side} 前一分鐘 {move_pct:+.3f}% ask=${ask:.2f} VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f}")
+
+
 def _try_late_favorite_take_profit(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
     """獲利了結：持有腿 best bid >= favoriteTakeProfitPrice 且深度吃得下就整筆賣掉，不等結算。"""
     variant = AB_VARIANT_BY_ID[variant_id]
@@ -3359,6 +3467,12 @@ def _simulate_trading_impl(
 
     if variant.get("inventoryRotation"):
         _try_inventory_rotation(variant_id, slug, up_book, down_book, remaining_seconds, fair)
+        return
+
+    if variant.get("openMomentum"):
+        # 開盤動能方向性：只在開盤後幾秒進一次，之後抱到結算，不補腿、不停損。
+        if pos is None and remaining_seconds is not None:
+            _try_open_momentum_entry(variant_id, slug, up_book, down_book, remaining_seconds)
         return
 
     if variant.get("lateFavorite"):
@@ -4444,6 +4558,10 @@ def build_ab_leaderboard() -> list:
             "liveMirrorOnly": bool(v.get("liveMirrorOnly")),
             "dumpThenHedge": bool(v.get("dumpThenHedge")),
             "lateFavorite":  bool(v.get("lateFavorite")),
+            "openMomentum":  bool(v.get("openMomentum")),
+            "openMaxElapsedSeconds": v.get("openMaxElapsedSeconds"),
+            "openMaxPrice": v.get("openMaxPrice"),
+            "openMinMovePct": v.get("openMinMovePct"),
             "favoriteWindowSeconds": v.get("favoriteWindowSeconds"),
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
