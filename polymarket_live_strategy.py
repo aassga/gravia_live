@@ -130,8 +130,9 @@ ENABLE_LATE_DIRECTION = _LATE_DIRECTION_REQUESTED and bool(_LIVE_VARIANT.get("la
 LATE_FAVORITE_ENABLED = bool(_LIVE_VARIANT.get("lateFavorite"))
 LATE_FAVORITE_WINDOW_SECONDS = float(_LIVE_VARIANT.get("favoriteWindowSeconds", 60.0))
 LATE_FAVORITE_MIN_REMAINING = float(_LIVE_VARIANT.get("favoriteMinRemaining", 5.0))
-LATE_FAVORITE_MIN_PRICE = float(_LIVE_VARIANT.get("favoriteMinPrice", 0.95))
-LATE_FAVORITE_MAX_PRICE = float(_LIVE_VARIANT.get("favoriteMaxPrice", 0.97))
+# 2026-09-14：實盤可用 .env 覆寫買價區間（POLY_LIVE_FAVORITE_MIN_PRICE／MAX_PRICE），不動模擬變體。
+LATE_FAVORITE_MIN_PRICE = float(os.environ.get("POLY_LIVE_FAVORITE_MIN_PRICE") or _LIVE_VARIANT.get("favoriteMinPrice", 0.95))
+LATE_FAVORITE_MAX_PRICE = float(os.environ.get("POLY_LIVE_FAVORITE_MAX_PRICE") or _LIVE_VARIANT.get("favoriteMaxPrice", 0.97))
 # (B) 同一邊的 ask 必須連續 >= 門檻這麼多秒才進（價格觸發變體用 10 秒）；0 = 看到就進。
 LATE_FAVORITE_STABLE_SECONDS = float(_LIVE_VARIANT.get("favoriteStableSeconds") or 0)
 # 領先方翻面時的停損：持有腿保守可賣價 <= 這個價就 FOK 賣出（WS tick 與 3 秒輪詢都檢查）。
