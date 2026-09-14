@@ -505,6 +505,23 @@ for _asset in ASSETS:
             "favoriteStableSeconds": 0.0,
         })
         AB_VARIANTS.append({
+            # 2026-09-14 依 21:23 掃描（10～30 秒進場勝率 99.7～100%、0.92～0.95 每股 +0.024）開的對照組。
+            "id":                    "btc-last10-30-092-095",
+            "assetId":               "btc",
+            "label":                 "BTC 最後 10～30 秒買領先方（0.92～0.95、不停損）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "lateFavorite":          True,
+            "simOnly":               True,
+            "favoriteWindowSeconds": 30.0,
+            "favoriteMinRemaining":  10.0,
+            "favoriteMinPrice":      0.92,
+            "favoriteMaxPrice":      0.95,
+            "favoriteStopLossPrice": None,
+            "favoriteTakeProfitPrice": None,
+            "favoriteStableSeconds": 0.0,
+        })
+        AB_VARIANTS.append({
             "id":                    "btc-open-momentum",
             "assetId":               "btc",
             "label":                 "BTC 開盤動能方向性（開盤 10s 內、ask≤0.55、抱到結算）",
