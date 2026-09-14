@@ -590,7 +590,7 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
              favoriteStableSeconds=10.0, favoriteFlipLookbackSeconds=FAVORITE_FLIP_LOOKBACK_SECONDS * k, favoriteFlipThreshold=FAVORITE_FLIP_THRESHOLD),
         dict(common, id=f"{aid}-last30-45-088-092", label=f"{label} 最後 {30 * k:.0f}～{45 * k:.0f} 秒買領先方（0.88～0.92、停損 0.60）",
              favoriteWindowSeconds=45.0 * k, favoriteMinRemaining=30.0 * k, favoriteMinPrice=0.88, favoriteMaxPrice=0.92,
-             favoriteStopLossPrice=0.60, favoriteStableSeconds=0.0),
+             favoriteStopLossPrice=0.60, favoriteStableSeconds=0.0, simOnly=False),   # 2026-09-15 開放實盤選用（ETH）
         dict(common, id=f"{aid}-last10-30-092-095", label=f"{label} 最後 {10 * k:.0f}～{30 * k:.0f} 秒買領先方（0.92～0.95、不停損）",
              favoriteWindowSeconds=30.0 * k, favoriteMinRemaining=10.0 * k, favoriteMinPrice=0.92, favoriteMaxPrice=0.95,
              favoriteStopLossPrice=None, favoriteStableSeconds=0.0),
