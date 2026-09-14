@@ -580,7 +580,7 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
     fam = [
         dict(common, id=f"{aid}-follow-taker", label=f"{label} 跟單 T（≥{FOLLOW_TAKER_MIN_PRICE:.2f} 即買、不停損）",
              favoriteWindowSeconds=PRICE_TRIGGERED_WINDOW_SECONDS * k, favoriteMinPrice=FOLLOW_TAKER_MIN_PRICE, favoriteMaxPrice=0.99,
-             favoriteStopLossPrice=None, favoriteStableSeconds=0.0),
+             favoriteStopLossPrice=None, favoriteStableSeconds=0.0, simOnly=False),   # 2026-09-14 開放實盤選用（ETH）
         dict(common, id=f"{aid}-price-triggered-favorite",
              label=f"{label} 價格觸發買領先方（≥{PRICE_TRIGGERED_MIN_PRICE:.2f} 穩定 {PRICE_TRIGGERED_STABLE_SECONDS:.0f}s、停損 0.60）",
              favoriteWindowSeconds=PRICE_TRIGGERED_WINDOW_SECONDS * k, favoriteMinPrice=PRICE_TRIGGERED_MIN_PRICE,
