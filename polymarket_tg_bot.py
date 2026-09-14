@@ -154,7 +154,8 @@ HELP_TEXT = (
     "/pnl — 實盤損益、勝率、今日統計\n"
     "/trades [n] — 最近 n 筆真單（預設 10）\n"
     "/sim — 模擬盤各組損益\n"
-    "/scan [小時] — 立刻跑一次市場掃描（預設 24h，約 10～15 分鐘，完成後推播）\n"
+    "/scan — 選擇要掃描的市場（BTC 5m／15m、ETH、SOL、XRP、其他＝全站探索最多人玩的盤）\n"
+    "/scan [小時] — 直接掃 BTC 5m 最近 N 小時\n"
     "/report — 最近一次市場掃描的建議摘要\n"
     "/help — 這份說明\n"
     "（純查詢，沒有任何會改設定或下單的指令；主動推播：停機／恢復、REAL↔DRY-RUN 切換、新部位）"
@@ -182,7 +183,22 @@ def latest_report_summary() -> str:
     return "\n".join(lines)
 
 
-async def run_scan_in_background(client: httpx.AsyncClient, chat_id: int, hours: float) -> None:
+SCAN_MARKETS = [("BTC 5 分鐘", "btc"), ("BTC 15 分鐘", "btc-15m"), ("ETH 5 分鐘", "eth"),
+                ("SOL 5 分鐘", "sol"), ("XRP 5 分鐘", "xrp"), ("其他：全站最多人玩的盤", "other")]
+
+
+async def send_scan_menu(client: httpx.AsyncClient, chat_id: int) -> None:
+    keyboard = [[{"text": label, "callback_data": f"scan:{key}"}] for label, key in SCAN_MARKETS]
+    try:
+        await client.post(f"{API}/sendMessage", json={
+            "chat_id": chat_id, "text": "要掃描哪個市場？（Up/Down 市場掃最近 24 小時；「其他」會撈全站 24h 成交額最高的盤並推估玩法）",
+            "reply_markup": {"inline_keyboard": keyboard},
+        })
+    except Exception as exc:
+        log.warning(f"sendMessage(menu) failed: {exc}")
+
+
+async def run_scan_in_background(client: httpx.AsyncClient, chat_id: int, hours: float, market: str = "btc") -> None:
     import sys
     if _scan_running["v"]:
         await tg_send(client, chat_id, "⏳ 已有一次掃描在跑，請稍候。")
@@ -190,7 +206,7 @@ async def run_scan_in_background(client: httpx.AsyncClient, chat_id: int, hours:
     _scan_running["v"] = True
     try:
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_weekly_scan.py")
-        proc = await asyncio.create_subprocess_exec(sys.executable, script, "--hours", str(hours))
+        proc = await asyncio.create_subprocess_exec(sys.executable, script, "--hours", str(hours), "--market", market)
         code = await proc.wait()
         if code != 0:
             await tg_send(client, chat_id, f"⚠️ 掃描結束但回傳碼 {code}，請看 gravia-tg.service 日誌。")
@@ -239,13 +255,30 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
     offset = None
     while True:
         try:
-            params = {"timeout": 25, "allowed_updates": json.dumps(["message"])}
+            params = {"timeout": 25, "allowed_updates": json.dumps(["message", "callback_query"])}
             if offset is not None:
                 params["offset"] = offset
             r = await client.get(f"{API}/getUpdates", params=params, timeout=35)
             data = r.json()
             for upd in data.get("result", []):
                 offset = int(upd["update_id"]) + 1
+                cq = upd.get("callback_query")
+                if cq:
+                    uid = int((cq.get("from") or {}).get("id") or 0)
+                    chat_id = ((cq.get("message") or {}).get("chat") or {}).get("id")
+                    try:
+                        await client.post(f"{API}/answerCallbackQuery", json={"callback_query_id": cq.get("id")})
+                    except Exception:
+                        pass
+                    if uid not in ALLOWED_USER_IDS or not chat_id:
+                        continue
+                    data_str = str(cq.get("data") or "")
+                    if data_str.startswith("scan:"):
+                        market = data_str.split(":", 1)[1]
+                        label = next((l for l, k in SCAN_MARKETS if k == market), market)
+                        await tg_send(client, chat_id, f"🔍 開始掃描：{label}（完成後推播，Up/Down 市場約 10～15 分鐘、全站探索約 1～2 分鐘）。")
+                        asyncio.get_running_loop().create_task(run_scan_in_background(client, chat_id, 24.0, market))
+                    continue
                 msg = upd.get("message") or {}
                 chat_id = (msg.get("chat") or {}).get("id")
                 if not chat_id:
@@ -256,10 +289,13 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                 text = msg.get("text") or ""
                 parts = text.strip().split()
                 if parts and parts[0].split("@")[0].lower() == "/scan":
-                    hours = float(parts[1]) if len(parts) > 1 and parts[1].replace(".", "", 1).isdigit() else 24.0
+                    if len(parts) == 1:
+                        await send_scan_menu(client, chat_id)
+                        continue
+                    hours = float(parts[1]) if parts[1].replace(".", "", 1).isdigit() else 24.0
                     hours = max(1.0, min(hours, 72.0))
-                    await tg_send(client, chat_id, f"🔍 開始掃描最近 {hours:.0f} 小時，完成後會推播結果（約 10～15 分鐘）。")
-                    asyncio.get_running_loop().create_task(run_scan_in_background(client, chat_id, hours))
+                    await tg_send(client, chat_id, f"🔍 開始掃描 BTC 5 分鐘最近 {hours:.0f} 小時，完成後會推播結果（約 10～15 分鐘）。")
+                    asyncio.get_running_loop().create_task(run_scan_in_background(client, chat_id, hours, "btc"))
                     continue
                 reply = await handle_command(text)
                 await tg_send(client, chat_id, reply)

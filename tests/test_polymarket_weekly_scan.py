@@ -59,5 +59,21 @@ class WeeklyScanTests(unittest.TestCase):
         self.assertIn("不會自動更改", md)
 
 
+    def test_market_kind_classification_and_discovery_rendering(self):
+        self.assertEqual(scan.classify_market_kind("btc-updown-5m-1", None), "crypto_window")
+        self.assertEqual(scan.classify_market_kind("btc-updown-15m-1", None), "crypto_window")
+        self.assertEqual(scan.classify_market_kind("sea-tor-rom-2026-09-14-rom", "2099-01-01T00:00:00Z"), "long_dated")
+        self.assertEqual(scan.classify_market_kind("will-the-fed-cut", "2000-01-01T00:00:00Z"), "event_soon")
+        disc = {"kinds": {"event_soon": 1}, "markets": [{
+            "slug": "x", "question": "Fed cut?", "event": "Fed", "kind": "event_soon", "volume24h": 1e6, "liquidity": 5e5,
+            "endDate": "2026-09-16", "trades": 900, "wallets": 300, "medianTradeUsd": 40.0, "buyShare": 0.9,
+            "favoriteShare": 0.6, "bothSidesShare": 0.05, "priceMedian": 0.9}]}
+        msgs = scan.render_discovery_telegram(disc)
+        self.assertTrue(any("跟領先方" in m for m in msgs))
+        self.assertTrue(any("👍" in m and "👎" in m for m in msgs))
+        self.assertTrue(all(len(m) <= 4000 for m in msgs))
+        self.assertIn("btc-15m", scan.MARKETS)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,20 +36,32 @@ DATA_API = "https://data-api.polymarket.com/trades"
 LIVE_WS = os.environ.get("TG_LIVE_STATUS_WS", "ws://127.0.0.1:8767")
 WINDOW_SECONDS = 300
 LATE_SECONDS = 60          # 「最後 60 秒」型態的判定
+# 2026-09-14：可掃描的 Up/Down 市場（TG /scan 可選）；"other" 走全站探索（discover_top_markets）。
+MARKETS = {
+    "btc":     {"prefix": "btc-updown-5m-",  "window": 300, "label": "BTC 5 分鐘"},
+    "btc-15m": {"prefix": "btc-updown-15m-", "window": 900, "label": "BTC 15 分鐘"},
+    "eth":     {"prefix": "eth-updown-5m-",  "window": 300, "label": "ETH 5 分鐘"},
+    "sol":     {"prefix": "sol-updown-5m-",  "window": 300, "label": "SOL 5 分鐘"},
+    "xrp":     {"prefix": "xrp-updown-5m-",  "window": 300, "label": "XRP 5 分鐘"},
+}
 FAVORITE_MIN_ASK = 0.88    # 買領先方型態的最低買價（比我們的 0.95 寬，才看得到整條曲線）
 MIN_WALLET_WINDOWS = 10    # 至少做過這麼多窗口才算「機器人／常用者」
 
 
 # ── 抓資料 ─────────────────────────────────────────────────────────────────
 
-def fetch_windows(hours: float, client: httpx.Client) -> list[dict]:
+def fetch_windows(hours: float, client: httpx.Client, market: str = "btc") -> list[dict]:
+    global WINDOW_SECONDS, LATE_SECONDS
+    spec = MARKETS.get(market, MARKETS["btc"])
+    WINDOW_SECONDS = int(spec["window"])
+    LATE_SECONDS = 60 if WINDOW_SECONDS <= 300 else 120
     now = int(time.time())
     last_closed = now // WINDOW_SECONDS * WINDOW_SECONDS - 2 * WINDOW_SECONDS
     n = int(hours * 3600 // WINDOW_SECONDS)
     windows = []
     for i in range(n):
         ws = last_closed - WINDOW_SECONDS * i
-        slug = f"btc-updown-5m-{ws}"
+        slug = f"{spec['prefix']}{ws}"
         try:
             m = client.get(GAMMA, params={"slug": slug}).json() or client.get(GAMMA, params={"slug": slug, "closed": "true"}).json()
         except Exception as exc:
@@ -221,6 +233,104 @@ def analyze(windows: list[dict]) -> dict:
     }
 
 
+# ── 全站探索：目前最多人玩的盤 ────────────────────────────────────────────
+
+def classify_market_kind(slug: str, end_date: str | None) -> str:
+    s = (slug or "").lower()
+    if "updown-5m" in s or "updown-15m" in s:
+        return "crypto_window"
+    if "updown" in s or "up-or-down" in s:
+        return "crypto_daily"
+    if end_date:
+        try:
+            days = (datetime.fromisoformat(end_date.replace("Z", "+00:00")) - datetime.now(timezone.utc)).days
+            if days <= 2:
+                return "event_soon"
+        except Exception:
+            pass
+    return "long_dated"
+
+
+MARKET_KIND_LABELS = {
+    "crypto_window": "加密幣 5／15 分鐘 Up/Down",
+    "crypto_daily":  "加密幣日／週 Up/Down",
+    "event_soon":    "兩天內結算的事件（球賽／選舉／利率）",
+    "long_dated":    "長天期事件",
+}
+
+MARKET_KIND_NOTES = {
+    "crypto_window": ("每 5／15 分鐘結算一次、規則明確、可重複驗證；我們現有的買領先方／鎖利引擎直接適用。",
+                      "最後幾十秒常來回翻面；手續費在 0.5 附近最貴；深度薄（BTC 以外每窗只有幾百到幾千美元）。"),
+    "crypto_daily":  ("結算頻率較低、走勢確立後翻面機率小；買領先方邏輯可套用（時間參數放大）。",
+                      "資金鎖住數小時到一天；機會少、每筆利潤薄；我們的引擎尚未支援非固定窗口的市場。"),
+    "event_soon":    ("成交額最大（球賽／利率決議常達百萬美元）、深度厚；主流玩法是賽前／會前依賠率買領先方、或做市收價差。",
+                      "沒有價格時間衰減可用，勝負取決於資訊優勢；賽中價格跟著比分劇烈跳動；我們沒有這類市場的訊號來源與程式支援。"),
+    "long_dated":    ("流動性穩定、可做市；價格慢慢收斂到結果。",
+                      "資金鎖住數週到數月、年化報酬低；需要對事件本身有判斷；與我們的短窗口引擎完全不同，等於另開一套系統。"),
+}
+
+
+def discover_top_markets(client: httpx.Client, limit: int = 12) -> dict:
+    """撈全站 24h 成交額最高的市場，看每個市場最近成交的玩法（買賣比、單量、價位、獨立錢包數）。"""
+    try:
+        rows = client.get(GAMMA, params={"closed": "false", "active": "true", "order": "volume24hr", "ascending": "false", "limit": limit}).json()
+    except Exception as exc:
+        log.warning(f"gamma discover: {exc}")
+        rows = []
+    out = []
+    for mk in rows:
+        ev = (mk.get("events") or [{}])[0]
+        kind = classify_market_kind(mk.get("slug") or "", mk.get("endDate"))
+        try:
+            trades = client.get(DATA_API, params={"market": mk["conditionId"], "limit": 1000}).json() or []
+        except Exception:
+            trades = []
+        wallets = {t.get("proxyWallet") for t in trades}
+        buys = [t for t in trades if t.get("side") == "BUY"]
+        sizes = [float(t.get("size") or 0) * float(t.get("price") or 0) for t in trades]
+        prices = [float(t.get("price") or 0) for t in buys]
+        # 玩法推估：買在 >= 0.85 的比例（跟領先方）、兩邊都買的錢包比例（做市／鎖利）、賣單比例（短線）
+        per_wallet = collections.defaultdict(set)
+        for t in trades:
+            per_wallet[t.get("proxyWallet")].add(t.get("outcome"))
+        both = sum(1 for w, sides in per_wallet.items() if len(sides) >= 2)
+        out.append({
+            "slug": mk.get("slug"), "question": (mk.get("question") or "")[:60], "event": (ev.get("title") or "")[:40],
+            "kind": kind, "volume24h": float(mk.get("volume24hr") or 0), "liquidity": float(mk.get("liquidity") or 0),
+            "endDate": (mk.get("endDate") or "")[:10], "trades": len(trades), "wallets": len(wallets),
+            "medianTradeUsd": statistics.median(sizes) if sizes else 0.0,
+            "buyShare": (len(buys) / len(trades)) if trades else 0.0,
+            "favoriteShare": (sum(1 for p in prices if p >= 0.85) / len(prices)) if prices else 0.0,
+            "bothSidesShare": (both / len(per_wallet)) if per_wallet else 0.0,
+            "priceMedian": statistics.median(prices) if prices else 0.0,
+        })
+        time.sleep(0.05)
+    kinds = collections.Counter(m["kind"] for m in out)
+    return {"markets": out, "kinds": dict(kinds)}
+
+
+def render_discovery_telegram(disc: dict) -> list[str]:
+    ms = disc["markets"]
+    if not ms:
+        return ["🌐 全站探索：Gamma API 沒有回資料。"]
+    head = ["🌐 全站探索：目前 24h 成交額最高的市場", "分類：" + "；".join(f"{MARKET_KIND_LABELS.get(k, k)} {v} 個" for k, v in disc["kinds"].items())]
+    msgs = ["\n".join(head)]
+    body = []
+    for i, m in enumerate(ms[:10], 1):
+        play = []
+        if m["favoriteShare"] >= 0.5: play.append(f"跟領先方（{m['favoriteShare']*100:.0f}% 買在 ≥0.85）")
+        if m["bothSidesShare"] >= 0.15: play.append(f"做市／兩邊都買（{m['bothSidesShare']*100:.0f}% 錢包）")
+        if m["buyShare"] < 0.7: play.append(f"短線進出（賣單 {100 - m['buyShare']*100:.0f}%）")
+        if not play: play.append("單邊持有到結算")
+        body.append(f"{i}. {m['event'] or m['question']}｜{m['question']}\n   24h ${m['volume24h']:,.0f}·深度 ${m['liquidity']:,.0f}·{m['endDate']}·{MARKET_KIND_LABELS.get(m['kind'], m['kind'])}\n   近 {m['trades']} 筆／{m['wallets']} 錢包·中位單 ${m['medianTradeUsd']:,.0f}·買價中位 {m['priceMedian']:.2f}·玩法：{'、'.join(play)}")
+    msgs.append("\n".join(body))
+    for k in disc["kinds"]:
+        pros, cons = MARKET_KIND_NOTES.get(k, ("—", "—"))
+        msgs.append(f"🔎 {MARKET_KIND_LABELS.get(k, k)}\n👍 {pros}\n👎 {cons}")
+    msgs.append("以上為公開成交的行為推估，不是明確策略；任何更改請回覆指示後再由人工執行。")
+    return msgs
+
+
 # ── 跟目前實盤設定比對 ─────────────────────────────────────────────────────
 
 async def fetch_live_config() -> dict:
@@ -318,7 +428,7 @@ def render_markdown(report: dict, suggestions: list[dict], cfg: dict, hours: flo
 
 def render_telegram(report: dict, suggestions: list[dict], hours: float) -> list[str]:
     msgs = []
-    head = [f"📈 每週市場掃描（最近 {hours:.0f}h、{report['windows']} 窗、{report['trades']:,} 筆）", "最多人使用："]
+    head = [f"📈 市場掃描 {report.get('marketLabel', 'BTC 5 分鐘')}（最近 {hours:.0f}h、{report['windows']} 窗、{report['trades']:,} 筆）", "最多人使用："]
     for k in report["kinds"][:5]:
         wr = f" 勝率 {k['winRate']*100:.0f}%" if k["winRate"] is not None else ""
         head.append(f"• {k['label']}：{k['share']*100:.0f}%、{k['wallets']} 錢包{wr}")
@@ -349,24 +459,39 @@ def send_telegram(messages: list[str]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=24.0)
+    ap.add_argument("--market", default="btc", help="btc / btc-15m / eth / sol / xrp / other（全站探索）")
     ap.add_argument("--no-telegram", action="store_true")
     args = ap.parse_args()
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    stamp = datetime.now(TAIPEI).strftime("%Y-%m-%d")
+    if args.market == "other":
+        with httpx.Client(timeout=25) as client:
+            disc = discover_top_markets(client)
+        with open(os.path.join(REPORT_DIR, f"{stamp}-discover.json"), "w", encoding="utf-8") as f:
+            json.dump({"generatedAt": time.time(), "discover": disc}, f, ensure_ascii=False, indent=2)
+        log.info(f"discovery written: {REPORT_DIR}/{stamp}-discover.json")
+        if not args.no_telegram:
+            send_telegram(render_discovery_telegram(disc))
+        return
+    if args.market not in MARKETS:
+        raise SystemExit(f"未知市場 {args.market}，可用：{', '.join(MARKETS)} 或 other")
     with httpx.Client(timeout=25) as client:
-        windows = fetch_windows(args.hours, client)
+        windows = fetch_windows(args.hours, client, args.market)
     if not windows:
         log.error("沒有抓到任何窗口")
         return
     report = analyze(windows)
+    report["market"] = args.market
+    report["marketLabel"] = MARKETS[args.market]["label"]
     cfg = asyncio.run(fetch_live_config())
     suggestions = compare(report, cfg)
-    os.makedirs(REPORT_DIR, exist_ok=True)
-    stamp = datetime.now(TAIPEI).strftime("%Y-%m-%d")
-    with open(os.path.join(REPORT_DIR, f"{stamp}.json"), "w", encoding="utf-8") as f:
-        json.dump({"generatedAt": time.time(), "hours": args.hours, "liveConfig": cfg, "report": report, "suggestions": suggestions}, f, ensure_ascii=False, indent=2)
+    suffix = "" if args.market == "btc" else f"-{args.market}"
+    with open(os.path.join(REPORT_DIR, f"{stamp}{suffix}.json"), "w", encoding="utf-8") as f:
+        json.dump({"generatedAt": time.time(), "hours": args.hours, "market": args.market, "liveConfig": cfg, "report": report, "suggestions": suggestions}, f, ensure_ascii=False, indent=2)
     md = render_markdown(report, suggestions, cfg, args.hours)
-    with open(os.path.join(REPORT_DIR, f"{stamp}.md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(REPORT_DIR, f"{stamp}{suffix}.md"), "w", encoding="utf-8") as f:
         f.write(md)
-    log.info(f"report written: {REPORT_DIR}/{stamp}.md")
+    log.info(f"report written: {REPORT_DIR}/{stamp}{suffix}.md")
     if not args.no_telegram:
         send_telegram(render_telegram(report, suggestions, args.hours))
 
