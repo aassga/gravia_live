@@ -879,6 +879,31 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             pos = strategy.live_state["position"]
             self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up"); self.assertEqual(pos["strategy"], "late_favorite")
 
+    async def test_live_late_favorite_take_profit_sells_at_099_bid(self):
+        strategy.live_state["position"] = {
+            "windowSlug": "btc-window", "side": "Up", "tokenId": "up-token",
+            "shares": 20.0, "entryPrice": 0.96, "entryLimitPrice": 0.97,
+            "entryNotional": 19.2, "entryFee": 0.05, "entryRiskNotional": 19.4, "entryRiskFee": 0.05,
+            "stakeUsd": 19.25, "strategy": "late_favorite", "hedged": False, "dryRun": True,
+        }
+        strategy.sim.state["upBook"] = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.995, "size": 500}], "bids": [{"price": 0.99, "size": 500}]})
+        strategy.sim.state["downBook"] = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.02, "size": 500}], "bids": [{"price": 0.01, "size": 500}]})
+        with (
+            patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
+            patch.object(strategy, "LATE_FAVORITE_TAKE_PROFIT_PRICE", 0.99),
+            patch.object(strategy, "LATE_FAVORITE_STOP_LOSS_PRICE", 0.85),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+            patch.object(strategy, "_close_position", AsyncMock(return_value="filled")) as close,
+        ):
+            await strategy.evaluate_and_act("btc-window", None, 30.0, None)
+            close.assert_awaited_once()
+            plan, dry_run, reason = close.await_args.args
+            self.assertEqual(reason, "favorite_take_profit")
+            self.assertEqual(plan["side"], "Up")
+            self.assertGreaterEqual(plan["_bestBid"], 0.99)
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (

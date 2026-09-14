@@ -194,6 +194,8 @@ LATE_FAVORITE_MAX_PRICE        = 0.97   # 看得到的 ask 超過就沒利潤空
 # 小幅回檔被震出（每筆約 -0.85）。依使用者要求改 0.85。
 # 2026-09-14 依使用者要求：0.85 → 0.60 → 0.70 → 0.85。
 LATE_FAVORITE_STOP_LOSS_PRICE  = 0.85
+# 2026-09-14 依使用者要求加獲利了結：持有腿 best bid >= 這個價就賣掉（拿 ~3/4 利潤，免掉最後翻面風險）。
+LATE_FAVORITE_TAKE_PROFIT_PRICE = 0.99
 # 2026-09-14 依 12 小時錢包剖析（12 個勝率 100% 的錢包）另開一組模擬：他們是「價格觸發」——整個窗口
 # 只要領先方 ask >= 0.97～0.98 就買一筆、不限最後 60 秒、不停損、只做有明顯領先方的窗口。
 # (A) 剩餘 <= 240 秒（開盤 60 秒後）皆可進；(B) ask 連續 >= 門檻 10 秒才進，避免剛翻上來就追。
@@ -423,6 +425,7 @@ for _asset in ASSETS:
             "favoriteMinPrice":      LATE_FAVORITE_MIN_PRICE,
             "favoriteMaxPrice":      LATE_FAVORITE_MAX_PRICE,
             "favoriteStopLossPrice": LATE_FAVORITE_STOP_LOSS_PRICE,
+            "favoriteTakeProfitPrice": LATE_FAVORITE_TAKE_PROFIT_PRICE,
         })
         AB_VARIANTS.append({
             "id":                    "btc-relaxed-lock",
@@ -472,6 +475,7 @@ for _asset in ASSETS:
             "favoriteMaxPrice":      PRICE_TRIGGERED_MAX_PRICE,
             # 2026-09-14 依使用者要求加上 0.85 停損（模擬幾乎全贏、但一次翻面就整注歸零）。
             "favoriteStopLossPrice": 0.85,
+            "favoriteTakeProfitPrice": LATE_FAVORITE_TAKE_PROFIT_PRICE,
             "favoriteStableSeconds": PRICE_TRIGGERED_STABLE_SECONDS,
         })
         # 2026-09-14 依使用者要求移除 btc-inventory-rotation（動態庫存旋轉）變體；
@@ -2585,6 +2589,33 @@ def _try_late_favorite_entry(
     )
 
 
+def _try_late_favorite_take_profit(variant_id: str, slug: str, up_book: dict, down_book: dict) -> bool:
+    """獲利了結：持有腿 best bid >= favoriteTakeProfitPrice 且深度吃得下就整筆賣掉，不等結算。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    tp_price = variant.get("favoriteTakeProfitPrice")
+    if tp_price is None:
+        return False
+    st = ab_states[variant_id]
+    pos = st["position"]
+    held_book = up_book if pos["side"] == "Up" else down_book
+    bids = held_book.get("bids") or []
+    best_bid = max(float(b["price"]) for b in bids) if bids else None
+    if best_bid is None or best_bid < float(tp_price):
+        return False
+    if not _simulation_direction_book_is_fresh(variant["assetId"], pos["side"], held_book):
+        return False
+    fill = simulate_sell_fill(held_book, float(pos["shares"]))
+    if not fill:
+        return False
+    record_window_diagnostic(
+        variant_id, slug, "favorite_take_profit",
+        selectedSide=pos["side"], bestBid=best_bid, exitVwap=fill["vwap"], favoriteTakeProfitPrice=tp_price,
+    )
+    _close_directional_position(variant_id, fill, "favorite_take_profit")
+    save_sim_state()
+    return True
+
+
 def _try_late_favorite_stop_loss(variant_id: str, slug: str, up_book: dict, down_book: dict) -> None:
     """領先方翻面：持有腿的保守可賣價 <= favoriteStopLossPrice 就整筆賣掉（每個 tick 檢查）。"""
     variant = AB_VARIANT_BY_ID[variant_id]
@@ -3335,7 +3366,8 @@ def _simulate_trading_impl(
             if remaining_seconds is not None:
                 _try_late_favorite_entry(variant_id, slug, up_book, down_book, remaining_seconds)
         elif pos.get("windowSlug") == slug and not pos.get("hedged"):
-            _try_late_favorite_stop_loss(variant_id, slug, up_book, down_book)
+            if not _try_late_favorite_take_profit(variant_id, slug, up_book, down_book):
+                _try_late_favorite_stop_loss(variant_id, slug, up_book, down_book)
         return
 
     if pos is None:
@@ -4415,6 +4447,7 @@ def build_ab_leaderboard() -> list:
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
+            "favoriteTakeProfitPrice": v.get("favoriteTakeProfitPrice"),
             "favoriteStableSeconds": v.get("favoriteStableSeconds"),
             "favoriteFixedShares": v.get("favoriteFixedShares"),
             "pairPriceBufferTicks": v.get("pairPriceBufferTicks"),

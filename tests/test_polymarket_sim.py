@@ -292,6 +292,20 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading("btc-historical-hybrid", "btc-window-2", up2, down, 6.0, None)
         self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
 
+    def test_late_favorite_take_profit_sells_when_bid_reaches_099(self):
+        # 買 Up 0.96 後 bid 到 0.99 → 獲利了結，不等結算
+        self._set_chainlink_signal(opening=100.0, current=100.3)
+        up, down = self._favorite_books(up_ask=0.96, down_ask=0.05)
+        sim.simulate_trading("btc-late-favorite", "btc-window", up, down, 40.0, None)
+        self.assertEqual(sim.ab_states["btc-late-favorite"]["position"]["side"], "Up")
+        up2 = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.995, "size": 500}], "bids": [{"price": 0.99, "size": 500}]})
+        down2 = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.02, "size": 500}], "bids": [{"price": 0.01, "size": 500}]})
+        sim.simulate_trading("btc-late-favorite", "btc-window", up2, down2, 20.0, None)
+        self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
+        last = sim.ab_states["btc-late-favorite"]["trades"][0]
+        self.assertEqual(last["exitReason"], "favorite_take_profit")
+        self.assertGreater(last["pnl"], 0)
+
     def test_btc_two_sided_maker_variant_uses_relaxed_parameters(self):
         v = sim.AB_VARIANT_BY_ID["btc-two-sided-maker"]
         self.assertTrue(v["marketMakerOnly"]); self.assertTrue(v["simOnly"])

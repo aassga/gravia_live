@@ -133,6 +133,12 @@ LATE_FAVORITE_MIN_REMAINING = float(_LIVE_VARIANT.get("favoriteMinRemaining", 5.
 # 2026-09-14：實盤可用 .env 覆寫買價區間（POLY_LIVE_FAVORITE_MIN_PRICE／MAX_PRICE），不動模擬變體。
 LATE_FAVORITE_MIN_PRICE = float(os.environ.get("POLY_LIVE_FAVORITE_MIN_PRICE") or _LIVE_VARIANT.get("favoriteMinPrice", 0.95))
 LATE_FAVORITE_MAX_PRICE = float(os.environ.get("POLY_LIVE_FAVORITE_MAX_PRICE") or _LIVE_VARIANT.get("favoriteMaxPrice", 0.97))
+# 2026-09-14 獲利了結：持有腿 best bid >= 這個價就賣（POLY_LIVE_FAVORITE_TAKE_PROFIT_PRICE 可覆寫，0 = 關閉）。
+_fav_tp_raw = os.environ.get("POLY_LIVE_FAVORITE_TAKE_PROFIT_PRICE", "").strip()
+LATE_FAVORITE_TAKE_PROFIT_PRICE = (
+    (float(_fav_tp_raw) if float(_fav_tp_raw) > 0 else None)
+    if _fav_tp_raw else _LIVE_VARIANT.get("favoriteTakeProfitPrice")
+)
 # (B) 同一邊的 ask 必須連續 >= 門檻這麼多秒才進（價格觸發變體用 10 秒）；0 = 看到就進。
 LATE_FAVORITE_STABLE_SECONDS = float(_LIVE_VARIANT.get("favoriteStableSeconds") or 0)
 # 領先方翻面時的停損：持有腿保守可賣價 <= 這個價就 FOK 賣出（WS tick 與 3 秒輪詢都檢查）。
@@ -2469,6 +2475,10 @@ async def _evaluate_and_act_impl(
         await _emergency_unwind(session, pos.get("emergencyUnwind", {}).get("reason", "resume_emergency_unwind"))
         return
     if pos.get("strategy") == "late_favorite":
+        tp_plan = _late_favorite_take_profit_plan(pos, up_book, down_book)
+        if tp_plan:
+            await _close_late_favorite_take_profit(tp_plan, bool(pos.get("dryRun", True)), slug)
+            return
         exit_plan = _late_favorite_stop_plan(pos, up_book, down_book)
         if exit_plan:
             await _close_late_favorite_stop(exit_plan, bool(pos.get("dryRun", True)), slug)
@@ -2728,6 +2738,13 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
         # 救援含餘額刷新與網路 I/O，交由 3 秒輪詢路徑執行；WS 快速路徑不重複排程。
         return
     if pos.get("strategy") == "late_favorite":
+        tp_plan = _late_favorite_take_profit_plan(pos, up_book, down_book)
+        if tp_plan:
+            _ws_action_in_flight["v"] = True
+            asyncio.get_running_loop().create_task(
+                _run_ws_late_favorite_take_profit(tp_plan, bool(pos.get("dryRun", True)), slug, decision_lock)
+            )
+            return
         exit_plan = _late_favorite_stop_plan(pos, up_book, down_book)
         if exit_plan:
             _ws_action_in_flight["v"] = True
@@ -2833,6 +2850,40 @@ async def _run_ws_late_direction_entry(
             save_live_state()
 
 
+def _late_favorite_take_profit_plan(pos: dict, up_book: dict, down_book: dict) -> dict | None:
+    """獲利了結：持有腿 best bid >= LATE_FAVORITE_TAKE_PROFIT_PRICE 就回傳保守賣出計畫（FOK 限價 bid − 1 tick，
+    正常會成交在 best bid）。"""
+    if LATE_FAVORITE_TAKE_PROFIT_PRICE is None:
+        return None
+    held_book = up_book if pos["side"] == "Up" else down_book
+    bids = held_book.get("bids") or []
+    best_bid = max(float(b["price"]) for b in bids) if bids else None
+    if best_bid is None or best_bid < float(LATE_FAVORITE_TAKE_PROFIT_PRICE):
+        return None
+    if not _live_direction_book_is_fresh(pos["side"], held_book):
+        return None
+    if not pos.get("dryRun", True) and not live.order_tokens_and_fees_are_warm([_token_id(pos["side"])]):
+        return None
+    plan = _sell_plan(pos["side"], held_book, float(pos["shares"]))
+    if plan:
+        plan = dict(plan)
+        plan["_bestBid"] = best_bid
+    return plan
+
+
+async def _close_late_favorite_take_profit(exit_plan: dict, dry_run: bool, slug: str) -> None:
+    log.warning(
+        f"[LIVE] 領先方獲利了結 {exit_plan['side']} best bid=${exit_plan.get('_bestBid', 0):.3f} "
+        f">= ${float(LATE_FAVORITE_TAKE_PROFIT_PRICE):.2f}，送出限價=${exit_plan['limitPrice']:.3f}"
+    )
+    record_live_window_diagnostic(
+        slug, "favorite_take_profit",
+        selectedSide=exit_plan["side"], bestBid=exit_plan.get("_bestBid"), exitLimitPrice=exit_plan["limitPrice"],
+        favoriteTakeProfitPrice=LATE_FAVORITE_TAKE_PROFIT_PRICE,
+    )
+    await _close_position(exit_plan, dry_run, "favorite_take_profit")
+
+
 def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict) -> dict | None:
     """領先方翻面：持有腿保守可賣價 <= LATE_FAVORITE_STOP_LOSS_PRICE 就回傳賣出計畫。"""
     if LATE_FAVORITE_STOP_LOSS_PRICE is None:
@@ -2868,6 +2919,18 @@ async def _close_late_favorite_stop(exit_plan: dict, dry_run: bool, slug: str) -
         favoriteStopLossPrice=LATE_FAVORITE_STOP_LOSS_PRICE,
     )
     await _close_position(exit_plan, dry_run, "favorite_stop_loss")
+
+
+async def _run_ws_late_favorite_take_profit(exit_plan: dict, dry_run: bool, slug: str, decision_lock: asyncio.Lock) -> None:
+    _ws_action_in_flight["v"] = False
+    async with decision_lock:
+        pos = live_state.get("position")
+        if not pos or pos.get("strategy") != "late_favorite" or pos.get("windowSlug") != slug:
+            return
+        latest = _late_favorite_take_profit_plan(pos, sim.state.get("upBook") or {}, sim.state.get("downBook") or {})
+        if not latest:
+            return
+        await _close_late_favorite_take_profit(latest, dry_run, slug)
 
 
 async def _run_ws_late_favorite_stop(exit_plan: dict, dry_run: bool, slug: str, decision_lock: asyncio.Lock) -> None:
@@ -2934,6 +2997,8 @@ def _log_startup_banner(mode: str) -> None:
             log.warning(f"  領先方翻面停損：持有腿可賣價 <= ${float(LATE_FAVORITE_STOP_LOSS_PRICE):.2f} 時 FOK 賣出")
         else:
             log.info("  領先方翻面停損未啟用")
+        if LATE_FAVORITE_TAKE_PROFIT_PRICE is not None:
+            log.warning(f"  領先方獲利了結：持有腿 best bid >= ${float(LATE_FAVORITE_TAKE_PROFIT_PRICE):.2f} 時賣出")
     if ENABLE_LATE_DIRECTION:
         direction_source = (
             "Binance Futures 窗口漲跌"
