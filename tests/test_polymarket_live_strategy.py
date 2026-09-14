@@ -838,7 +838,9 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             plan, dry_run, reason = close.await_args.args
             self.assertEqual(reason, "favorite_stop_loss")
             self.assertEqual(plan["side"], "Down")
-            self.assertLessEqual(plan["limitPrice"], 0.60)
+            # 觸發用保守可賣價（<= 0.60），送出的限價再多讓 EMERGENCY_UNWIND_EXTRA_TICKS 格 tick
+            self.assertLessEqual(plan["_triggerPrice"], 0.60)
+            self.assertAlmostEqual(plan["limitPrice"], plan["_triggerPrice"] - 0.01 * strategy.EMERGENCY_UNWIND_EXTRA_TICKS, places=6)
 
     def test_dry_run_trades_are_listed_but_not_counted_in_totals(self):
         pos = {"windowSlug": "btc-window", "side": "Up", "shares": 5.0, "entryPrice": 0.96, "stakeUsd": 4.8,

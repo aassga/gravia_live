@@ -2845,13 +2845,22 @@ def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict) -> dict 
     exit_plan = _sell_plan(pos["side"], held_book, float(pos["shares"]))
     if not exit_plan or exit_plan["limitPrice"] > float(LATE_FAVORITE_STOP_LOSS_PRICE):
         return None
+    # 2026-09-14 依使用者要求「停損單改積極」：觸發判斷仍用保守可賣價，但送出的 FOK 限價
+    # 改用緊急平倉那套（再多讓 EMERGENCY_UNWIND_EXTRA_TICKS 格 tick），避免翻面時第一張
+    # 停損因價格跳動沒成交、第二張才賣在更低（09-13 11:14 那筆 0.83 沒成交、最後賣 0.34）。
+    aggressive = _aggressive_sell_plan(pos["side"], held_book, float(pos["shares"]))
+    if aggressive:
+        aggressive = dict(aggressive)
+        aggressive["_triggerPrice"] = exit_plan["limitPrice"]
+        return aggressive
     return exit_plan
 
 
 async def _close_late_favorite_stop(exit_plan: dict, dry_run: bool, slug: str) -> None:
     log.warning(
-        f"[LIVE] 領先方翻面停損 {exit_plan['side']} 可賣價=${exit_plan['limitPrice']:.3f} "
-        f"<= 停損價=${float(LATE_FAVORITE_STOP_LOSS_PRICE):.2f}"
+        f"[LIVE] 領先方翻面停損 {exit_plan['side']} 可賣價=${exit_plan.get('_triggerPrice', exit_plan['limitPrice']):.3f} "
+        f"<= 停損價=${float(LATE_FAVORITE_STOP_LOSS_PRICE):.2f}，送出限價=${exit_plan['limitPrice']:.3f}"
+        f"（多讓 {EMERGENCY_UNWIND_EXTRA_TICKS} tick）"
     )
     record_live_window_diagnostic(
         slug, "favorite_stop_loss",
