@@ -398,7 +398,9 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-historical-hybrid",
             "assetId":               "btc",
-            "label":                 "BTC 歷史混合（鎖利→Chainlink T-10s）",
+            "label":                 "BTC 歷史混合（鎖利→Chainlink T-20s、Δ≥0.01%）",
+            "lateDirectionWindowSeconds": 20.0,   # 2026-09-14 依使用者要求 10 → 20
+            "lateDirectionMinDeltaPct":   0.01,   # 2026-09-14 依使用者要求 0.02 → 0.01
             "entryMaxPrice":         None,
             "lockMaxSum":            LIVE_MIRROR_LOCK_MAX_SUM,
             "lateDirectionOnly":     True,
@@ -2480,7 +2482,10 @@ def _try_late_direction_entry(
             variant_id, slug, up_book, down_book, remaining_seconds
         )
         return
-    if remaining_seconds > LATE_DIRECTION_WINDOW_SECONDS or remaining_seconds < LATE_DIRECTION_MIN_ENTRY_REMAINING:
+    # 2026-09-14 依使用者要求：歷史混合的方向路徑可用變體覆寫窗口秒數與最低偏離（20s / 0.01%），其他變體維持預設。
+    direction_window = float(variant.get("lateDirectionWindowSeconds", LATE_DIRECTION_WINDOW_SECONDS))
+    direction_min_delta = float(variant.get("lateDirectionMinDeltaPct", LATE_DIRECTION_MIN_DELTA_PCT))
+    if remaining_seconds > direction_window or remaining_seconds < LATE_DIRECTION_MIN_ENTRY_REMAINING:
         record_window_diagnostic(variant_id, slug, "outside_entry_window", remainingSeconds=remaining_seconds)
         return
     if variant.get("directionSignalSource") == "binance_window":
@@ -2498,10 +2503,11 @@ def _try_late_direction_entry(
             return
         delta_pct = (signal["current"] - signal["opening"]) / signal["opening"] * 100
         signal_source = "chainlink_twap_60s"
-    if abs(delta_pct) < LATE_DIRECTION_MIN_DELTA_PCT:
+    if abs(delta_pct) < direction_min_delta:
         record_window_diagnostic(
             variant_id, slug, "delta_below_minimum",
             remainingSeconds=remaining_seconds, signalSource=signal_source, signalDeltaPct=delta_pct,
+            minimumSignalDeltaPct=direction_min_delta,
         )
         return
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)

@@ -164,6 +164,9 @@ PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_M
 PAIR_STABILITY_SECONDS = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.15")))
 RESCUE_LOCK_MAX_SUM = max(LOCK_MAX_SUM, min(0.99, float(os.environ.get("POLY_RESCUE_LOCK_MAX_SUM", "0.99"))))
 LATE_DIRECTION_MAX_PRICE = float(_LIVE_VARIANT.get("lateDirectionMaxPrice", 0.92))
+# 2026-09-14：方向路徑的窗口秒數與最低偏離可由變體覆寫（歷史混合 20s / 0.01%），與模擬版對齊。
+LATE_DIRECTION_WINDOW_SECONDS = float(_LIVE_VARIANT.get("lateDirectionWindowSeconds", sim.LATE_DIRECTION_WINDOW_SECONDS))
+LATE_DIRECTION_MIN_DELTA_PCT = float(_LIVE_VARIANT.get("lateDirectionMinDeltaPct", sim.LATE_DIRECTION_MIN_DELTA_PCT))
 
 
 # 2026-09-12 依使用者要求：實盤也啟用「兩腿鎖不到就先買便宜那一腿」的單邊進場，判斷條件跟
@@ -761,7 +764,7 @@ def _late_direction_plan(
 ) -> dict | None:
     """依實盤選定變體的價格來源建立最後 3～10 秒方向單計畫。"""
     if (
-        remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS
+        remaining_seconds > LATE_DIRECTION_WINDOW_SECONDS
         or remaining_seconds < sim.LATE_DIRECTION_MIN_ENTRY_REMAINING
     ):
         if diagnostic_slug:
@@ -793,7 +796,7 @@ def _late_direction_plan(
         signal_source = "chainlink_twap_60s"
         signal_observed_at = signal["observedAt"]
         signal_age_seconds = signal["ageSeconds"]
-    if abs(delta_pct) < sim.LATE_DIRECTION_MIN_DELTA_PCT:
+    if abs(delta_pct) < LATE_DIRECTION_MIN_DELTA_PCT:
         if diagnostic_slug:
             record_live_window_diagnostic(
                 diagnostic_slug,
@@ -802,7 +805,7 @@ def _late_direction_plan(
                 signalSource=signal_source,
                 signalDeltaPct=delta_pct,
                 signalAgeSeconds=signal_age_seconds,
-                minimumSignalDeltaPct=sim.LATE_DIRECTION_MIN_DELTA_PCT,
+                minimumSignalDeltaPct=LATE_DIRECTION_MIN_DELTA_PCT,
             )
         return None
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
@@ -2485,7 +2488,7 @@ async def _evaluate_and_act_impl(
         # 單腿路徑在同一刻搶同一個部位、用不同標準各說各話。
         if (
             SINGLE_LEG_ENTRY_ENABLED
-            and (not ENABLE_LATE_DIRECTION or remaining_seconds > sim.LATE_DIRECTION_WINDOW_SECONDS)
+            and (not ENABLE_LATE_DIRECTION or remaining_seconds > LATE_DIRECTION_WINDOW_SECONDS)
             and _single_leg_entry_allowed(slug, remaining_seconds)
         ):
             if await _try_single_leg_entry(slug, up_book, down_book, shares, fair, cash, dry_run):
@@ -3037,7 +3040,7 @@ def _log_startup_banner(mode: str) -> None:
         log.warning(
             f"  單腿方向性下注已啟用：{direction_source}，剩餘 "
             f"{sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
-            f"{sim.LATE_DIRECTION_WINDOW_SECONDS:.0f}s、偏移開盤價>={sim.LATE_DIRECTION_MIN_DELTA_PCT:.2f}%、"
+            f"{LATE_DIRECTION_WINDOW_SECONDS:.0f}s、偏移開盤價>={LATE_DIRECTION_MIN_DELTA_PCT:.2f}%、"
             f"不要求市場同向、進場價<=${LATE_DIRECTION_MAX_PRICE}"
         )
     else:

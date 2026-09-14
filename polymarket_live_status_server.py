@@ -246,7 +246,7 @@ def _fetch_state() -> dict:
                 if strategy._LIVE_VARIANT.get("directionSignalSource") == "binance_window"
                 else f"Chainlink {strategy.sim.CHAINLINK_TWAP_WINDOW_SECONDS}s TWAP"
             ),
-            "lateDirectionMinDeltaPct": strategy.sim.LATE_DIRECTION_MIN_DELTA_PCT,
+            "lateDirectionMinDeltaPct": strategy.LATE_DIRECTION_MIN_DELTA_PCT,
             "lateDirectionRequiresMarketAgreement": False,
             "maxPairBudgetUsd": strategy.MAX_PAIR_BUDGET_USD,
             "minCashReserveUsd": strategy.MIN_CASH_RESERVE_USD,
