@@ -1295,6 +1295,27 @@ async def _query_conditional_balance_with_retry(token_id: str) -> float:
         return await asyncio.to_thread(live.get_conditional_balance, token_id)
 
 
+WARMUP_RETRY_ATTEMPTS = 3
+WARMUP_RETRY_DELAY_SECONDS = 1.0
+
+
+async def _prewarm_with_retry(token_ids: list[str], condition_id: str) -> bool:
+    """2026-09-15 依使用者要求：預熱（查 tick size／費率）失敗改為重試，仍失敗就回 False 讓呼叫端跳過
+    本輪／本窗口，不再停機——預熱不送單、沒有資金風險，09-15 02:00 因一次 API 讀取逾時停機太重。"""
+    last_exc: Exception | None = None
+    for attempt in range(1, WARMUP_RETRY_ATTEMPTS + 1):
+        try:
+            await asyncio.to_thread(live.prewarm_order_tokens, token_ids, condition_id)
+            return True
+        except Exception as exc:  # 網路逾時、CLOB 5xx 等
+            last_exc = exc
+            log.warning(f"[LIVE] 預熱失敗（第 {attempt}/{WARMUP_RETRY_ATTEMPTS} 次）：{exc}")
+            if attempt < WARMUP_RETRY_ATTEMPTS:
+                await asyncio.sleep(WARMUP_RETRY_DELAY_SECONDS * attempt)
+    log.error(f"[LIVE] 預熱連續 {WARMUP_RETRY_ATTEMPTS} 次失敗，本輪跳過、稍後再試：{last_exc}")
+    return False
+
+
 async def _ensure_no_unmanaged_current_position() -> bool:
     """真實模式首筆下單前，確認當前 token 沒有策略狀態外的持倉或掛單。"""
     up_id, down_id = sim._market_tokens(sim.state["market"])
@@ -1340,9 +1361,11 @@ async def _ensure_no_unmanaged_current_position() -> bool:
         condition_id = _market_condition_id()
         if not condition_id:
             raise RuntimeError("current market is missing conditionId")
-        await asyncio.to_thread(live.prewarm_order_tokens, [up_id, down_id], condition_id)
     except Exception as exc:
         _set_halt(f"preflight_order_warmup_failed: {exc}")
+        return False
+    if not await _prewarm_with_retry([up_id, down_id], condition_id):
+        record_live_window_diagnostic(sim.state.get("market", {}).get("slug") or "", "order_warmup_retry_exhausted")
         return False
     return True
 
@@ -2415,15 +2438,14 @@ async def _evaluate_and_act_impl(
         if not dry_run:
             up_id, down_id = sim._market_tokens(sim.state["market"])
             if not live.order_tokens_and_fees_are_warm([up_id, down_id]):
-                try:
-                    # preflightSlug 會寫入磁碟；若程式在同一窗口重啟，它可能已經是目前 slug，
-                    # 但 SDK 的記憶體快取已清空，所以仍要獨立確認這個進程真的完成預熱。
-                    condition_id = _market_condition_id()
-                    if not condition_id:
-                        raise RuntimeError("current market is missing conditionId")
-                    await asyncio.to_thread(live.prewarm_order_tokens, [up_id, down_id], condition_id)
-                except Exception as exc:
-                    _set_halt(f"order_warmup_failed: {exc}")
+                # preflightSlug 會寫入磁碟；若程式在同一窗口重啟，它可能已經是目前 slug，
+                # 但 SDK 的記憶體快取已清空，所以仍要獨立確認這個進程真的完成預熱。
+                condition_id = _market_condition_id()
+                if not condition_id:
+                    _set_halt("order_warmup_failed: current market is missing conditionId")
+                    return
+                if not await _prewarm_with_retry([up_id, down_id], condition_id):
+                    record_live_window_diagnostic(slug, "order_warmup_retry_exhausted")
                     return
         cash = await _strategy_cash(dry_run)
         shares, budget = _target_pair_order(cash)

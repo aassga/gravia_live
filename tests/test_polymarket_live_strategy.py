@@ -932,6 +932,30 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             await strategy.evaluate_and_act("btc-window", None, 35.0, None)
             self.assertEqual(strategy.live_state["position"]["side"], "Up")
 
+    async def test_prewarm_retries_then_skips_without_halting(self):
+        calls = {"n": 0}
+        def flaky(token_ids, condition_id):
+            calls["n"] += 1
+            raise RuntimeError("Request exception!")
+        with (
+            patch.object(trader, "prewarm_order_tokens", side_effect=flaky),
+            patch.object(strategy, "WARMUP_RETRY_DELAY_SECONDS", 0.0),
+        ):
+            ok = await strategy._prewarm_with_retry(["a", "b"], "cond")
+        self.assertFalse(ok)
+        self.assertEqual(calls["n"], strategy.WARMUP_RETRY_ATTEMPTS)
+        self.assertFalse(strategy.live_state.get("halted"))
+        calls["n"] = 0
+        def flaky_then_ok(token_ids, condition_id):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise RuntimeError("timeout")
+        with (
+            patch.object(trader, "prewarm_order_tokens", side_effect=flaky_then_ok),
+            patch.object(strategy, "WARMUP_RETRY_DELAY_SECONDS", 0.0),
+        ):
+            self.assertTrue(await strategy._prewarm_with_retry(["a", "b"], "cond"))
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (
