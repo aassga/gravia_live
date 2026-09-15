@@ -432,17 +432,16 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     ((d&&d.abVariants)||[]).forEach(v=>{
       (byAsset[v.assetId]=byAsset[v.assetId]||[]).push(v);
     });
+    // 2026-09-15 依使用者要求：資產分頁只當切換按鈕，不再顯示各資產合計損益。
     $('asset-tabs').innerHTML=ASSET_LIST.map(a=>{
       const vs=byAsset[a.id]||[];
-      const totalPnl=vs.reduce((s,v)=>s+(v.totalPnl||0),0);
       const active=a.id===currentAsset;
-      const pnlColor=!vs.length?'#555':(totalPnl>0?'#00ff9d':(totalPnl<0?'#ff3a5c':'#888'));
-      return `<button type="button" data-asset="${a.id}" style="display:flex;flex-direction:column;
-        align-items:center;gap:1px;padding:4px 10px;background:${active?'#ff2d7822':'#0d0d0d'};
+      return `<button type="button" data-asset="${a.id}" style="display:flex;align-items:center;gap:6px;
+        padding:6px 12px;background:${active?'#ff2d7822':'#0d0d0d'};
         border:1px solid ${active?'#ff2d78':'#333'};border-radius:3px;cursor:pointer;
         font-family:'JetBrains Mono';">
         <span style="font-size:11px;font-weight:700;color:${active?'#ff2d78':'#ccc'};">${a.label}</span>
-        <span style="font-size:9.5px;color:${pnlColor};">${vs.length?fmtMoney(totalPnl):'—'}</span>
+        <span style="font-size:9px;color:#555;">${vs.length} 組</span>
       </button>`;
     }).join('');
     [...$('asset-tabs').querySelectorAll('button')].forEach(btn=>{
