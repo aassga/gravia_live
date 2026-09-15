@@ -740,6 +740,7 @@ def _new_variant_state() -> dict:
         "earlyExits":          0,
         "peakPortfolio":       SIM_DEFAULT_BALANCE,
         "maxDrawdown":         0.0,
+        "enabledAt":           time.time(),   # 2026-09-15：這組變體在模擬盤啟用（開始累計）的時間
         "makerQuotes":         None,
         "windowDiagnostics":   [],
         "makerStats": {
@@ -1241,6 +1242,7 @@ def load_sim_state() -> None:
         except Exception as exc:
             log.warning(f"[SIM] 無法載入共用設定，改用預設值：{exc}")
     rows = db.execute("SELECT variant_id, state_json FROM sim_state").fetchall()
+    run_id = int(shared_config["runId"])
     for variant_id, state_json in rows:
         if variant_id not in ab_states:
             continue
@@ -1248,10 +1250,16 @@ def load_sim_state() -> None:
             loaded = json.loads(state_json)
             defaults = _new_variant_state()
             defaults.update(loaded)
+            if "enabledAt" not in loaded:
+                # 舊狀態沒有啟用時間：用這一輪最早一筆結算的時間回填（比實際啟用晚一個窗口），沒有交易就用現在。
+                first = db.execute(
+                    "SELECT MIN(exit_time) FROM sim_trades WHERE run_id=? AND variant_id=?", (run_id, variant_id)
+                ).fetchone()
+                if first and first[0]:
+                    defaults["enabledAt"] = float(first[0])
             ab_states[variant_id] = defaults
         except Exception as exc:
             log.warning(f"[SIM:{variant_id}] 無法載入狀態，改用空白狀態：{exc}")
-    run_id = int(shared_config["runId"])
     for variant_id in ab_states:
         diag_rows = db.execute(
             """SELECT diagnostic_json FROM sim_window_diagnostics
@@ -4836,6 +4844,7 @@ def build_ab_leaderboard() -> list:
             "directionalTrades": st.get("directionalTrades", 0),
             "earlyExits":    st.get("earlyExits", 0),
             "maxDrawdown":   st.get("maxDrawdown", 0.0),
+            "enabledAt":     st.get("enabledAt"),
             "makerQuotes":   st.get("makerQuotes"),
             "makerStats":    _maker_stats(st) if v.get("marketMakerOnly") else None,
             "rotationStats": _rotation_stats(st) if v.get("inventoryRotation") else None,

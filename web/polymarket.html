@@ -566,6 +566,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
         <div style="display:flex;gap:8px;flex-wrap:nowrap;overflow:hidden;font-size:9px;color:#888;margin-bottom:3px;white-space:nowrap;">
           <span>交易 ${v.totalTrades}</span>
           <span>勝率 ${v.winRate!=null?Math.round(v.winRate)+'%':'—'}</span>
+          <span title="啟用時間（台北）">啟用 ${v.enabledAt?new Date(v.enabledAt*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—'}</span>
           <span class="yellow">結算中 ${v.pendingSettlements||0}</span>
           <span>費用 $${(v.totalFees||0).toFixed(2)}</span>
         </div>
