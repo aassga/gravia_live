@@ -132,21 +132,35 @@ def format_trades(live: dict, limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-def format_sim(sim: dict, asset_id: str = "btc") -> str:
-    rows = [v for v in (sim.get("abVariants") or []) if v.get("assetId") == asset_id]
-    if not rows:
+def format_sim(sim: dict, asset_id: str | None = None) -> str:
+    """2026-09-15 依使用者要求：預設列出模擬盤所有資產（每個資產一段、各自依損益排序）；
+    /sim btc 這種帶資產代號的只列該資產。"""
+    assets = [a for a in (sim.get("assetList") or [])]
+    if asset_id:
+        assets = [a for a in assets if a.get("id") == asset_id] or [{"id": asset_id, "label": asset_id.upper()}]
+    if not assets:
         return "📊 模擬盤沒有資料"
-    rows.sort(key=lambda v: float(v.get("totalPnl") or 0), reverse=True)
-    lines = [f"📊 模擬盤 {asset_id.upper()}（各組獨立記帳）"]
-    for v in rows:
-        n = int(v.get("totalTrades") or 0)
-        avg = (float(v.get("totalPnl") or 0) / n) if n else 0.0
-        lines.append(
-            f"{'★' if v is rows[0] else '·'} {v.get('label')}：{_money(v.get('totalPnl'))}"
-            f" · {n} 筆 · 平均 {_money(avg)}/筆 · 回撤 ${float(v.get('maxDrawdown') or 0):.2f}"
-            f"{' · 持倉中' if v.get('hasPosition') else ''}"
-        )
-    return "\n".join(lines)
+    out = []
+    for a in assets:
+        rows = [v for v in (sim.get("abVariants") or []) if v.get("assetId") == a.get("id")]
+        if not rows:
+            continue
+        rows.sort(key=lambda v: float(v.get("totalPnl") or 0), reverse=True)
+        total = sum(float(v.get("totalPnl") or 0) for v in rows)
+        lines = [f"📊 {a.get('label') or a.get('id')}（{len(rows)} 組，合計 {_money(total)}）"]
+        for v in rows:
+            n = int(v.get("totalTrades") or 0)
+            avg = (float(v.get("totalPnl") or 0) / n) if n else 0.0
+            lines.append(
+                f"{'★' if v is rows[0] else '·'} {v.get('label')}：{_money(v.get('totalPnl'))}"
+                f" · {n} 筆 · 平均 {_money(avg)}/筆 · 回撤 ${float(v.get('maxDrawdown') or 0):.2f}"
+                f"{' · 持倉中' if v.get('hasPosition') else ''}"
+            )
+        out.append("
+".join(lines))
+    return "
+
+".join(out) if out else "📊 模擬盤沒有資料"
 
 
 HELP_TEXT = (
@@ -228,7 +242,9 @@ async def handle_command(text: str) -> str:
             limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
             return format_trades(await fetch_snapshot(LIVE_WS), max(1, min(limit, 30)))
         if cmd == "/sim":
-            return format_sim(await fetch_snapshot(SIM_WS))
+            asset = parts[1].lower() if len(parts) > 1 else None
+            alias = {"eth": "eth-alt", "15m": "btc-15m", "btc15m": "btc-15m"}
+            return format_sim(await fetch_snapshot(SIM_WS), alias.get(asset, asset))
         if cmd == "/report":
             return latest_report_summary()
     except Exception as exc:  # 狀態伺服器沒開、逾時等
