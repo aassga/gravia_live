@@ -341,6 +341,33 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading(vid, "btc-window-2", up, down, 295.0, None)
         self.assertIsNone(sim.ab_states[vid]["position"])
 
+    def test_open_reversal_buys_opposite_of_previous_window(self):
+        # 2026-09-15：開盤 15～60s 買「與前一窗結果相反」那邊（0.48～0.56），前一窗結果由換窗時的中價決定
+        vid = "btc-open-reversal"
+        ms = sim.markets_state["btc"]
+        ms["upPrice"], ms["downPrice"] = 0.97, 0.03
+        sim._record_prev_window_leader(ms, "btc-window")
+        self.assertEqual(ms["prevWindowLeader"], "Up")
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.52, "size": 500}], "bids": [{"price": 0.51, "size": 500}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.49, "size": 500}], "bids": [{"price": 0.48, "size": 500}]})
+        sim.simulate_trading(vid, "btc-window", up, down, 295.0, None)      # 開盤 5 秒：太早
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        sim.simulate_trading(vid, "btc-window", up, down, 270.0, None)      # 開盤 30 秒：買 Down（前一窗 Up）
+        pos = sim.ab_states[vid]["position"]
+        self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Down"); self.assertEqual(pos["signalSource"], "open_reversal")
+        # 前一窗結果不明確（中價 0.6）→ 不進
+        sim.ab_states[vid]["position"] = None; sim.ab_states[vid]["openReversalWindowSlug"] = None
+        ms["upPrice"], ms["downPrice"] = 0.6, 0.4
+        sim._record_prev_window_leader(ms, "btc-window-2")
+        sim.simulate_trading(vid, "btc-window-2", up, down, 270.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        # 價格超出 0.48～0.56 → 不進
+        ms["upPrice"], ms["downPrice"] = 0.03, 0.97
+        sim._record_prev_window_leader(ms, "btc-window-3")
+        up_hi = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.62, "size": 500}], "bids": [{"price": 0.61, "size": 500}]})
+        sim.simulate_trading(vid, "btc-window-3", up_hi, down, 270.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+
     def test_last60_hold_blocks_entry_after_recent_flip_and_waits_for_stability(self):
         vid = "btc-last60-098-hold"
         v = sim.AB_VARIANT_BY_ID[vid]

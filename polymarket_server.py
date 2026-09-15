@@ -216,6 +216,14 @@ FOLLOW_TAKER_MIN_PRICE         = 0.98
 OPEN_MOMENTUM_MAX_ELAPSED_SECONDS = 10.0
 OPEN_MOMENTUM_MAX_PRICE           = 0.55
 OPEN_MOMENTUM_MIN_MOVE_PCT        = 0.01   # 前一分鐘 Binance 漲跌至少這麼多才算有動能
+# 2026-09-15 BTC 5m 24h 掃描（437k 筆成交）：開盤後 15～60 秒買「與前一窗結算相反」那邊、買價 0.48～0.56
+# 的錢包窗口 n≈1400、勝率 57～62%、每股 +0.056～+0.077；同向者只有 42% 勝率、每股 -0.09。
+# 窗口結果連續同向只有 46.9%（均值回歸）。純觀察用的模擬變體。
+OPEN_REVERSAL_MIN_ELAPSED_SECONDS = 15.0
+OPEN_REVERSAL_MAX_ELAPSED_SECONDS = 60.0
+OPEN_REVERSAL_MIN_PRICE           = 0.48
+OPEN_REVERSAL_MAX_PRICE           = 0.56
+OPEN_REVERSAL_LEADER_MIN_PRICE    = 0.85   # 前一窗最後中價 >= 這個才算「結果明確」
 # 2026-09-14 21:04 真單 -$10.90：進場前 60 秒內領先方換邊三次（Up 0.85→0.20→0.78→0.96），買 0.99 後又翻回 Down。
 # (A) 翻面偵測：進場前 favoriteFlipLookbackSeconds 秒內另一邊曾 >= favoriteFlipThreshold 就不進。
 FAVORITE_FLIP_LOOKBACK_SECONDS = 60.0
@@ -553,6 +561,19 @@ for _asset in ASSETS:
             "openMinMovePct":        OPEN_MOMENTUM_MIN_MOVE_PCT,
         })
         AB_VARIANTS.append({
+            "id":                    "btc-open-reversal",
+            "assetId":               "btc",
+            "label":                 "BTC 開盤反向（開盤 15～60s 買前一窗相反方向、0.48～0.56、抱到結算）",
+            "entryMaxPrice":         None,
+            "lockMaxSum":            SIM_LOCK_MAX_SUM,
+            "openReversal":          True,
+            "simOnly":               True,
+            "openMinElapsedSeconds": OPEN_REVERSAL_MIN_ELAPSED_SECONDS,
+            "openMaxElapsedSeconds": OPEN_REVERSAL_MAX_ELAPSED_SECONDS,
+            "openMinPrice":          OPEN_REVERSAL_MIN_PRICE,
+            "openMaxPrice":          OPEN_REVERSAL_MAX_PRICE,
+        })
+        AB_VARIANTS.append({
             "id":                    "btc-price-triggered-favorite",
             "assetId":               "btc",
             "label":                 (
@@ -678,6 +699,8 @@ def _new_market_state() -> dict:
         "market":        None,   # 目前追蹤的市場（Gamma market 物件）
         "windowEndsAt":  None,   # 這個窗口結束時間（unix ms）
         "upPrice":       None,
+        "prevWindowLeader": None,   # 上一窗口結束前的領先方（Up/Down/None），開盤反向變體用
+        "prevWindowLeaderSlug": None,
         "downPrice":     None,
         "upBook":        {"bids": [], "asks": []},
         "downBook":      {"bids": [], "asks": []},
@@ -2830,6 +2853,66 @@ def _try_open_momentum_entry(
     log.info(f"[SIM:{variant_id}] 開盤動能 {side} 前一分鐘 {move_pct:+.3f}% ask=${ask:.2f} VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f}")
 
 
+def _record_prev_window_leader(ms: dict, new_slug: str) -> None:
+    """換窗口時用上一窗最後看到的中價判斷誰贏（>= OPEN_REVERSAL_LEADER_MIN_PRICE 才算明確），
+    不等 Gamma 正式結算（要好幾分鐘，開盤反向 15～60 秒內就要用）。"""
+    up_p, down_p = ms.get("upPrice"), ms.get("downPrice")
+    leader = None
+    if isinstance(up_p, (int, float)) and up_p >= OPEN_REVERSAL_LEADER_MIN_PRICE:
+        leader = "Up"
+    elif isinstance(down_p, (int, float)) and down_p >= OPEN_REVERSAL_LEADER_MIN_PRICE:
+        leader = "Down"
+    ms["prevWindowLeader"] = leader
+    ms["prevWindowLeaderSlug"] = new_slug
+
+
+def _try_open_reversal_entry(
+    variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float
+) -> None:
+    """開盤反向：開盤後 openMinElapsedSeconds～openMaxElapsedSeconds 秒內，買「與前一窗結果相反」那邊
+    （ask 在 openMinPrice～openMaxPrice），每窗口一次、抱到結算、不停損。純觀察用。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    st = ab_states[variant_id]
+    if st.get("openReversalWindowSlug") == slug:
+        return
+    ms = markets_state[variant["assetId"]]
+    asset = next((a for a in ASSETS if a["id"] == variant["assetId"]), {})
+    elapsed = float(asset.get("windowSeconds", WINDOW_SECONDS)) - remaining_seconds
+    if elapsed < float(variant.get("openMinElapsedSeconds", OPEN_REVERSAL_MIN_ELAPSED_SECONDS)) \
+            or elapsed > float(variant.get("openMaxElapsedSeconds", OPEN_REVERSAL_MAX_ELAPSED_SECONDS)):
+        record_window_diagnostic(variant_id, slug, "outside_entry_window", remainingSeconds=remaining_seconds)
+        return
+    prev = ms.get("prevWindowLeader") if ms.get("prevWindowLeaderSlug") == slug else None
+    if prev not in ("Up", "Down"):
+        record_window_diagnostic(variant_id, slug, "reversal_prev_window_unclear")
+        return
+    side, book = ("Down", down_book) if prev == "Up" else ("Up", up_book)
+    asks = book.get("asks") or []
+    ask = float(asks[0]["price"]) if asks else None
+    lo = float(variant.get("openMinPrice", OPEN_REVERSAL_MIN_PRICE)); hi = float(variant.get("openMaxPrice", OPEN_REVERSAL_MAX_PRICE))
+    if ask is None or ask < lo or ask > hi:
+        record_window_diagnostic(variant_id, slug, "reversal_price_out_of_range", selectedSide=side, selectedAsk=ask)
+        return
+    if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
+        record_window_diagnostic(variant_id, slug, "selected_book_not_fresh", selectedSide=side)
+        return
+    shares, budget = _target_order_size(variant_id)
+    if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_budget", targetShares=shares, budgetUsd=budget)
+        return
+    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    fill = simulate_buy_fill(book, shares) if shares >= float(book.get("minOrderSize", 1) or 1) else None
+    if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_ask_depth", targetShares=shares, selectedSide=side)
+        return
+    enter_position(variant_id, slug, side, fill, budget, None, None)
+    st["position"]["signalSource"] = "open_reversal"
+    st["openReversalWindowSlug"] = slug
+    record_window_diagnostic(variant_id, slug, "reversal_entered", selectedSide=side, prevWindowLeader=prev, decisionPrice=fill["decisionPrice"])
+    save_sim_state()
+    log.info(f"[SIM:{variant_id}] 開盤反向 {side}（前一窗 {prev}）開盤後 {elapsed:.0f}s ask=${ask:.2f} VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f}")
+
+
 def _track_favorite_leaders(st: dict, slug: str, up_book: dict, down_book: dict, threshold: float) -> None:
     """記錄本窗口每一邊最後一次 ask >= threshold 的時間（翻面偵測用）；換窗口就重置。"""
     seen = st.get("favoriteLeaderSeen")
@@ -3618,6 +3701,11 @@ def _simulate_trading_impl(
         # 開盤動能方向性：只在開盤後幾秒進一次，之後抱到結算，不補腿、不停損。
         if pos is None and remaining_seconds is not None:
             _try_open_momentum_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        return
+
+    if variant.get("openReversal"):
+        if pos is None and remaining_seconds is not None:
+            _try_open_reversal_entry(variant_id, slug, up_book, down_book, remaining_seconds)
         return
 
     if variant.get("lateFavorite"):
@@ -4555,6 +4643,7 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     if new_market and (cur is None or new_market["slug"] != cur["slug"]):
         if cur is not None:
             queue_settlement(cur["slug"])
+            _record_prev_window_leader(ms, new_market["slug"])
         ms["market"] = new_market
         ms["windowEndsAt"] = _iso_to_ms(new_market["endDate"])
         ms["windowOpenSpotPrice"] = None  # 換窗口了，開盤價重新觀察
@@ -4704,6 +4793,9 @@ def build_ab_leaderboard() -> list:
             "dumpThenHedge": bool(v.get("dumpThenHedge")),
             "lateFavorite":  bool(v.get("lateFavorite")),
             "openMomentum":  bool(v.get("openMomentum")),
+            "openReversal":  bool(v.get("openReversal")),
+            "openMinElapsedSeconds": v.get("openMinElapsedSeconds"),
+            "openMinPrice":  v.get("openMinPrice"),
             "openMaxElapsedSeconds": v.get("openMaxElapsedSeconds"),
             "openMaxPrice": v.get("openMaxPrice"),
             "openMinMovePct": v.get("openMinMovePct"),
