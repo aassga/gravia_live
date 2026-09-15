@@ -683,7 +683,9 @@ _SIM_DEFAULT_DISABLED = (
     "btc-follow-taker,btc-price-triggered-favorite,btc-last60-098-hold,"
     # 2026-09-15 13:15 再依使用者要求停用累計虧損 350 以上者：ETH 跟單 T（-633）、BTC 30～45s（-569）、
     # BTC 15m 跟單 T（-442）、SOL 價格觸發（-433）。
-    "eth-alt-follow-taker,btc-last30-45-088-092,btc-15m-follow-taker,sol-price-triggered-favorite"
+    "eth-alt-follow-taker,btc-last30-45-088-092,btc-15m-follow-taker,sol-price-triggered-favorite,"
+    # 2026-09-15 14:25：XRP 最後 60 秒 0.88～0.95（新增後 7 筆就 -377）。
+    "xrp-last60-088-095"
 )
 _SIM_DISABLED_VARIANT_IDS = {
     value.strip()
