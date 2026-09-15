@@ -164,6 +164,7 @@ def format_sim(sim: dict, asset_id: str | None = None) -> str:
 HELP_TEXT = (
     "可用指令：\n"
     "/status — 實盤開關、策略、部位、餘額\n"
+    "/live — 實盤真實下單開關（REAL ↔ DRY-RUN，按鈕確認後切換並重啟）\n"
     "/pnl — 實盤損益、平均每筆、最好／最差、今日統計\n"
     "/trades [n] — 最近 n 筆真單（預設 10）\n"
     "/sim — 模擬盤各組損益\n"
@@ -171,8 +172,89 @@ HELP_TEXT = (
     "/scan [小時] — 直接掃 BTC 5m 最近 N 小時\n"
     "/report — 最近一次市場掃描的建議摘要\n"
     "/help — 這份說明\n"
-    "（純查詢，沒有任何會改設定或下單的指令；主動推播：停機／恢復、REAL↔DRY-RUN 切換、新部位）"
+    "（除了 /live 開關與 /scan 之外都是純查詢；主動推播：停機／恢復、REAL↔DRY-RUN 切換、新部位）"
 )
+
+
+# ── 2026-09-15 依使用者要求：TG 上的實盤真實下單開關 ────────────────────────
+# 只改 .env 的 POLY_STRATEGY_ARMED 並重啟 gravia.service + gravia-status.service；
+# 開啟 REAL 要再按一次確認；實盤有持倉／待結算時拒絕切換（等結算完再切）。
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+LIVE_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_live_strategy_state.json")
+
+
+def write_env_flag(key: str, value: str, path: str = ENV_FILE) -> None:
+    lines = []
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    prefix, replacement, done = f"{key}=", f"{key}={value}\n", False
+    for i, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[i] = replacement; done = True
+            break
+    if not done:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(replacement)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def live_toggle_keyboard(execution_enabled: bool) -> list[list[dict]]:
+    if execution_enabled:
+        return [[{"text": "🔴 切換為 DRY-RUN（停止真實下單）", "callback_data": "live:dry"}]]
+    return [[{"text": "🟢 開啟真實下單（REAL）", "callback_data": "live:real"}]]
+
+
+def live_confirm_keyboard(target: str) -> list[list[dict]]:
+    label = "✅ 確認開啟真實下單" if target == "real" else "✅ 確認切換為 DRY-RUN"
+    return [[{"text": label, "callback_data": f"live:{target}:confirm"}], [{"text": "取消", "callback_data": "live:cancel"}]]
+
+
+def _live_position_open() -> bool:
+    try:
+        with open(LIVE_STATE_FILE, "r", encoding="utf-8") as f:
+            st = json.load(f)
+    except Exception:
+        return False
+    return bool(st.get("position")) or bool(st.get("pendingSettlements"))
+
+
+async def apply_live_mode(target: str) -> str:
+    """target: 'real' | 'dry'。回傳給使用者看的結果文字。"""
+    if _live_position_open():
+        return "⏸ 實盤目前有持倉或待結算，先不切換；等結算完再按一次。"
+    write_env_flag("POLY_STRATEGY_ARMED", "true" if target == "real" else "false")
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "-n", "systemctl", "restart", "gravia.service", "gravia-status.service",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await asyncio.wait_for(proc.communicate(), 90)
+    if proc.returncode != 0:
+        return f"⚠️ .env 已改為 {'REAL' if target == 'real' else 'DRY-RUN'}，但重啟失敗（{proc.returncode}）：{(out or b'').decode(errors='replace')[:300]}"
+    return ("🟢 已開啟真實下單（REAL），服務已重啟。" if target == "real" else "🔴 已切換為 DRY-RUN，服務已重啟。")
+
+
+async def send_live_menu(client: httpx.AsyncClient, chat_id: int) -> None:
+    try:
+        live = await fetch_snapshot(LIVE_WS)
+    except Exception as exc:
+        await tg_send(client, chat_id, f"⚠️ 讀不到實盤狀態（{exc.__class__.__name__}）。")
+        return
+    enabled = bool(live.get("strategyExecutionEnabled"))
+    cfg = live.get("strategyConfig") or {}
+    pos = (live.get("strategyState") or {}).get("position")
+    text = (f"實盤目前：{'🟢 REAL 真實下單' if enabled else '🔴 DRY-RUN'}\n"
+            f"策略：{cfg.get('label') or '—'}\n"
+            f"部位：{'持倉中（切換要等結算）' if pos else '空手'}")
+    try:
+        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": text,
+                                                        "reply_markup": {"inline_keyboard": live_toggle_keyboard(enabled)}})
+    except Exception as exc:
+        log.warning(f"sendMessage(live menu) failed: {exc}")
 
 REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "weekly")
 _scan_running = {"v": False}
@@ -287,6 +369,26 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                     if uid not in ALLOWED_USER_IDS or not chat_id:
                         continue
                     data_str = str(cq.get("data") or "")
+                    if data_str.startswith("live:"):
+                        parts_cb = data_str.split(":")
+                        if data_str == "live:cancel":
+                            await tg_send(client, chat_id, "已取消。")
+                        elif len(parts_cb) == 2 and parts_cb[1] in ("real", "dry"):
+                            warn = ("⚠️ 這會用真錢下單。" if parts_cb[1] == "real" else "")
+                            try:
+                                await client.post(f"{API}/sendMessage", json={
+                                    "chat_id": chat_id,
+                                    "text": f"{warn}確定要{'開啟真實下單（REAL）' if parts_cb[1] == 'real' else '切換為 DRY-RUN'}？會重啟 gravia.service。",
+                                    "reply_markup": {"inline_keyboard": live_confirm_keyboard(parts_cb[1])}})
+                            except Exception as exc:
+                                log.warning(f"sendMessage(live confirm) failed: {exc}")
+                        elif len(parts_cb) == 3 and parts_cb[2] == "confirm" and parts_cb[1] in ("real", "dry"):
+                            log.info(f"[TG] user {uid} switching live to {parts_cb[1]}")
+                            try:
+                                await tg_send(client, chat_id, await apply_live_mode(parts_cb[1]))
+                            except Exception as exc:
+                                await tg_send(client, chat_id, f"⚠️ 切換失敗：{exc}")
+                        continue
                     if data_str.startswith("scan:"):
                         market = data_str.split(":", 1)[1]
                         label = next((l for l, k in SCAN_MARKETS if k == market), market)
@@ -302,6 +404,9 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                     continue
                 text = msg.get("text") or ""
                 parts = text.strip().split()
+                if parts and parts[0].split("@")[0].lower() == "/live":
+                    await send_live_menu(client, chat_id)
+                    continue
                 if parts and parts[0].split("@")[0].lower() == "/scan":
                     if len(parts) == 1:
                         await send_scan_menu(client, chat_id)

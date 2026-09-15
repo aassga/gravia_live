@@ -1,5 +1,5 @@
 [Unit]
-Description=Gravia Polymarket read-only Telegram status bot
+Description=Gravia Polymarket Telegram status bot (read-only except the /live REAL/DRY-RUN switch)
 Wants=network-online.target
 After=network-online.target gravia-status.service
 
@@ -14,7 +14,7 @@ ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_tg_bo
 Restart=on-failure
 RestartSec=5
 UMask=0077
-NoNewPrivileges=true
+# 2026-09-15：/live 開關要用 sudo -n systemctl restart，不能開 NoNewPrivileges
 PrivateTmp=true
 
 [Install]

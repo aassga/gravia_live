@@ -85,6 +85,24 @@ class TelegramBotTests(unittest.TestCase):
         cur2 = dict(cur); cur2["strategyExecutionEnabled"] = False
         self.assertTrue(any("DRY-RUN" in a for a in bot.diff_alerts(cur, cur2)))
 
+    def test_live_toggle_env_writer_and_keyboards(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("POLY_STAKE_PCT=15\nPOLY_STRATEGY_ARMED=false\nPOLY_LIVE_ASSET_ID=btc-15m")
+            bot.write_env_flag("POLY_STRATEGY_ARMED", "true", p)
+            text = open(p, encoding="utf-8").read()
+            self.assertIn("POLY_STRATEGY_ARMED=true\n", text)
+            self.assertIn("POLY_LIVE_ASSET_ID=btc-15m", text)
+            self.assertEqual(text.count("POLY_STRATEGY_ARMED="), 1)
+            bot.write_env_flag("POLY_NEW_FLAG", "1", p)
+            self.assertTrue(open(p, encoding="utf-8").read().endswith("POLY_NEW_FLAG=1\n"))
+        self.assertEqual(bot.live_toggle_keyboard(True)[0][0]["callback_data"], "live:dry")
+        self.assertEqual(bot.live_toggle_keyboard(False)[0][0]["callback_data"], "live:real")
+        self.assertEqual(bot.live_confirm_keyboard("real")[0][0]["callback_data"], "live:real:confirm")
+        self.assertIn("/live", bot.HELP_TEXT)
+
     def test_sim_formatting_sorts_by_pnl(self):
         sim = {"assetList": [{"id": "btc", "label": "BTC"}, {"id": "btc-15m", "label": "BTC 15m"}], "abVariants": [
             {"assetId": "btc", "label": "A", "totalPnl": 1.0, "totalTrades": 3, "winRate": 66.6, "hasPosition": False},
