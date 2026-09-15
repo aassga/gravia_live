@@ -610,7 +610,7 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
              favoriteStopLossPrice=0.60, favoriteStableSeconds=0.0, simOnly=False),   # 2026-09-15 開放實盤選用（ETH）
         dict(common, id=f"{aid}-last10-30-092-095", label=f"{label} 最後 {10 * k:.0f}～{30 * k:.0f} 秒買領先方（0.92～0.95、不停損）",
              favoriteWindowSeconds=30.0 * k, favoriteMinRemaining=10.0 * k, favoriteMinPrice=0.92, favoriteMaxPrice=0.95,
-             favoriteStopLossPrice=None, favoriteStableSeconds=0.0),
+             favoriteStopLossPrice=None, favoriteStableSeconds=0.0, simOnly=False),   # 2026-09-15 開放實盤選用（BTC 15m）
         {
             "id": f"{aid}-relaxed-lock", "assetId": aid,
             "label": f"{label} 寬鬆鎖利（≤{RELAXED_LOCK_MAX_SUM:.2f}、無額外 tick、深度全吃、淨利≥{RELAXED_LOCK_MIN_NET_PER_SHARE:.3f}）",
