@@ -81,6 +81,20 @@ class WeeklyScanTests(unittest.TestCase):
         self.assertIn("勝率高卻長期賠錢的區間", titles)
         self.assertEqual(scan.kind_label("late_favorite"), f"最後 {scan.LATE_SECONDS} 秒買領先方（>=0.88）")
 
+    def test_15m_time_buckets_cover_120s(self):
+        # 2026-09-15 修正：15 分鐘市場 LATE_SECONDS=120，進場秒數分桶要涵蓋 61～120s
+        old_w, old_l = scan.WINDOW_SECONDS, scan.LATE_SECONDS
+        scan.WINDOW_SECONDS, scan.LATE_SECONDS = 900, 120
+        try:
+            ws = 1_000_000
+            windows = [{"slug": "w", "start": ws, "outcome": "Up", "trades": [_t("a", "Up", 0.96, 10, 900 - 100)]}]
+            report = scan.analyze(windows)
+            tb = report["lateFavorite"]["timeBuckets"]
+            self.assertEqual(len(tb), 1)
+            self.assertEqual((tb[0]["lo"], tb[0]["hi"]), (90, 121))
+        finally:
+            scan.WINDOW_SECONDS, scan.LATE_SECONDS = old_w, old_l
+
 
     def test_market_kind_classification_and_discovery_rendering(self):
         self.assertEqual(scan.classify_market_kind("btc-updown-5m-1", None), "crypto_window")

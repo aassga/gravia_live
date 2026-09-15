@@ -239,7 +239,9 @@ def analyze(windows: list[dict]) -> dict:
                             **_risk_fields(g)})
         return out
     fav_price = bucket(fav, "vwap", [0.88, 0.92, 0.95, 0.98, 1.01])
-    fav_time = bucket(fav, "tBeforeClose", [0, 10, 20, 30, 45, 61])
+    # 2026-09-15 修正：進場秒數分桶依 LATE_SECONDS 等比放大（15 分鐘市場是 120 秒，原本只到 61s 會漏掉 61～120s）。
+    kt = LATE_SECONDS / 60.0
+    fav_time = bucket(fav, "tBeforeClose", [int(round(e)) for e in (0, 10 * kt, 20 * kt, 30 * kt, 45 * kt, 60 * kt + 1)])
     fav_stop = {"withSell": sum(1 for i in fav if i["sold"]), "total": len(fav)}
     # 全勤機器人
     bots = []

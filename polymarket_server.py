@@ -623,6 +623,25 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
         fam.append(dict(common, id="btc-15m-last120-092-098-hold", label="BTC 15m 最後 120 秒買領先方（0.92～0.98、不停損）",
                         favoriteWindowSeconds=120.0, favoriteMinPrice=0.92, favoriteMaxPrice=0.98,
                         favoriteStopLossPrice=None, favoriteStableSeconds=0.0))
+    # 2026-09-15 依 24h 五市場掃描（以收益為主）新增的候選，各市場買價／進場秒數取掃描中每股淨利為正的區間：
+    #   ETH 20～60s 0.92～0.98（各價位皆正、99.3% > 打平 95.3%）、BTC 15m ≥0.95（型態總損益 +988）、
+    #   XRP 0.88～0.95（每股 +0.034，深度薄）、SOL 0.88～0.92 只在最後 30 秒（45～60s 區間為負）。
+    if aid == "btc-15m":
+        fam.append(dict(common, id="btc-15m-last120-095-099-hold", label="BTC 15m 最後 120 秒買領先方（0.95～0.99、不停損）",
+                        favoriteWindowSeconds=120.0, favoriteMinPrice=0.95, favoriteMaxPrice=0.99,
+                        favoriteStopLossPrice=None, favoriteStableSeconds=0.0))
+    if aid == "eth-alt":
+        fam.append(dict(common, id="eth-alt-last20-60-092-098", label="ETH 最後 20～60 秒買領先方（0.92～0.98、不停損）",
+                        favoriteWindowSeconds=60.0, favoriteMinRemaining=20.0, favoriteMinPrice=0.92, favoriteMaxPrice=0.98,
+                        favoriteStopLossPrice=None, favoriteStableSeconds=0.0))
+    if aid == "xrp":
+        fam.append(dict(common, id="xrp-last60-088-095", label="XRP 最後 60 秒買領先方（0.88～0.95、不停損）",
+                        favoriteWindowSeconds=60.0, favoriteMinPrice=0.88, favoriteMaxPrice=0.95,
+                        favoriteStopLossPrice=None, favoriteStableSeconds=0.0))
+    if aid == "sol":
+        fam.append(dict(common, id="sol-last5-30-088-092", label="SOL 最後 5～30 秒買領先方（0.88～0.92、不停損）",
+                        favoriteWindowSeconds=30.0, favoriteMinRemaining=5.0, favoriteMinPrice=0.88, favoriteMaxPrice=0.92,
+                        favoriteStopLossPrice=None, favoriteStableSeconds=0.0))
     return fam
 
 
@@ -635,10 +654,12 @@ del _asset
 # btc-open-momentum（開盤動能方向性）、btc-late-favorite（最後 60 秒 0.95～0.97 原版，24h -$2,022），2026-09-14 依使用者要求移除。用環境變數過濾而不是刪定義：測試仍能用這些變體
 # 驗證共用的鎖利邏輯（tests/conftest.py 把清單設為空），歷史成交仍在 sqlite。
 # 2026-09-15 依使用者要求：移除模擬盤虧損最多的前 5 個變體（SOL 30～45s、SOL 跟單 T、BTC 10～30s、
-# BTC 30～90s、ETH 價格觸發），只停用不刪程式碼。
+# BTC 30～90s、ETH 價格觸發），只停用不刪程式碼；同日再停用 BTC 5m 剩下三個買領先方變體
+# （跟單 T、價格觸發、≥0.98 抱到結算）——24h 掃描 BTC 5m 買領先方各價位皆為負。
 _SIM_DEFAULT_DISABLED = (
     "btc-main,btc-loose,btc-binance-late-direction,btc-two-sided-maker,btc-open-momentum,btc-late-favorite,"
-    "sol-last30-45-088-092,sol-follow-taker,btc-last10-30-092-095,btc-last30-90-092-095,eth-alt-price-triggered-favorite"
+    "sol-last30-45-088-092,sol-follow-taker,btc-last10-30-092-095,btc-last30-90-092-095,eth-alt-price-triggered-favorite,"
+    "btc-follow-taker,btc-price-triggered-favorite,btc-last60-098-hold"
 )
 _SIM_DISABLED_VARIANT_IDS = {
     value.strip()
