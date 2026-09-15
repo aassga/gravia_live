@@ -169,7 +169,6 @@ HELP_TEXT = (
     "/trades [n] — 最近 n 筆真單（預設 10）\n"
     "/sim — 模擬盤各組損益\n"
     "/scan — 選擇要掃描的市場（BTC 5m／15m、ETH、SOL、XRP、其他＝全站探索最多人玩的盤）\n"
-    "/scan [小時] — 直接掃 BTC 5m 最近 N 小時\n"
     "/report — 最近一次市場掃描的建議摘要\n"
     "/help — 這份說明\n"
     "（除了 /live 開關與 /scan 之外都是純查詢；主動推播：停機／恢復、REAL↔DRY-RUN 切換、新部位）"
@@ -408,13 +407,8 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                     await send_live_menu(client, chat_id)
                     continue
                 if parts and parts[0].split("@")[0].lower() == "/scan":
-                    if len(parts) == 1:
-                        await send_scan_menu(client, chat_id)
-                        continue
-                    hours = float(parts[1]) if parts[1].replace(".", "", 1).isdigit() else 24.0
-                    hours = max(1.0, min(hours, 72.0))
-                    await tg_send(client, chat_id, f"🔍 開始掃描 BTC 5 分鐘最近 {hours:.0f} 小時，完成後會推播結果（約 10～15 分鐘）。")
-                    asyncio.get_running_loop().create_task(run_scan_in_background(client, chat_id, hours, "btc"))
+                    # 2026-09-16 依使用者要求：移除 /scan [小時]，一律出市場選單
+                    await send_scan_menu(client, chat_id)
                     continue
                 reply = await handle_command(text)
                 await tg_send(client, chat_id, reply)
