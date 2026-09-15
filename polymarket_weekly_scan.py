@@ -126,9 +126,12 @@ def fetch_windows(hours: float, client: httpx.Client, market: str = "btc") -> li
             except Exception as exc:
                 log.warning(f"data-api {slug} offset={offset}: {exc}")
                 break
-            if not batch:
+            if not batch or not isinstance(batch, list):
+                # data-api 被限流或出錯時會回 dict（{"error": ...}），不能當成交清單併進去
+                if batch:
+                    log.warning(f"data-api {slug} offset={offset}: unexpected payload {str(batch)[:120]}")
                 break
-            trades += batch
+            trades += [t for t in batch if isinstance(t, dict)]
             if len(batch) < 1000 or offset >= 4000:
                 break
             offset += 1000
