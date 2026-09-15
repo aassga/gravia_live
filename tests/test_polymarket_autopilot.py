@@ -30,6 +30,8 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual((top["favoriteMinRemaining"], top["favoriteWindowSeconds"]), (30.0, 45.0))
         self.assertEqual(top["asset"]["slugPrefix"], "eth-updown-5m-")
         self.assertEqual(top["id"], "eth-alt-auto-30-45s-092-095")
+        self.assertAlmostEqual(top["stats"]["totalPnl"], 120 * 10 * 0.07, places=4)   # 主要看總收益
+        self.assertEqual(top["stats"]["score"], top["stats"]["totalPnl"])
 
     def test_pick_new_and_disable(self):
         cands = [

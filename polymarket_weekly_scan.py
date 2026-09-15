@@ -317,8 +317,9 @@ CANDIDATE_PRICE_EDGES = [0.88, 0.92, 0.95, 0.98, 1.0]
 
 
 def late_favorite_candidates(windows: list[dict], market: str) -> list[dict]:
-    """2026-09-15：買價區間 × 進場秒數 的二維格，每格 = 各錢包窗口等權；只留 平均>0、中位>0、非負期望、
-    n >= CANDIDATE_MIN_SAMPLES 的格子，依「每股平均 × 樣本數」排序。回傳可直接變成模擬變體的規格。"""
+    """2026-09-15：買價區間 × 進場秒數 的二維格。依使用者要求「主要看總收益」：每格算該格所有錢包窗口的
+    粗估總損益（totalPnl），只留 totalPnl > 0 且 n >= CANDIDATE_MIN_SAMPLES 的格子，依 totalPnl 排序；
+    每股平均／中位、打平勝率只當附註。回傳可直接變成模擬變體的規格。"""
     spec = MARKETS.get(market, MARKETS["btc"])
     aid = MARKET_TO_SIM_ASSET.get(market, market)
     k = LATE_SECONDS / 60.0
@@ -341,7 +342,8 @@ def late_favorite_candidates(windows: list[dict], market: str) -> list[dict]:
             per = [i["pnl"] / i["shares"] for i in g if i["shares"] > 0]
             mean, med = statistics.mean(per), statistics.median(per)
             risk = _risk_fields(g)
-            if mean <= 0 or med <= 0 or risk["negativeEV"]:
+            total_pnl = sum(i["pnl"] for i in g)
+            if total_pnl <= 0:
                 continue
             win_rate = sum(1 for i in g if i["won"]) / len(g)
             vid = f"{aid}-auto-{tlo}-{thi}s-{int(round(plo * 100)):03d}-{int(round(min(phi, 0.99) * 100)):03d}"
@@ -350,9 +352,9 @@ def late_favorite_candidates(windows: list[dict], market: str) -> list[dict]:
                 "label": f"⚙ 自動 {spec['label']} 最後 {tlo}～{thi} 秒買領先方（{plo:.2f}～{min(phi, 0.99):.2f}、不停損）",
                 "favoriteWindowSeconds": float(thi), "favoriteMinRemaining": float(tlo),
                 "favoriteMinPrice": plo, "favoriteMaxPrice": min(phi, 0.99),
-                "stats": {"n": len(g), "winRate": win_rate, "pnlPerShare": mean, "pnlPerShareMedian": med,
+                "stats": {"n": len(g), "winRate": win_rate, "totalPnl": total_pnl, "pnlPerShare": mean, "pnlPerShareMedian": med,
                           "breakEvenWinRate": risk["breakEvenWinRate"], "lossesPerWin": risk["lossesPerWin"],
-                          "score": mean * len(g)},
+                          "negativeEV": risk["negativeEV"], "score": total_pnl},
             })
     out.sort(key=lambda c: c["stats"]["score"], reverse=True)
     return out

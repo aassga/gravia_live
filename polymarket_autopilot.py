@@ -4,8 +4,8 @@
 
 每輪：
   1. 探測 Polymarket 上所有 <幣>-updown-<週期> 系列，各掃最近 24 小時的公開成交。
-  2. 在「最後 N 秒買領先方」家族內找每股淨利為正、樣本夠、非負期望的規則（買價 × 進場秒數），
-     依「每股平均 × 樣本數」排序，每輪最多新增 MAX_ADD_PER_RUN 個、每市場最多 1 個到模擬盤
+  2. 在「最後 N 秒買領先方」家族內找粗估總收益為正、樣本夠的規則（買價 × 進場秒數），
+     依總收益排序（使用者要求：主要看總收益），每輪最多新增 MAX_ADD_PER_RUN 個、每市場最多 1 個到模擬盤
      （寫 sim_auto_variants.json，polymarket_server.py 啟動時讀入）。
   3. 模擬盤累計虧損 <= -DISABLE_LOSS_USD 的變體寫進 sim_disabled_variants.json（只停用，歷史保留）。
   4. 有任何變更且實盤無持倉 → 重啟 gravia.service 讓變更生效；有持倉就留到下一輪。
@@ -146,16 +146,17 @@ def render_telegram(result: dict) -> list[str]:
     head = [f"🤖 自動駕駛 {now}（掃 {len(result['markets'])} 個 Up/Down 系列、最近 {result['hours']:.0f}h）"]
     pos = [(k, s) for k, s in result["markets"].items() if s.get("best")]
     if pos:
-        head.append("各市場最佳規則（每股平均／中位、n）：")
+        head.append("各市場最佳規則（總收益；每股平均／中位、n）：")
         for k, s in sorted(pos, key=lambda kv: kv[1]["best"]["stats"]["score"], reverse=True)[:8]:
             b = s["best"]["stats"]
-            head.append(f"• {s['best']['label'].replace('⚙ 自動 ', '')}：{b['pnlPerShare']:+.3f}／{b['pnlPerShareMedian']:+.3f}、n={b['n']}")
+            head.append(f"• {s['best']['label'].replace('⚙ 自動 ', '')}：總收益 {b['totalPnl']:+,.0f}；{b['pnlPerShare']:+.3f}／{b['pnlPerShareMedian']:+.3f}、n={b['n']}"
+                        f"{'（⚠ 勝率不夠補虧損）' if b.get('negativeEV') else ''}")
     else:
-        head.append("這輪沒有任何市場出現每股淨利為正、樣本夠的規則。")
+        head.append("這輪沒有任何市場出現總收益為正、樣本夠的規則。")
     msgs = ["\n".join(head)]
     body = []
     if result["added"]:
-        body.append("➕ 新增到模擬盤：\n" + "\n".join(f"• {c['label']}（每股 {c['stats']['pnlPerShare']:+.3f}、n={c['stats']['n']}）" for c in result["added"]))
+        body.append("➕ 新增到模擬盤：\n" + "\n".join(f"• {c['label']}（總收益 {c['stats']['totalPnl']:+,.0f}、每股 {c['stats']['pnlPerShare']:+.3f}、n={c['stats']['n']}）" for c in result["added"]))
     else:
         body.append("➕ 這輪沒有新增（候選已存在、已停用或不夠格）。")
     if result["disabled"]:
