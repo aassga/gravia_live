@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Gravia sim autopilot every 6 hours (00/06/12/18 Asia/Taipei)
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00 Asia/Taipei
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

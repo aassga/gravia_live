@@ -11,6 +11,11 @@ polymarket_live_baseline.json
 polymarket_live_strategy_state.json
 polymarket_live_strategy_state.json.tmp
 
+# 自動駕駛產生的模擬變體／停用清單與報告（執行期資料）
+sim_auto_variants.json
+sim_disabled_variants.json
+reports/autopilot/
+
 # 紙上模擬的本機狀態、成交與報價歷史
 polymarket_sim.sqlite3
 polymarket_sim.sqlite3-wal

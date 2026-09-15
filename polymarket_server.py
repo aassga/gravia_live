@@ -318,6 +318,36 @@ _default_asset_ids = "btc,btc-15m" if WITH_LIVE else "btc,btc-15m,eth"
 _enabled_asset_ids = {
     value.strip() for value in os.environ.get("POLY_SIM_ASSETS", _default_asset_ids).split(",") if value.strip()
 }
+# 2026-09-15 自動駕駛：sim_auto_variants.json 裡的變體若掛在目錄沒有的資產（例如 doge-15m），
+# 依變體附帶的 asset 規格自動加進目錄並啟用（見下方 _append_auto_variants）。
+SIM_AUTO_VARIANTS_FILE = os.environ.get(
+    "POLY_SIM_AUTO_VARIANTS_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_auto_variants.json"))
+SIM_DISABLED_VARIANTS_FILE = os.environ.get(
+    "POLY_SIM_DISABLED_VARIANTS_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_disabled_variants.json"))
+
+
+def _load_json_file(path: str, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except Exception as exc:
+        log.warning(f"[SIM] 無法讀取 {path}：{exc}")
+        return default
+
+
+_AUTO_VARIANT_SPECS = [s for s in (_load_json_file(SIM_AUTO_VARIANTS_FILE, []) or []) if isinstance(s, dict)]
+_AUTO_DISABLED_IDS = {str(x) for x in (_load_json_file(SIM_DISABLED_VARIANTS_FILE, []) or []) if x}
+for _spec in _AUTO_VARIANT_SPECS:
+    _a = _spec.get("asset") or {}
+    if _spec.get("id") in _AUTO_DISABLED_IDS or not _a.get("id") or not _a.get("slugPrefix"):
+        continue
+    if not any(c["id"] == _a["id"] for c in ASSET_CATALOG):
+        ASSET_CATALOG.append({"id": _a["id"], "label": _a.get("label") or _a["id"].upper(), "slugPrefix": _a["slugPrefix"],
+                              "binanceSymbol": _a.get("binanceSymbol") or f"{_a['id'].split('-')[0].upper()}USDT",
+                              "windowSeconds": int(_a.get("windowSeconds", 300))})
+    _enabled_asset_ids.add(_a["id"])
 ASSETS = [asset for asset in ASSET_CATALOG if asset["id"] in _enabled_asset_ids]
 if not ASSETS:
     raise RuntimeError("POLY_SIM_ASSETS 沒有選到任何已知資產")
@@ -670,6 +700,38 @@ for _asset in ASSETS:
     if _asset["id"] != "btc" and not _asset.get("marketMakerOnly"):
         AB_VARIANTS.extend(_favorite_family_for_asset(_asset))
 del _asset
+
+# 2026-09-15 自動駕駛（polymarket_autopilot.py）：每 6 小時掃描後把收益最高的規則寫進 sim_auto_variants.json，
+# 這裡啟動時讀入成模擬變體（只收「最後 N 秒買領先方」家族的參數，其餘鍵忽略）；sim_disabled_variants.json
+# 是自動停用清單（累計虧損 >= 350），與 POLY_SIM_DISABLED_VARIANTS 合併。兩個檔都不進版控。
+def _auto_variant_from_spec(spec: dict) -> dict | None:
+    aid = spec.get("assetId")
+    asset = next((a for a in ASSETS if a["id"] == aid), None)
+    if not asset or not spec.get("id"):
+        return None
+    return {
+        "id": str(spec["id"]), "assetId": aid,
+        "label": str(spec.get("label") or f"⚙ 自動 {asset['label']} {spec['id']}"),
+        "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "lateFavorite": True, "simOnly": True, "auto": True,
+        "favoriteWindowSeconds": float(spec.get("favoriteWindowSeconds", 60.0)),
+        "favoriteMinRemaining": float(spec.get("favoriteMinRemaining", LATE_FAVORITE_MIN_REMAINING)),
+        "favoriteMinPrice": float(spec.get("favoriteMinPrice", 0.92)),
+        "favoriteMaxPrice": float(spec.get("favoriteMaxPrice", 0.99)),
+        "favoriteStopLossPrice": spec.get("favoriteStopLossPrice"),
+        "favoriteTakeProfitPrice": None, "favoriteStableSeconds": 0.0,
+        "addedAt": spec.get("addedAt"), "stats": spec.get("stats"),
+    }
+
+
+def _append_auto_variants() -> None:
+    existing = {v["id"] for v in AB_VARIANTS}
+    for spec in _AUTO_VARIANT_SPECS:
+        v = _auto_variant_from_spec(spec)
+        if v and v["id"] not in existing:
+            AB_VARIANTS.append(v); existing.add(v["id"])
+
+
+_append_auto_variants()
 # 2026-09-14 依使用者要求從模擬盤移除 btc-main（0.40/0.95）、btc-loose（0.45/0.98）、
 # btc-binance-late-direction（Binance T-10s）、btc-two-sided-maker（被動雙邊掛單，212 筆 -$62）、
 # btc-open-momentum（開盤動能方向性）、btc-late-favorite（最後 60 秒 0.95～0.97 原版，24h -$2,022），2026-09-14 依使用者要求移除。用環境變數過濾而不是刪定義：測試仍能用這些變體
@@ -691,7 +753,7 @@ _SIM_DISABLED_VARIANT_IDS = {
     value.strip()
     for value in os.environ.get("POLY_SIM_DISABLED_VARIANTS", _SIM_DEFAULT_DISABLED).split(",")
     if value.strip()
-}
+} | _AUTO_DISABLED_IDS
 AB_VARIANTS = [v for v in AB_VARIANTS if v["id"] not in _SIM_DISABLED_VARIANT_IDS]
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
 MARKET_MAKER_VARIANTS = [v for v in AB_VARIANTS if v.get("marketMakerOnly")]
@@ -4804,6 +4866,7 @@ def build_ab_leaderboard() -> list:
             "lateFavorite":  bool(v.get("lateFavorite")),
             "openMomentum":  bool(v.get("openMomentum")),
             "openReversal":  bool(v.get("openReversal")),
+            "auto":          bool(v.get("auto")),
             "openMinElapsedSeconds": v.get("openMinElapsedSeconds"),
             "openMinPrice":  v.get("openMinPrice"),
             "openMaxElapsedSeconds": v.get("openMaxElapsedSeconds"),

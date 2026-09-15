@@ -45,6 +45,48 @@ MARKETS = {
     "xrp":     {"prefix": "xrp-updown-5m-",  "window": 300, "label": "XRP 5 分鐘"},
 }
 FAVORITE_MIN_ASK = 0.88    # 買領先方型態的最低買價（比我們的 0.95 寬，才看得到整條曲線）
+# 2026-09-15 自動駕駛：不只 5 個市場，探測 Polymarket 上所有「<幣>-updown-<週期>-<ts>」系列。
+SERIES_SYMBOLS = ["btc", "eth", "sol", "xrp", "bnb", "doge", "hype", "zec", "ada", "avax", "link", "ltc", "sui", "ton",
+                  "trx", "dot", "shib", "pepe", "bch", "near", "apt", "arb", "op", "pol", "uni", "aave", "fil", "atom",
+                  "ena", "wld", "tao", "sei", "tia", "inj", "kas", "xlm", "hbar", "etc", "algo", "render", "ondo"]
+SERIES_TIMEFRAMES = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
+
+
+def discover_updown_series(client: httpx.Client) -> dict:
+    """探測目前有開盤的 Up/Down 系列（用「上一個已結束窗口」的 slug 問 Gamma），回傳 {market_key: spec}。
+    已知的 5 個沿用原 key（btc / btc-15m / eth / sol / xrp），其餘用 <幣>-<週期>。"""
+    found = {}
+    now = int(time.time())
+    known = {(v["prefix"]): k for k, v in MARKETS.items()}
+    for sym in SERIES_SYMBOLS:
+        for tf, wsec in SERIES_TIMEFRAMES.items():
+            prefix = f"{sym}-updown-{tf}-"
+            ws = now // wsec * wsec - 2 * wsec
+            try:
+                m = client.get(GAMMA, params={"slug": f"{prefix}{ws}"}).json() or \
+                    client.get(GAMMA, params={"slug": f"{prefix}{ws}", "closed": "true"}).json()
+            except Exception as exc:
+                log.warning(f"discover {prefix}: {exc}")
+                continue
+            if not m:
+                continue
+            key = known.get(prefix) or (sym if tf == "5m" else f"{sym}-{tf}")
+            found[key] = {"prefix": prefix, "window": wsec, "label": f"{sym.upper()} {tf if tf != '5m' else '5 分鐘'}" if tf != "5m" else f"{sym.upper()} 5 分鐘",
+                          "symbol": sym, "timeframe": tf}
+            time.sleep(0.03)
+    for k, v in found.items():
+        MARKETS.setdefault(k, v)
+    log.info(f"discovered {len(found)} up/down series: {', '.join(sorted(found))}")
+    return found
+
+
+def sim_asset_for_market(market: str) -> dict:
+    """自動變體要掛在哪個模擬資產上：已知的對應現有 id，其餘用 market key 當 id（模擬盤會自動建資產）。"""
+    spec = MARKETS.get(market) or {}
+    aid = MARKET_TO_SIM_ASSET.get(market, market)
+    sym = spec.get("symbol") or market.split("-")[0]
+    return {"id": aid, "label": spec.get("label", market), "slugPrefix": spec.get("prefix"),
+            "windowSeconds": int(spec.get("window", 300)), "binanceSymbol": f"{sym.upper()}USDT"}
 MIN_WALLET_WINDOWS = 10    # 至少做過這麼多窗口才算「機器人／常用者」
 
 
@@ -52,7 +94,7 @@ MIN_WALLET_WINDOWS = 10    # 至少做過這麼多窗口才算「機器人／常
 
 def fetch_windows(hours: float, client: httpx.Client, market: str = "btc") -> list[dict]:
     global WINDOW_SECONDS, LATE_SECONDS
-    spec = MARKETS.get(market, MARKETS["btc"])
+    spec = MARKETS.get(market) or (market if isinstance(market, dict) else MARKETS["btc"])
     WINDOW_SECONDS = int(spec["window"])
     LATE_SECONDS = 60 if WINDOW_SECONDS <= 300 else 120
     now = int(time.time())
@@ -266,6 +308,54 @@ def analyze(windows: list[dict]) -> dict:
         "kinds": kinds, "lateFavorite": {"priceBuckets": fav_price, "timeBuckets": fav_time, "stop": fav_stop, "n": len(fav)},
         "topBots": bots[:15], "botCount": len(bots),
     }
+
+
+# ── 自動駕駛用：從原始窗口找「最後 N 秒買領先方」家族裡收益最高的規則 ───────
+MARKET_TO_SIM_ASSET = {"btc": "btc", "btc-15m": "btc-15m", "eth": "eth-alt", "sol": "sol", "xrp": "xrp"}
+CANDIDATE_MIN_SAMPLES = 100
+CANDIDATE_PRICE_EDGES = [0.88, 0.92, 0.95, 0.98, 1.0]
+
+
+def late_favorite_candidates(windows: list[dict], market: str) -> list[dict]:
+    """2026-09-15：買價區間 × 進場秒數 的二維格，每格 = 各錢包窗口等權；只留 平均>0、中位>0、非負期望、
+    n >= CANDIDATE_MIN_SAMPLES 的格子，依「每股平均 × 樣本數」排序。回傳可直接變成模擬變體的規格。"""
+    spec = MARKETS.get(market, MARKETS["btc"])
+    aid = MARKET_TO_SIM_ASSET.get(market, market)
+    k = LATE_SECONDS / 60.0
+    time_edges = [int(round(e)) for e in (5 * k, 15 * k, 30 * k, 45 * k, 60 * k)]
+    fav = []
+    for w in windows:
+        by = collections.defaultdict(list)
+        for t in w["trades"]:
+            by[t["proxyWallet"]].append(t)
+        for ts in by.values():
+            info = classify_wallet_window(w["start"], w["outcome"], ts)
+            if info["kind"] == "late_favorite" and not info.get("sold"):
+                fav.append(info)
+    out = []
+    for plo, phi in zip(CANDIDATE_PRICE_EDGES, CANDIDATE_PRICE_EDGES[1:]):
+        for tlo, thi in zip(time_edges, time_edges[1:]):
+            g = [i for i in fav if plo <= i["vwap"] < phi and tlo <= i["tBeforeClose"] < thi]
+            if len(g) < CANDIDATE_MIN_SAMPLES:
+                continue
+            per = [i["pnl"] / i["shares"] for i in g if i["shares"] > 0]
+            mean, med = statistics.mean(per), statistics.median(per)
+            risk = _risk_fields(g)
+            if mean <= 0 or med <= 0 or risk["negativeEV"]:
+                continue
+            win_rate = sum(1 for i in g if i["won"]) / len(g)
+            vid = f"{aid}-auto-{tlo}-{thi}s-{int(round(plo * 100)):03d}-{int(round(min(phi, 0.99) * 100)):03d}"
+            out.append({
+                "id": vid, "assetId": aid, "market": market, "asset": sim_asset_for_market(market),
+                "label": f"⚙ 自動 {spec['label']} 最後 {tlo}～{thi} 秒買領先方（{plo:.2f}～{min(phi, 0.99):.2f}、不停損）",
+                "favoriteWindowSeconds": float(thi), "favoriteMinRemaining": float(tlo),
+                "favoriteMinPrice": plo, "favoriteMaxPrice": min(phi, 0.99),
+                "stats": {"n": len(g), "winRate": win_rate, "pnlPerShare": mean, "pnlPerShareMedian": med,
+                          "breakEvenWinRate": risk["breakEvenWinRate"], "lossesPerWin": risk["lossesPerWin"],
+                          "score": mean * len(g)},
+            })
+    out.sort(key=lambda c: c["stats"]["score"], reverse=True)
+    return out
 
 
 # ── 全站探索：目前最多人玩的盤 ────────────────────────────────────────────

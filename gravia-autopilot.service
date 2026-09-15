@@ -1,0 +1,14 @@
+[Unit]
+Description=Gravia sim autopilot: scan all Polymarket up/down series, add best rules to the paper sim, disable big losers
+Wants=network-online.target
+After=network-online.target gravia.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_autopilot.py --hours 24
+TimeoutStartSec=3600
