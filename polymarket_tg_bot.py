@@ -156,11 +156,8 @@ def format_sim(sim: dict, asset_id: str | None = None) -> str:
                 f" · {n} 筆 · 平均 {_money(avg)}/筆 · 回撤 ${float(v.get('maxDrawdown') or 0):.2f}"
                 f"{' · 持倉中' if v.get('hasPosition') else ''}"
             )
-        out.append("
-".join(lines))
-    return "
-
-".join(out) if out else "📊 模擬盤沒有資料"
+        out.append("\n".join(lines))
+    return "\n\n".join(out) if out else "📊 模擬盤沒有資料"
 
 
 HELP_TEXT = (

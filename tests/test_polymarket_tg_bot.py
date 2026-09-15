@@ -86,17 +86,19 @@ class TelegramBotTests(unittest.TestCase):
         self.assertTrue(any("DRY-RUN" in a for a in bot.diff_alerts(cur, cur2)))
 
     def test_sim_formatting_sorts_by_pnl(self):
-        sim = {"abVariants": [
+        sim = {"assetList": [{"id": "btc", "label": "BTC"}, {"id": "btc-15m", "label": "BTC 15m"}], "abVariants": [
             {"assetId": "btc", "label": "A", "totalPnl": 1.0, "totalTrades": 3, "winRate": 66.6, "hasPosition": False},
             {"assetId": "btc", "label": "B", "totalPnl": 9.0, "totalTrades": 5, "winRate": 80.0, "hasPosition": True},
             {"assetId": "btc-15m", "label": "C", "totalPnl": 99.0, "totalTrades": 1, "winRate": None, "hasPosition": False},
         ]}
-        text = bot.format_sim(sim)
+        text = bot.format_sim(sim)                       # 預設：所有資產
         self.assertNotIn("勝率", text)
         self.assertIn("平均", text)
         self.assertLess(text.index("B"), text.index("A"))
-        self.assertNotIn("C", text.split("\n", 1)[1])
+        self.assertIn("BTC 15m", text); self.assertIn("C", text)
         self.assertIn("持倉中", text)
+        only = bot.format_sim(sim, "btc")                # 指定資產
+        self.assertNotIn("BTC 15m", only)
 
 
 if __name__ == "__main__":
