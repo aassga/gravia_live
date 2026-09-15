@@ -2689,7 +2689,31 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
 
     if pos is None:
         if LATE_FAVORITE_ENABLED:
-            # 買領先方只走 3 秒輪詢路徑；最後一分鐘不需要 tick 級反應，也避免兩條路搶同一個部位。
+            # 2026-09-15 依使用者要求：買領先方也走 WS 快速路徑，對齊模擬盤「每個 tick 都評估」。
+            # 原本只走 3 秒輪詢，0.92～0.95 這種只有 3 tick 寬的區間常在兩次輪詢之間掃過
+            # （12:45 窗口：輪詢看到 0.89 → 模擬盤 0.3 秒後的 tick 以 0.92 進場 → 下次輪詢已 0.97）。
+            # preflight／預熱這種要等網路 I/O 的事仍留給輪詢路徑；decision_lock 與
+            # lateFavoriteWindowSlug 保證每窗口只進一次，兩條路不會搶同一個部位。
+            if live_state.get("lateFavoriteWindowSlug") == slug or remaining <= 0:
+                return
+            if _first_trade_guard_blocks_new_entry():
+                return
+            dry_run = not _real_execution_enabled()
+            if not dry_run and live_state.get("preflightSlug") != slug:
+                return
+            if not dry_run and not live.order_tokens_and_fees_are_warm([up_id, down_id]):
+                return
+            cash = _strategy_cash_sync(dry_run)
+            if cash is None:
+                return
+            if LATE_FAVORITE_FLIP_LOOKBACK_SECONDS > 0:
+                _track_live_favorite_leaders(slug, up_book, down_book)
+            plan = _late_favorite_plan(up_book, down_book, remaining, cash, diagnostic_slug=slug)
+            if plan:
+                _ws_action_in_flight["v"] = True
+                asyncio.get_running_loop().create_task(
+                    _run_ws_late_favorite_entry(slug, plan, remaining, dry_run, decision_lock)
+                )
             return
         if time.time() - float(live_state.get("lastActionAt", 0)) < ACTION_COOLDOWN_SECONDS:
             record_live_window_diagnostic(slug, "action_cooldown")
@@ -2900,6 +2924,27 @@ async def _run_ws_late_direction_entry(
         result = await _enter_position(slug, plan, dry_run)
         if result == "filled":
             live_state["position"]["strategy"] = "late_direction"
+            save_live_state()
+
+
+async def _run_ws_late_favorite_entry(
+    slug: str, plan: dict, remaining_seconds: float, dry_run: bool, decision_lock: asyncio.Lock
+) -> None:
+    """WS 即時觸發的買領先方送單；判斷已在同步路徑完成，這裡只在鎖內再確認沒有部位就送單。"""
+    _ws_action_in_flight["v"] = False
+    async with decision_lock:
+        if live_state.get("position") is not None or live_state.get("lateFavoriteWindowSlug") == slug:
+            return
+        if not LATE_FAVORITE_ENABLED:
+            return
+        log.info(
+            f"[LIVE] 最後 {remaining_seconds:.0f}s 買領先方 {plan['side']} limit=${plan['limitPrice']:.3f} "
+            f"shares={plan['shares']:.0f}（WS 即時觸發）"
+        )
+        result = await _enter_position(slug, plan, dry_run)
+        if result == "filled":
+            live_state["position"]["strategy"] = "late_favorite"
+            live_state["lateFavoriteWindowSlug"] = slug
             save_live_state()
 
 

@@ -1701,6 +1701,53 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.sim.state["upBook"]["quoteSource"], "websocket")
         self.assertEqual(strategy.sim.state["downBook"]["quoteSource"], "websocket")
 
+    async def test_ws_tick_sync_enters_late_favorite_on_the_tick(self):
+        # 2026-09-15：買領先方也要在 WS tick 上即時判斷＋送單（對齊模擬盤），不能只等 3 秒輪詢。
+        strategy.live_state["lastActionAt"] = 0
+        strategy.live_state["lateFavoriteWindowSlug"] = None
+        market = {
+            "slug": "btc-window",
+            "outcomes": json.dumps(["Up", "Down"]),
+            "clobTokenIds": json.dumps(["up-token", "down-token"]),
+        }
+        strategy.sim.state["market"] = market
+        strategy.sim.state["windowEndsAt"] = (strategy.sim.real_now() + 45) * 1000
+        books = {
+            "up-token": {"bids": {"0.92": 500.0}, "asks": {"0.93": 500.0}},
+            "down-token": {"bids": {"0.06": 500.0}, "asks": {"0.07": 500.0}},
+        }
+        decision_lock = asyncio.Lock()
+        with (
+            patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
+            patch.object(strategy, "LATE_FAVORITE_WINDOW_SECONDS", 90.0),
+            patch.object(strategy, "LATE_FAVORITE_MIN_REMAINING", 30.0),
+            patch.object(strategy, "LATE_FAVORITE_MIN_PRICE", 0.92),
+            patch.object(strategy, "LATE_FAVORITE_MAX_PRICE", 0.95),
+            patch.object(strategy, "DIRECT_PAIR_ENABLED", False),
+            patch.object(strategy, "ENABLE_LATE_DIRECTION", False),
+            patch.object(strategy.sim, "_ws_connected", True),
+            patch.object(strategy.sim, "_ws_last_message_at", time.monotonic()),
+            patch.object(strategy.sim, "_ws_snapshot_tokens", {"up-token", "down-token"}),
+            patch.object(strategy.sim, "_ws_books", books),
+            patch.object(strategy.sim, "_ws_book_updated_at", {"up-token": time.monotonic(), "down-token": time.monotonic()}),
+            patch.object(trader, "build_order", side_effect=AssertionError("dry-run must not sign")),
+        ):
+            strategy._on_ws_tick_sync("up-token", None, decision_lock)
+            self.assertTrue(strategy._ws_action_in_flight["v"], "late-favorite opportunity was not detected on the tick")
+
+            async def wait_for_entry():
+                while strategy._ws_action_in_flight["v"] or strategy.live_state["position"] is None:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_entry(), timeout=2.0)
+            pos = strategy.live_state["position"]
+            self.assertEqual(pos["side"], "Up")
+            self.assertEqual(pos["strategy"], "late_favorite")
+            self.assertEqual(strategy.live_state["lateFavoriteWindowSlug"], "btc-window")
+            # 同一窗口再來一個 tick 不會再進第二次
+            strategy._on_ws_tick_sync("up-token", None, decision_lock)
+            self.assertFalse(strategy._ws_action_in_flight["v"])
+
     async def test_ws_tick_sync_enters_lock_pair_without_waiting_for_a_scheduled_pass(self):
         # 這個測試驗證這次修的問題本身：一個真的可以鎖利的 WS book pair，_on_ws_tick_sync
         # 必須「當下同步判斷出機會」（不必等 asyncio.create_task 排程），只有真的送單那步
