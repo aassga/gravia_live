@@ -151,8 +151,8 @@ def classify_wallet_window(ws: int, outcome: str, ts: list[dict]) -> dict:
 
 
 KIND_LABELS = {
-    "late_favorite": "最後 60 秒買領先方（>=0.88）",
-    "last_60s_directional": "最後 60 秒單邊方向性（<0.88）",
+    "late_favorite": "最後 {late} 秒買領先方（>=0.88）",
+    "last_60s_directional": "最後 {late} 秒單邊方向性（<0.88）",
     "last_10s_directional": "最後 10 秒單邊方向性",
     "mid_directional": "窗口中段單邊方向性",
     "early_directional": "開盤 60 秒內單邊方向性",
@@ -163,6 +163,37 @@ KIND_LABELS = {
     "both_sides_over1": "兩邊都買、加總 >= $1",
     "sell_only": "只賣（出庫存）",
 }
+
+
+def kind_label(kind: str) -> str:
+    # 2026-09-15：15 分鐘市場的「最後 N 秒」要跟 LATE_SECONDS 一致，不能寫死 60。
+    return KIND_LABELS.get(kind, kind).format(late=LATE_SECONDS)
+
+
+def _risk_fields(items: list[dict]) -> dict:
+    """一次虧損要幾次獲利才補回（賠率）、打平所需勝率、實際勝率是否夠。
+    2026-09-15 依使用者要求：勝率高但一次虧損就歸零的區間要標出來。"""
+    per = [i["pnl"] / i["shares"] for i in items if i["shares"] > 0]
+    wins = [p for p in per if p > 0]; losses = [-p for p in per if p < 0]
+    avg_win = statistics.mean(wins) if wins else 0.0
+    avg_loss = statistics.mean(losses) if losses else 0.0
+    win_rate = sum(1 for i in items if i["won"]) / len(items) if items else 0.0
+    losses_per_win = (avg_loss / avg_win) if avg_win > 0 and avg_loss > 0 else None   # 1 次輸要幾次贏
+    # 沒有虧損樣本就不算打平勝率（否則會顯示 0%），留 None 表示本期看不出賠率。
+    break_even = (avg_loss / (avg_win + avg_loss)) if (avg_win > 0 and avg_loss > 0) else None
+    return {
+        "avgWinPerShare": avg_win, "avgLossPerShare": avg_loss, "worstPerShare": min(per) if per else 0.0,
+        "lossesPerWin": losses_per_win, "breakEvenWinRate": break_even,
+        "negativeEV": bool(break_even is not None and win_rate < break_even),
+    }
+
+
+def risk_text(b: dict) -> str:
+    """TG 用的一句話：1 輸＝N 贏，勝率不夠補虧損就標 ❌。"""
+    lpw = b.get("lossesPerWin")
+    if lpw is None:
+        return "本期零虧損" if b.get("avgLossPerShare", 0) == 0 else "無獲利樣本"
+    return f"1 輸＝{lpw:.0f} 贏{'，❌ 勝率不夠補虧損' if b.get('negativeEV') else ''}"
 
 
 def analyze(windows: list[dict]) -> dict:
@@ -183,9 +214,10 @@ def analyze(windows: list[dict]) -> dict:
             per_wallet[wallet].append(info)
     total = sum(kind_count.values()) or 1
     kinds = []
-    for k, n in kind_count.most_common():
+    # 2026-09-15 依使用者要求：型態改依粗估總損益排序（原本依使用人數）。
+    for k, n in sorted(kind_count.items(), key=lambda kv: kind_pnl[kv[0]], reverse=True):
         kinds.append({
-            "kind": k, "label": KIND_LABELS.get(k, k), "count": n, "share": n / total,
+            "kind": k, "label": kind_label(k), "count": n, "share": n / total,
             "notional": kind_notional[k], "wallets": len(kind_wallets[k]),
             "winRate": (kind_won[k] / kind_decided[k]) if kind_decided[k] else None,
             "pnl": kind_pnl[k],
@@ -203,7 +235,8 @@ def analyze(windows: list[dict]) -> dict:
                 out.append({"lo": lo, "hi": hi, "n": len(g), "winRate": sum(i["won"] for i in g) / len(g),
                             "pnlPerShare": statistics.mean(per) if per else 0.0,
                             "pnlPerShareMedian": statistics.median(per) if per else 0.0,
-                            "pnlPerShareSizeWeighted": sum(i["pnl"] for i in g) / sum(i["shares"] for i in g)})
+                            "pnlPerShareSizeWeighted": sum(i["pnl"] for i in g) / sum(i["shares"] for i in g),
+                            **_risk_fields(g)})
         return out
     fav_price = bucket(fav, "vwap", [0.88, 0.92, 0.95, 0.98, 1.01])
     fav_time = bucket(fav, "tBeforeClose", [0, 10, 20, 30, 45, 61])
@@ -270,6 +303,17 @@ MARKET_KIND_NOTES = {
 }
 
 
+def _current_prices(mk: dict) -> dict:
+    """Gamma 的 outcomes / outcomePrices（JSON 字串）→ {結果名: 現價}。"""
+    try:
+        names = mk.get("outcomes"); prices = mk.get("outcomePrices")
+        names = json.loads(names) if isinstance(names, str) else (names or [])
+        prices = json.loads(prices) if isinstance(prices, str) else (prices or [])
+        return {str(n): float(p) for n, p in zip(names, prices)}
+    except Exception:
+        return {}
+
+
 def discover_top_markets(client: httpx.Client, limit: int = 12) -> dict:
     """撈全站 24h 成交額最高的市場，看每個市場最近成交的玩法（買賣比、單量、價位、獨立錢包數）。"""
     try:
@@ -287,6 +331,11 @@ def discover_top_markets(client: httpx.Client, limit: int = 12) -> dict:
             trades = []
         wallets = {t.get("proxyWallet") for t in trades}
         buys = [t for t in trades if t.get("side") == "BUY"]
+        # 2026-09-15：跟領先方（買 >= 0.85）按市場現價估算每股淨利與最大單筆虧損，用來判斷該市場值不值得跟。
+        cur = _current_prices(mk)
+        fav_buys = [t for t in buys if float(t.get("price") or 0) >= 0.85 and t.get("outcome") in cur]
+        fav_per = [cur[t["outcome"]] - float(t["price"]) for t in fav_buys]
+        fav_usd = [(cur[t["outcome"]] - float(t["price"])) * float(t.get("size") or 0) for t in fav_buys]
         sizes = [float(t.get("size") or 0) * float(t.get("price") or 0) for t in trades]
         prices = [float(t.get("price") or 0) for t in buys]
         # 玩法推估：買在 >= 0.85 的比例（跟領先方）、兩邊都買的錢包比例（做市／鎖利）、賣單比例（短線）
@@ -303,6 +352,10 @@ def discover_top_markets(client: httpx.Client, limit: int = 12) -> dict:
             "favoriteShare": (sum(1 for p in prices if p >= 0.85) / len(prices)) if prices else 0.0,
             "bothSidesShare": (both / len(per_wallet)) if per_wallet else 0.0,
             "priceMedian": statistics.median(prices) if prices else 0.0,
+            "favN": len(fav_buys),
+            "favMtmPerShare": statistics.mean(fav_per) if fav_per else None,
+            "favWorstUsd": min(fav_usd) if fav_usd else 0.0,
+            "favTotalUsd": sum(fav_usd),
         })
         time.sleep(0.05)
     kinds = collections.Counter(m["kind"] for m in out)
@@ -313,21 +366,30 @@ def render_discovery_telegram(disc: dict) -> list[str]:
     ms = disc["markets"]
     if not ms:
         return ["🌐 全站探索：Gamma API 沒有回資料。"]
-    head = ["🌐 全站探索：目前 24h 成交額最高的市場", "分類：" + "；".join(f"{MARKET_KIND_LABELS.get(k, k)} {v} 個" for k, v in disc["kinds"].items())]
+    head = ["🌐 全站探索：目前 24h 成交額最高的市場（依「跟領先方按現價估的總損益」排序）", "分類：" + "；".join(f"{MARKET_KIND_LABELS.get(k, k)} {v} 個" for k, v in disc["kinds"].items())]
     msgs = ["\n".join(head)]
     body = []
+    # 2026-09-15 依使用者要求：以收益為主——跟領先方的人在這個市場到底有沒有賺，而不是有多少人在跟。
+    ms = sorted(ms, key=lambda m: m.get("favTotalUsd") or 0.0, reverse=True)
     for i, m in enumerate(ms[:10], 1):
         play = []
         if m["favoriteShare"] >= 0.5: play.append(f"跟領先方（{m['favoriteShare']*100:.0f}% 買在 ≥0.85）")
         if m["bothSidesShare"] >= 0.15: play.append(f"做市／兩邊都買（{m['bothSidesShare']*100:.0f}% 錢包）")
         if m["buyShare"] < 0.7: play.append(f"短線進出（賣單 {100 - m['buyShare']*100:.0f}%）")
         if not play: play.append("單邊持有到結算")
-        body.append(f"{i}. {m['event'] or m['question']}｜{m['question']}\n   24h ${m['volume24h']:,.0f}·深度 ${m['liquidity']:,.0f}·{m['endDate']}·{MARKET_KIND_LABELS.get(m['kind'], m['kind'])}\n   近 {m['trades']} 筆／{m['wallets']} 錢包·中位單 ${m['medianTradeUsd']:,.0f}·買價中位 {m['priceMedian']:.2f}·玩法：{'、'.join(play)}")
+        mtm = m.get("favMtmPerShare")
+        if mtm is None or (m.get("favN") or 0) < 5:
+            verdict = "— 跟領先方樣本不足"
+        elif mtm > 0:
+            verdict = f"👍 跟領先方按現價每股 {mtm:+.3f}、共 {m.get('favTotalUsd', 0):+,.0f}、最大單筆 {m.get('favWorstUsd', 0):,.0f}"
+        else:
+            verdict = f"👎 跟領先方按現價每股 {mtm:+.3f}、共 {m.get('favTotalUsd', 0):+,.0f}、最大單筆 {m.get('favWorstUsd', 0):,.0f}"
+        body.append(f"{i}. {m['event'] or m['question']}｜{m['question']}\n   24h ${m['volume24h']:,.0f}·深度 ${m['liquidity']:,.0f}·{m['endDate']}·{MARKET_KIND_LABELS.get(m['kind'], m['kind'])}\n   近 {m['trades']} 筆／{m['wallets']} 錢包·中位單 ${m['medianTradeUsd']:,.0f}·買價中位 {m['priceMedian']:.2f}·玩法：{'、'.join(play)}\n   {verdict}")
     msgs.append("\n".join(body))
     for k in disc["kinds"]:
         pros, cons = MARKET_KIND_NOTES.get(k, ("—", "—"))
         msgs.append(f"🔎 {MARKET_KIND_LABELS.get(k, k)}\n👍 {pros}\n👎 {cons}")
-    msgs.append("以上為公開成交的行為推估，不是明確策略；任何更改請回覆指示後再由人工執行。")
+    msgs.append("以上為公開成交的行為推估（未結算市場以現價估損益），不是明確策略；任何更改請回覆指示後再由人工執行。")
     return msgs
 
 
@@ -351,35 +413,48 @@ def compare(report: dict, cfg: dict) -> list[dict]:
     ours_min = cfg.get("lateFavoriteMinPrice"); ours_max = cfg.get("lateFavoriteMaxPrice")
     ours_stop = cfg.get("lateFavoriteStopLossPrice")
     if cfg.get("lateFavoriteEnabled") and fav["priceBuckets"]:
-        best = max(fav["priceBuckets"], key=lambda b: b["pnlPerShare"])
+        # 2026-09-15 依使用者要求：「本週最佳」改以每股淨利中位數挑（不看勝率），並標出勝率補不回虧損的區間。
+        key = lambda b: (b.get("pnlPerShareMedian", 0), b["pnlPerShare"])
+        best = max(fav["priceBuckets"], key=key)
         ours = [b for b in fav["priceBuckets"] if ours_min is not None and b["lo"] <= ours_min < b["hi"]]
-        finding = "市場買價區間每股淨利（各錢包窗口等權平均／中位數）：" + "；".join(
-            f"{b['lo']:.2f}～{b['hi']:.2f} {b['pnlPerShare']:+.4f}／{b.get('pnlPerShareMedian', 0):+.4f}（n={b['n']}）" for b in fav["priceBuckets"])
+        finding = "市場買價區間每股淨利（平均／中位；1 輸＝要幾次贏才補回）：" + "；".join(
+            f"{b['lo']:.2f}～{b['hi']:.2f} {b['pnlPerShare']:+.4f}／{b.get('pnlPerShareMedian', 0):+.4f}（n={b['n']}，{risk_text(b)}）" for b in fav["priceBuckets"])
+        bad = [b for b in fav["priceBuckets"] if b.get("negativeEV")]
         if ours and best is not ours[0]:
             out.append({
                 "title": "買價區間",
-                "finding": finding + f"。我們目前 {ours_min:.2f}～{ours_max:.2f}（每股 {ours[0]['pnlPerShare']:+.4f}）；本週每股最高是 {best['lo']:.2f}～{best['hi']:.2f}。",
-                "pros": f"改到 {best['lo']:.2f}～{best['hi']:.2f}：每股淨利 {best['pnlPerShare']:+.4f} vs 我們區間 {ours[0]['pnlPerShare']:+.4f}。",
-                "cons": "區間越貴每股毛利越薄、對停損跳空更敏感；樣本只有一週，需連續兩週一致再改。",
+                "finding": finding + f"。我們目前 {ours_min:.2f}～{ours_max:.2f}（中位 {ours[0].get('pnlPerShareMedian', 0):+.4f}{'，❌ 長期負期望' if ours[0].get('negativeEV') else ''}）；本週每股中位最高是 {best['lo']:.2f}～{best['hi']:.2f}。",
+                "pros": f"改到 {best['lo']:.2f}～{best['hi']:.2f}：每股中位 {best.get('pnlPerShareMedian', 0):+.4f} vs 我們區間 {ours[0].get('pnlPerShareMedian', 0):+.4f}。",
+                "cons": "區間越貴每股毛利越薄、一次翻面要更多次獲利才補回；樣本只有一週，需連續兩週一致再改。",
             })
         else:
-            out.append({"title": "買價區間", "finding": finding + f"。我們目前 {ours_min}～{ours_max}，已在本週最佳區間。", "pros": "維持。", "cons": "—"})
+            out.append({"title": "買價區間", "finding": finding + f"。我們目前 {ours_min}～{ours_max}，已在本週每股中位最高的區間。",
+                        "pros": "維持。", "cons": ("❌ 但此區間勝率補不回虧損（長期負期望）。" if ours and ours[0].get("negativeEV") else "—")})
+        if bad:
+            out.append({
+                "title": "勝率高卻長期賠錢的區間",
+                "finding": "；".join(f"{b['lo']:.2f}～{b['hi']:.2f}：打平需勝率 {b['breakEvenWinRate']*100:.1f}%，實際 {b['winRate']*100:.1f}%，一次虧損要 {b['lossesPerWin']:.0f} 次獲利才補回" for b in bad),
+                "pros": "避開這些區間（或加停損把單次虧損壓到 1 輸＝10 贏以內）可直接改善總損益。",
+                "cons": "一週樣本內一兩次大翻面就會讓區間變負；請連續兩週一致再定案。",
+            })
         if fav["timeBuckets"]:
-            bt = max(fav["timeBuckets"], key=lambda b: b["pnlPerShare"])
+            bt = max(fav["timeBuckets"], key=key)
             out.append({
                 "title": "進場時點",
-                "finding": "進場前秒數每股淨利：" + "；".join(f"{b['lo']}～{b['hi']}s {b['pnlPerShare']:+.4f}" for b in fav["timeBuckets"]) + f"。我們目前 {cfg.get('lateFavoriteMinRemaining', 5):.0f}～{cfg.get('lateFavoriteWindowSeconds', 60):.0f}s 都可進。",
-                "pros": f"若只在 {bt['lo']}～{bt['hi']}s 進，每股可到 {bt['pnlPerShare']:+.4f}。",
+                "finding": "進場前秒數每股淨利（平均／中位）：" + "；".join(f"{b['lo']}～{b['hi']}s {b['pnlPerShare']:+.4f}／{b.get('pnlPerShareMedian', 0):+.4f}（{risk_text(b)}）" for b in fav["timeBuckets"]) + f"。我們目前 {cfg.get('lateFavoriteMinRemaining', 5):.0f}～{cfg.get('lateFavoriteWindowSeconds', 60):.0f}s 都可進。",
+                "pros": f"若只在 {bt['lo']}～{bt['hi']}s 進，每股中位可到 {bt.get('pnlPerShareMedian', 0):+.4f}。",
                 "cons": "縮窄時間會少掉機會；最後 10 秒內深度薄、交易所偶爾關單。",
             })
         stop = fav["stop"]
         if stop["total"]:
             rate = stop["withSell"] / stop["total"]
+            need = [b["breakEvenWinRate"] for b in fav["priceBuckets"] if b.get("breakEvenWinRate") is not None]
+            need_txt = f"{max(need)*100:.0f}%" if need else "96%"
             out.append({
                 "title": "停損",
                 "finding": f"市場上做這型態的錢包只有 {rate*100:.0f}% 曾在窗口內賣出（停損／獲利了結）；我們目前停損 {ours_stop}。",
-                "pros": "不停損：省掉假停損成本，在 99% 勝率下期望值最高。" if rate < 0.2 else "多數人有停損，跟我們一致。",
-                "cons": "不停損時一次翻面整注歸零，需勝率 >= 96% 才划算；我們實測勝率若低於此，停損仍是必要保護。",
+                "pros": "不停損：省掉假停損成本，勝率夠高時期望值最高。" if rate < 0.2 else "多數人有停損，跟我們一致。",
+                "cons": f"不停損時一次翻面整注歸零，依本週賠率需勝率 >= {need_txt} 才划算；低於此停損仍是必要保護。",
             })
     both = next((k for k in report["kinds"] if k["kind"] == "both_sides_lock"), None)
     if both:
@@ -394,7 +469,7 @@ def compare(report: dict, cfg: dict) -> list[dict]:
         out.append({
             "title": "本週最賺錢的三個錢包",
             "finding": "；".join(
-                f"{b['wallet'][:10]}… {KIND_LABELS.get(b['mainKind'], b['mainKind'])}，{b['windows']} 窗、PnL {b['pnl']:+.0f}"
+                f"{b['wallet'][:10]}… {kind_label(b['mainKind'])}，{b['windows']} 窗、PnL {b['pnl']:+.0f}"
                 + (f"、買價 {b['favAvgPrice']:.3f}、進場前 {b['favMedianT']:.0f}s、賣出率 {b['favSellRate']*100:.0f}%" if b['favAvgPrice'] else "")
                 for b in top),
             "pros": "可對照他們的買價／時點調整我們的參數。", "cons": "PnL 為公開成交粗估（不含手續費、賣單另計），僅供方向參考。",
@@ -408,14 +483,19 @@ def render_markdown(report: dict, suggestions: list[dict], cfg: dict, hours: flo
     now = datetime.now(TAIPEI).strftime("%Y-%m-%d %H:%M")
     lines = [f"# 每週市場掃描 {now}（台北）", "",
              f"範圍：最近 {hours:.0f} 小時、{report['windows']} 個 BTC 5 分鐘窗口、{report['trades']:,} 筆成交；結算 {report['outcomes']}", "",
-             "## 最多人使用的型態（錢包×窗口）", "", "| 型態 | 次數 | 佔比 | 錢包數 | 勝率 | 粗估 PnL |", "|---|---|---|---|---|---|"]
+             "## 型態（依粗估 PnL 排序；錢包×窗口）", "", "| 型態 | 次數 | 佔比 | 錢包數 | 勝率 | 粗估 PnL |", "|---|---|---|---|---|---|"]
     for k in report["kinds"]:
         wr = f"{k['winRate']*100:.1f}%" if k["winRate"] is not None else "—"
         lines.append(f"| {k['label']} | {k['count']} | {k['share']*100:.1f}% | {k['wallets']} | {wr} | {k['pnl']:+.0f} |")
     fav = report["lateFavorite"]
-    lines += ["", f"## 最後 60 秒買領先方細分（n={fav['n']}）", "", "| 買價 | n | 勝率 | 每股淨利（等權平均） | 中位數 | 依股數加權 |", "|---|---|---|---|---|---|"]
+    def _be(b):
+        return f"{b['breakEvenWinRate']*100:.1f}%" if b.get("breakEvenWinRate") is not None else "—"
+    def _lpw(b):
+        return f"{b['lossesPerWin']:.1f}" if b.get("lossesPerWin") is not None else "—"
+    lines += ["", f"## 最後 {LATE_SECONDS} 秒買領先方細分（n={fav['n']}）", "",
+              "| 買價 | n | 勝率 | 打平需勝率 | 1 輸＝N 贏 | 每股淨利（等權平均） | 中位數 | 依股數加權 | 判定 |", "|---|---|---|---|---|---|---|---|---|"]
     for b in fav["priceBuckets"]:
-        lines.append(f"| {b['lo']:.2f}～{b['hi']:.2f} | {b['n']} | {b['winRate']*100:.1f}% | {b['pnlPerShare']:+.4f} | {b.get('pnlPerShareMedian', 0):+.4f} | {b.get('pnlPerShareSizeWeighted', 0):+.4f} |")
+        lines.append(f"| {b['lo']:.2f}～{b['hi']:.2f} | {b['n']} | {b['winRate']*100:.1f}% | {_be(b)} | {_lpw(b)} | {b['pnlPerShare']:+.4f} | {b.get('pnlPerShareMedian', 0):+.4f} | {b.get('pnlPerShareSizeWeighted', 0):+.4f} | {'❌ 負期望' if b.get('negativeEV') else '✅'} |")
     lines += ["", "| 進場前秒數 | n | 勝率 | 每股淨利（等權平均） | 中位數 |", "|---|---|---|---|---|"]
     for b in fav["timeBuckets"]:
         lines.append(f"| {b['lo']}～{b['hi']}s | {b['n']} | {b['winRate']*100:.1f}% | {b['pnlPerShare']:+.4f} | {b.get('pnlPerShareMedian', 0):+.4f} |")
@@ -428,13 +508,13 @@ def render_markdown(report: dict, suggestions: list[dict], cfg: dict, hours: flo
 
 def render_telegram(report: dict, suggestions: list[dict], hours: float) -> list[str]:
     msgs = []
-    head = [f"📈 市場掃描 {report.get('marketLabel', 'BTC 5 分鐘')}（最近 {hours:.0f}h、{report['windows']} 窗、{report['trades']:,} 筆）", "最多人使用："]
+    head = [f"📈 市場掃描 {report.get('marketLabel', 'BTC 5 分鐘')}（最近 {hours:.0f}h、{report['windows']} 窗、{report['trades']:,} 筆）", "本週最賺型態（依粗估 PnL）："]
     # 2026-09-15 依使用者要求：TG 摘要以收益為主，不列勝率（完整數字仍在 .md 報告）。
     for k in report["kinds"][:5]:
-        head.append(f"• {k['label']}：{k['share']*100:.0f}%、{k['wallets']} 錢包、粗估 {k['pnl']:+.0f}")
+        head.append(f"• {k['label']}：粗估 {k['pnl']:+.0f}、{k['wallets']} 錢包、{k['share']*100:.0f}%")
     fav = report["lateFavorite"]
-    head.append("買領先方各買價區間每股淨利（平均／中位）：" + "；".join(
-        f"{b['lo']:.2f}～{b['hi']:.2f} {b['pnlPerShare']:+.3f}／{b.get('pnlPerShareMedian', 0):+.3f}" for b in fav["priceBuckets"]))
+    head.append("買領先方各買價區間每股淨利（平均／中位；1 輸＝N 贏）：" + "；".join(
+        f"{b['lo']:.2f}～{b['hi']:.2f} {b['pnlPerShare']:+.3f}／{b.get('pnlPerShareMedian', 0):+.3f}（{risk_text(b)}）" for b in fav["priceBuckets"]))
     msgs.append("\n".join(head))
     for s in suggestions:
         msgs.append(f"🔎 {s['title']}\n{s['finding']}\n👍 {s['pros']}\n👎 {s['cons']}")

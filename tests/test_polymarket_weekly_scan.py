@@ -42,7 +42,10 @@ class WeeklyScanTests(unittest.TestCase):
         self.assertEqual(report["lateFavorite"]["n"], 3)          # bot + r2 + r3（同一窗口同錢包算一次）
         for b in report["lateFavorite"]["priceBuckets"]:
             self.assertIn("pnlPerShareMedian", b)
+            self.assertIn("breakEvenWinRate", b)            # 2026-09-15：賠率／打平勝率
             self.assertGreaterEqual(b["pnlPerShare"], -1.0)
+        pnls = [k["pnl"] for k in report["kinds"]]
+        self.assertEqual(pnls, sorted(pnls, reverse=True))     # 型態依粗估 PnL 排序
         self.assertEqual(report["botCount"], 0)                   # 只有 1 個窗口，沒人達到 10 窗門檻
         cfg = {"lateFavoriteEnabled": True, "lateFavoriteMinPrice": 0.95, "lateFavoriteMaxPrice": 0.97,
                "lateFavoriteStopLossPrice": 0.6, "lateFavoriteMinRemaining": 5, "lateFavoriteWindowSeconds": 60}
@@ -53,10 +56,30 @@ class WeeklyScanTests(unittest.TestCase):
         for s in suggestions:
             self.assertTrue(s["pros"] and s["cons"])
         md = scan.render_markdown(report, suggestions, cfg, 24)
-        self.assertIn("最多人使用的型態", md)
+        self.assertIn("依粗估 PnL 排序", md)
         msgs = scan.render_telegram(report, suggestions, 24)
         self.assertTrue(all(len(m) <= 4000 for m in msgs))
         self.assertIn("不會自動更改", md)
+        self.assertIn("最賺型態", msgs[0])
+
+    def test_negative_ev_bucket_is_flagged(self):
+        # 0.96 買領先方：贏 24 次各 +0.04、輸 2 次各 -0.96 → 勝率 92% 但打平需 96%，應標 ❌
+        ws = 1_000_000
+        windows = []
+        for i in range(26):
+            outcome = "Down" if i < 2 else "Up"
+            windows.append({"slug": f"w{i}", "start": ws + i * 300, "outcome": outcome,
+                            "trades": [_t(f"w{i}", "Up", 0.96, 10, i * 300 + 250)]})
+        report = scan.analyze(windows)
+        b = report["lateFavorite"]["priceBuckets"][0]
+        self.assertTrue(b["negativeEV"])
+        self.assertAlmostEqual(b["lossesPerWin"], 24.0, places=3)
+        self.assertGreater(b["breakEvenWinRate"], b["winRate"])
+        self.assertIn("❌", scan.risk_text(b))
+        cfg = {"lateFavoriteEnabled": True, "lateFavoriteMinPrice": 0.95, "lateFavoriteMaxPrice": 0.98}
+        titles = [s["title"] for s in scan.compare(report, cfg)]
+        self.assertIn("勝率高卻長期賠錢的區間", titles)
+        self.assertEqual(scan.kind_label("late_favorite"), f"最後 {scan.LATE_SECONDS} 秒買領先方（>=0.88）")
 
 
     def test_market_kind_classification_and_discovery_rendering(self):
@@ -67,9 +90,12 @@ class WeeklyScanTests(unittest.TestCase):
         disc = {"kinds": {"event_soon": 1}, "markets": [{
             "slug": "x", "question": "Fed cut?", "event": "Fed", "kind": "event_soon", "volume24h": 1e6, "liquidity": 5e5,
             "endDate": "2026-09-16", "trades": 900, "wallets": 300, "medianTradeUsd": 40.0, "buyShare": 0.9,
-            "favoriteShare": 0.6, "bothSidesShare": 0.05, "priceMedian": 0.9}]}
+            "favoriteShare": 0.6, "bothSidesShare": 0.05, "priceMedian": 0.9,
+            "favN": 40, "favMtmPerShare": -0.12, "favWorstUsd": -300.0, "favTotalUsd": -800.0}]}
         msgs = scan.render_discovery_telegram(disc)
         self.assertTrue(any("跟領先方" in m for m in msgs))
+        self.assertTrue(any("👎 跟領先方按現價" in m for m in msgs))   # 2026-09-15：看淨利不看占比
+        self.assertEqual(scan._current_prices({"outcomes": '["Yes","No"]', "outcomePrices": '["0.9","0.1"]'}), {"Yes": 0.9, "No": 0.1})
         self.assertTrue(any("👍" in m and "👎" in m for m in msgs))
         self.assertTrue(all(len(m) <= 4000 for m in msgs))
         self.assertIn("btc-15m", scan.MARKETS)

@@ -186,9 +186,9 @@ def latest_report_summary() -> str:
         return "📈 還沒有掃描報告；用 /scan 產生一份，或等每週一 12:00（台北）的排程。"
     with open(os.path.join(REPORT_DIR, files[-1]), encoding="utf-8") as f:
         data = json.load(f)
-    lines = [f"📈 最近一次掃描：{files[-1][:-5]}（最近 {float(data.get('hours') or 0):.0f}h、{data['report']['windows']} 窗）"]
-    for k in data["report"]["kinds"][:4]:
-        lines.append(f"• {k['label']}：{k['share']*100:.0f}% · 粗估 {k.get('pnl', 0):+.0f}")
+    lines = [f"📈 最近一次掃描：{files[-1][:-5]}（最近 {float(data.get('hours') or 0):.0f}h、{data['report']['windows']} 窗）", "最賺型態（依粗估 PnL）："]
+    for k in sorted(data["report"]["kinds"], key=lambda k: k.get("pnl", 0), reverse=True)[:4]:
+        lines.append(f"• {k['label']}：粗估 {k.get('pnl', 0):+.0f} · {k['share']*100:.0f}%")
     for sug in data.get("suggestions", []):
         lines.append(f"\n🔎 {sug['title']}\n{sug['finding']}\n👍 {sug['pros']}\n👎 {sug['cons']}")
     return "\n".join(lines)
