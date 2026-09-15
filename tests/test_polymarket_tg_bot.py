@@ -53,7 +53,8 @@ class TelegramBotTests(unittest.TestCase):
         pnl = bot.format_pnl(_live())
         self.assertIn("+24.12", pnl)
         self.assertIn("51 筆", pnl)
-        self.assertIn("90.2%", pnl)
+        self.assertNotIn("勝率", pnl)                 # 2026-09-15：以收益為主，不看勝率
+        self.assertIn("最差 -19.74", pnl)
 
     def test_trades_only_lists_real_orders(self):
         text = bot.format_trades(_live(), 10)
@@ -91,6 +92,8 @@ class TelegramBotTests(unittest.TestCase):
             {"assetId": "btc-15m", "label": "C", "totalPnl": 99.0, "totalTrades": 1, "winRate": None, "hasPosition": False},
         ]}
         text = bot.format_sim(sim)
+        self.assertNotIn("勝率", text)
+        self.assertIn("平均", text)
         self.assertLess(text.index("B"), text.index("A"))
         self.assertNotIn("C", text.split("\n", 1)[1])
         self.assertIn("持倉中", text)

@@ -89,24 +89,24 @@ def format_status(live: dict) -> str:
 
 
 def format_pnl(live: dict) -> str:
+    # 2026-09-15 依使用者要求：以收益為主，不看勝率。
     st = live.get("strategyState") or {}
-    wins = int(st.get("winningTrades") or 0)
-    losses = int(st.get("losingTrades") or 0)
-    decided = wins + losses
-    rate = f"{100 * wins / decided:.1f}%" if decided else "—"
     real_trades = [t for t in (st.get("trades") or []) if not t.get("dryRun", True)]
+    pnls = [float(t.get("pnlEstimate") or 0) for t in real_trades]
+    avg = (sum(pnls) / len(pnls)) if pnls else 0.0
+    worst = min(pnls) if pnls else 0.0
+    best = max(pnls) if pnls else 0.0
     today_start = datetime.now(TAIPEI).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     today = [t for t in real_trades if float(t.get("exitTime") or 0) >= today_start]
     today_pnl = sum(float(t.get("pnlEstimate") or 0) for t in today)
-    today_wins = sum(1 for t in today if float(t.get("pnlEstimate") or 0) > 0)
     lines = [
         "💰 實盤損益",
         f"餘額 ${_money(live.get('balanceUsdc'), signed=False)} · 基準 ${_money(live.get('baselineBalance'), signed=False)}"
         f"（{_ts(live.get('baselineSetAt'))} 起）",
         f"餘額變動：{_money(live.get('totalPnl'))}",
         f"策略估算：{_money(st.get('totalPnlEstimate'))} · 費用 {_money(st.get('totalFeesEstimate'), signed=False)}",
-        f"交易 {int(st.get('totalTrades') or 0)} 筆 · 勝率 {rate}（{wins} 勝 {losses} 敗）",
-        f"今日（台北）：{len(today)} 筆 · {today_wins} 勝 · {_money(today_pnl)}",
+        f"交易 {int(st.get('totalTrades') or 0)} 筆 · 平均 {_money(avg)}/筆 · 最好 {_money(best)} · 最差 {_money(worst)}",
+        f"今日（台北）：{len(today)} 筆 · {_money(today_pnl)}",
     ]
     return "\n".join(lines)
 
@@ -139,10 +139,11 @@ def format_sim(sim: dict, asset_id: str = "btc") -> str:
     rows.sort(key=lambda v: float(v.get("totalPnl") or 0), reverse=True)
     lines = [f"📊 模擬盤 {asset_id.upper()}（各組獨立記帳）"]
     for v in rows:
-        rate = v.get("winRate")
+        n = int(v.get("totalTrades") or 0)
+        avg = (float(v.get("totalPnl") or 0) / n) if n else 0.0
         lines.append(
             f"{'★' if v is rows[0] else '·'} {v.get('label')}：{_money(v.get('totalPnl'))}"
-            f" · {int(v.get('totalTrades') or 0)} 筆 · 勝率 {f'{rate:.0f}%' if rate is not None else '—'}"
+            f" · {n} 筆 · 平均 {_money(avg)}/筆 · 回撤 ${float(v.get('maxDrawdown') or 0):.2f}"
             f"{' · 持倉中' if v.get('hasPosition') else ''}"
         )
     return "\n".join(lines)
@@ -151,7 +152,7 @@ def format_sim(sim: dict, asset_id: str = "btc") -> str:
 HELP_TEXT = (
     "可用指令：\n"
     "/status — 實盤開關、策略、部位、餘額\n"
-    "/pnl — 實盤損益、勝率、今日統計\n"
+    "/pnl — 實盤損益、平均每筆、最好／最差、今日統計\n"
     "/trades [n] — 最近 n 筆真單（預設 10）\n"
     "/sim — 模擬盤各組損益\n"
     "/scan — 選擇要掃描的市場（BTC 5m／15m、ETH、SOL、XRP、其他＝全站探索最多人玩的盤）\n"
@@ -176,8 +177,7 @@ def latest_report_summary() -> str:
         data = json.load(f)
     lines = [f"📈 最近一次掃描：{files[-1][:-5]}（最近 {float(data.get('hours') or 0):.0f}h、{data['report']['windows']} 窗）"]
     for k in data["report"]["kinds"][:4]:
-        wr = f" 勝率 {k['winRate']*100:.0f}%" if k.get("winRate") is not None else ""
-        lines.append(f"• {k['label']}：{k['share']*100:.0f}%{wr}")
+        lines.append(f"• {k['label']}：{k['share']*100:.0f}% · 粗估 {k.get('pnl', 0):+.0f}")
     for sug in data.get("suggestions", []):
         lines.append(f"\n🔎 {sug['title']}\n{sug['finding']}\n👍 {sug['pros']}\n👎 {sug['cons']}")
     return "\n".join(lines)

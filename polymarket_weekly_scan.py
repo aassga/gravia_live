@@ -353,12 +353,12 @@ def compare(report: dict, cfg: dict) -> list[dict]:
     if cfg.get("lateFavoriteEnabled") and fav["priceBuckets"]:
         best = max(fav["priceBuckets"], key=lambda b: b["pnlPerShare"])
         ours = [b for b in fav["priceBuckets"] if ours_min is not None and b["lo"] <= ours_min < b["hi"]]
-        finding = "市場買價區間表現（每股淨利＝各錢包窗口等權平均／中位數）：" + "；".join(
-            f"{b['lo']:.2f}～{b['hi']:.2f} 勝率 {b['winRate']*100:.1f}%、每股 {b['pnlPerShare']:+.4f}／{b.get('pnlPerShareMedian', 0):+.4f}（n={b['n']}）" for b in fav["priceBuckets"])
+        finding = "市場買價區間每股淨利（各錢包窗口等權平均／中位數）：" + "；".join(
+            f"{b['lo']:.2f}～{b['hi']:.2f} {b['pnlPerShare']:+.4f}／{b.get('pnlPerShareMedian', 0):+.4f}（n={b['n']}）" for b in fav["priceBuckets"])
         if ours and best is not ours[0]:
             out.append({
                 "title": "買價區間",
-                "finding": finding + f"。我們目前 {ours_min:.2f}～{ours_max:.2f}，落在勝率 {ours[0]['winRate']*100:.1f}% 的區間；本週最佳是 {best['lo']:.2f}～{best['hi']:.2f}。",
+                "finding": finding + f"。我們目前 {ours_min:.2f}～{ours_max:.2f}（每股 {ours[0]['pnlPerShare']:+.4f}）；本週每股最高是 {best['lo']:.2f}～{best['hi']:.2f}。",
                 "pros": f"改到 {best['lo']:.2f}～{best['hi']:.2f}：每股淨利 {best['pnlPerShare']:+.4f} vs 我們區間 {ours[0]['pnlPerShare']:+.4f}。",
                 "cons": "區間越貴每股毛利越薄、對停損跳空更敏感；樣本只有一週，需連續兩週一致再改。",
             })
@@ -368,7 +368,7 @@ def compare(report: dict, cfg: dict) -> list[dict]:
             bt = max(fav["timeBuckets"], key=lambda b: b["pnlPerShare"])
             out.append({
                 "title": "進場時點",
-                "finding": "進場前秒數：" + "；".join(f"{b['lo']}～{b['hi']}s 勝率 {b['winRate']*100:.1f}%、每股 {b['pnlPerShare']:+.4f}" for b in fav["timeBuckets"]) + f"。我們目前 {cfg.get('lateFavoriteMinRemaining', 5):.0f}～{cfg.get('lateFavoriteWindowSeconds', 60):.0f}s 都可進。",
+                "finding": "進場前秒數每股淨利：" + "；".join(f"{b['lo']}～{b['hi']}s {b['pnlPerShare']:+.4f}" for b in fav["timeBuckets"]) + f"。我們目前 {cfg.get('lateFavoriteMinRemaining', 5):.0f}～{cfg.get('lateFavoriteWindowSeconds', 60):.0f}s 都可進。",
                 "pros": f"若只在 {bt['lo']}～{bt['hi']}s 進，每股可到 {bt['pnlPerShare']:+.4f}。",
                 "cons": "縮窄時間會少掉機會；最後 10 秒內深度薄、交易所偶爾關單。",
             })
@@ -429,11 +429,12 @@ def render_markdown(report: dict, suggestions: list[dict], cfg: dict, hours: flo
 def render_telegram(report: dict, suggestions: list[dict], hours: float) -> list[str]:
     msgs = []
     head = [f"📈 市場掃描 {report.get('marketLabel', 'BTC 5 分鐘')}（最近 {hours:.0f}h、{report['windows']} 窗、{report['trades']:,} 筆）", "最多人使用："]
+    # 2026-09-15 依使用者要求：TG 摘要以收益為主，不列勝率（完整數字仍在 .md 報告）。
     for k in report["kinds"][:5]:
-        wr = f" 勝率 {k['winRate']*100:.0f}%" if k["winRate"] is not None else ""
-        head.append(f"• {k['label']}：{k['share']*100:.0f}%、{k['wallets']} 錢包{wr}")
+        head.append(f"• {k['label']}：{k['share']*100:.0f}%、{k['wallets']} 錢包、粗估 {k['pnl']:+.0f}")
     fav = report["lateFavorite"]
-    head.append("買領先方各買價區間：" + "；".join(f"{b['lo']:.2f}～{b['hi']:.2f} {b['winRate']*100:.0f}%/{b['pnlPerShare']:+.3f}" for b in fav["priceBuckets"]))
+    head.append("買領先方各買價區間每股淨利（平均／中位）：" + "；".join(
+        f"{b['lo']:.2f}～{b['hi']:.2f} {b['pnlPerShare']:+.3f}／{b.get('pnlPerShareMedian', 0):+.3f}" for b in fav["priceBuckets"]))
     msgs.append("\n".join(head))
     for s in suggestions:
         msgs.append(f"🔎 {s['title']}\n{s['finding']}\n👍 {s['pros']}\n👎 {s['cons']}")
