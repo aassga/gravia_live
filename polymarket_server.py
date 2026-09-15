@@ -634,11 +634,15 @@ del _asset
 # btc-binance-late-direction（Binance T-10s）、btc-two-sided-maker（被動雙邊掛單，212 筆 -$62）、
 # btc-open-momentum（開盤動能方向性）、btc-late-favorite（最後 60 秒 0.95～0.97 原版，24h -$2,022），2026-09-14 依使用者要求移除。用環境變數過濾而不是刪定義：測試仍能用這些變體
 # 驗證共用的鎖利邏輯（tests/conftest.py 把清單設為空），歷史成交仍在 sqlite。
+# 2026-09-15 依使用者要求：移除模擬盤虧損最多的前 5 個變體（SOL 30～45s、SOL 跟單 T、BTC 10～30s、
+# BTC 30～90s、ETH 價格觸發），只停用不刪程式碼。
+_SIM_DEFAULT_DISABLED = (
+    "btc-main,btc-loose,btc-binance-late-direction,btc-two-sided-maker,btc-open-momentum,btc-late-favorite,"
+    "sol-last30-45-088-092,sol-follow-taker,btc-last10-30-092-095,btc-last30-90-092-095,eth-alt-price-triggered-favorite"
+)
 _SIM_DISABLED_VARIANT_IDS = {
     value.strip()
-    for value in os.environ.get(
-        "POLY_SIM_DISABLED_VARIANTS", "btc-main,btc-loose,btc-binance-late-direction,btc-two-sided-maker,btc-open-momentum,btc-late-favorite"
-    ).split(",")
+    for value in os.environ.get("POLY_SIM_DISABLED_VARIANTS", _SIM_DEFAULT_DISABLED).split(",")
     if value.strip()
 }
 AB_VARIANTS = [v for v in AB_VARIANTS if v["id"] not in _SIM_DISABLED_VARIANT_IDS]
