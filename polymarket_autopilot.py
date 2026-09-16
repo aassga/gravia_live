@@ -5,8 +5,8 @@
 每輪：
   1. 探測 Polymarket 上所有 <幣>-updown-<週期> 系列，各掃最近 24 小時的公開成交。
   2. 在「最後 N 秒買領先方」家族內找粗估總收益為正、樣本夠的規則（買價 × 進場秒數），
-     依總收益排序（使用者要求：主要看總收益），符合條件的全部加進模擬盤（MAX_ADD_* 為 None 即不限）
-     （寫 sim_auto_variants.json，polymarket_server.py 啟動時讀入）。
+     依總收益排序（使用者要求：主要看總收益）列進報告；自動加進模擬盤的功能 2026-09-17 起預設關閉
+     （POLY_AUTOPILOT_AUTO_ADD=true 才會寫 sim_auto_variants.json，polymarket_server.py 啟動時讀入）。
   3. 模擬盤累計虧損 <= -DISABLE_LOSS_USD 的變體寫進 sim_disabled_variants.json（只停用，歷史保留）。
   4. 有任何變更且實盤無持倉 → 重啟 gravia.service 讓變更生效；有持倉就留到下一輪。
   5. 摘要推 Telegram，並存 reports/autopilot/<時間>.json。
@@ -48,6 +48,9 @@ SCAN_HOURS = 24.0
 # 2026-09-17 依使用者要求：只在白名單市場找候選加進模擬盤（其餘系列照掃、只進報告），
 # 避免自動駕駛把模擬盤資產越加越多拖慢實盤（曾一夜長到 11 個資產、98 組）。POLY_AUTOPILOT_MARKETS 可覆寫。
 CANDIDATE_MARKETS = {m.strip() for m in os.environ.get("POLY_AUTOPILOT_MARKETS", "btc,btc-15m,eth,sol,xrp").split(",") if m.strip()}
+# 2026-09-17 依使用者要求：不再自動把新變體加進模擬盤（掃描、報告、停用虧損 >= 350 照跑）。
+# 要重新開啟：.env 設 POLY_AUTOPILOT_AUTO_ADD=true。
+AUTO_ADD_ENABLED = os.environ.get("POLY_AUTOPILOT_AUTO_ADD", "false").strip().lower() == "true"
 
 
 def _load(path, default):
@@ -165,9 +168,10 @@ def render_telegram(result: dict) -> list[str]:
     body = []
     if result["added"]:
         body.append("➕ 新增到模擬盤：\n" + "\n".join(f"• {c['label']}（總收益 {c['stats']['totalPnl']:+,.0f}、每股 {c['stats']['pnlPerShare']:+.3f}、n={c['stats']['n']}）" for c in result["added"]))
+    elif not AUTO_ADD_ENABLED:
+        body.append("➕ 自動新增已關閉（只報告，不加進模擬盤）。")
     else:
         body.append("➕ 這輪沒有新增（候選已存在、已停用、不夠格或不在白名單市場）。")
-    body.append("候選只收：" + "、".join(sorted(CANDIDATE_MARKETS)))
     if result["disabled"]:
         body.append("➖ 停用（累計虧損 ≥ 350）：\n" + "\n".join(f"• {d['label']}：{d['totalPnl']:+.0f}（{d['totalTrades']} 筆）" for d in result["disabled"]))
     else:
@@ -196,7 +200,7 @@ def main() -> None:
     sim_variants = snapshot.get("abVariants") or []
     existing_ids = {v.get("id") for v in sim_variants} | {s.get("id") for s in auto}
 
-    added = pick_new_variants(candidates, existing_ids, set(disabled))
+    added = pick_new_variants(candidates, existing_ids, set(disabled)) if AUTO_ADD_ENABLED else []
     to_disable = pick_disable(sim_variants, set(disabled))
     now = time.time()
     for c in added:

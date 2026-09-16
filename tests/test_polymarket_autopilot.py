@@ -87,6 +87,8 @@ class AutopilotTests(unittest.TestCase):
         result = {"hours": 24, "markets": {"eth": {"best": None}}, "added": [], "disabled": [], "restart": "none"}
         msgs = ap.render_telegram(result)
         self.assertTrue(any("實盤設定未動" in m for m in msgs))
+        self.assertFalse(ap.AUTO_ADD_ENABLED)                                  # 2026-09-17 預設不再自動新增
+        self.assertTrue(any("自動新增已關閉" in m for m in msgs))
         self.assertTrue(all(len(m) <= 4000 for m in msgs))
 
 
