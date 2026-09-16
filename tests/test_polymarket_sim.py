@@ -217,7 +217,7 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_price_triggered_favorite_requires_stable_leader_and_allows_mid_window(self):
         vid = "btc-price-triggered-favorite"
         v = sim.AB_VARIANT_BY_ID[vid]
-        self.assertFalse(v.get("simOnly")); self.assertEqual(v["favoriteStopLossPrice"], 0.60)  # 2026-09-14 起可供實盤選用、停損 0.60
+        self.assertFalse(v.get("simOnly")); self.assertEqual(v["favoriteStopLossPrice"], 0.85)  # 2026-09-14 起可供實盤選用、停損 0.60
         up, down = self._favorite_books(up_ask=0.97, down_ask=0.04)
         # 剩 200 秒（窗口中段）就可以看；第一次看到領先方只是開始計時，不進
         sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)
@@ -228,7 +228,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading(vid, "btc-window", up, down, 190.0, None)
         pos = sim.ab_states[vid]["position"]
         self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up")
-        # 停損 0.60：對邊翻上來、持有腿可賣價跌破 0.60 就賣掉
+        # 停損 0.85（2026-09-16 由 0.60 調高）：對邊翻上來、持有腿可賣價跌破 0.85 就賣掉
         up2, down2 = self._favorite_books(up_ask=0.30, down_ask=0.71)
         sim.simulate_trading(vid, "btc-window", up2, down2, 100.0, None)
         self.assertIsNone(sim.ab_states[vid]["position"])
@@ -308,7 +308,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         a = sim.AB_VARIANT_BY_ID["btc-last60-098-hold"]
         self.assertEqual((a["favoriteWindowSeconds"], a["favoriteMinPrice"], a["favoriteStopLossPrice"]), (60.0, 0.98, None))
         b = sim.AB_VARIANT_BY_ID["btc-last30-45-088-092"]
-        self.assertEqual((b["favoriteWindowSeconds"], b["favoriteMinRemaining"], b["favoriteMinPrice"], b["favoriteMaxPrice"], b["favoriteStopLossPrice"]), (45.0, 30.0, 0.88, 0.92, 0.60))
+        self.assertEqual((b["favoriteWindowSeconds"], b["favoriteMinRemaining"], b["favoriteMinPrice"], b["favoriteMaxPrice"], b["favoriteStopLossPrice"]), (45.0, 30.0, 0.88, 0.92, 0.85))
         d = sim.AB_VARIANT_BY_ID["btc-last30-90-092-095"]
         self.assertEqual((d["favoriteWindowSeconds"], d["favoriteMinRemaining"], d["favoriteMinPrice"], d["favoriteMaxPrice"], d["favoriteStopLossPrice"]), (90.0, 30.0, 0.92, 0.95, None))
         c = sim.AB_VARIANT_BY_ID["btc-last10-30-092-095"]
@@ -394,7 +394,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         v = sim.AB_VARIANT_BY_ID["btc-15m-last60-098-hold"]
         self.assertEqual((v["favoriteWindowSeconds"], v["favoriteStableSeconds"], v["favoriteFlipLookbackSeconds"]), (180.0, 10.0, 180.0))
         v2 = sim.AB_VARIANT_BY_ID["btc-15m-price-triggered-favorite"]
-        self.assertEqual((v2["favoriteWindowSeconds"], v2["favoriteStableSeconds"], v2["favoriteStopLossPrice"]), (720.0, 10.0, 0.60))
+        self.assertEqual((v2["favoriteWindowSeconds"], v2["favoriteStableSeconds"], v2["favoriteStopLossPrice"]), (720.0, 10.0, 0.85))
         v3 = sim.AB_VARIANT_BY_ID["btc-15m-last120-092-098-hold"]
         self.assertEqual((v3["favoriteWindowSeconds"], v3["favoriteMinPrice"], v3["favoriteMaxPrice"], v3["favoriteStopLossPrice"]), (120.0, 0.92, 0.98, None))
         self.assertNotIn("btc-follow-taker-x", ids)   # BTC 5m 沿用既有獨立定義，不重複生成

@@ -531,7 +531,7 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-last30-45-088-092",
             "assetId":               "btc",
-            "label":                 "BTC 最後 30～45 秒買領先方（0.88～0.92、停損 0.60）",
+            "label":                 "BTC 最後 30～45 秒買領先方（0.88～0.92、停損 0.85）",
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
             "lateFavorite":          True,
@@ -540,7 +540,7 @@ for _asset in ASSETS:
             "favoriteMinRemaining":  30.0,
             "favoriteMinPrice":      0.88,
             "favoriteMaxPrice":      0.92,
-            "favoriteStopLossPrice": 0.60,
+            "favoriteStopLossPrice": 0.85,   # 2026-09-16 依使用者要求 0.60 → 0.85
             "favoriteTakeProfitPrice": None,
             "favoriteStableSeconds": 0.0,
         })
@@ -608,7 +608,7 @@ for _asset in ASSETS:
             "assetId":               "btc",
             "label":                 (
                 f"BTC 價格觸發買領先方（≥{PRICE_TRIGGERED_MIN_PRICE:.2f} 穩定 "
-                f"{PRICE_TRIGGERED_STABLE_SECONDS:.0f}s、不限最後 60s、停損 0.60）"
+                f"{PRICE_TRIGGERED_STABLE_SECONDS:.0f}s、不限最後 60s、停損 0.85）"
             ),
             "entryMaxPrice":         None,
             "lockMaxSum":            SIM_LOCK_MAX_SUM,
@@ -618,7 +618,7 @@ for _asset in ASSETS:
             "favoriteMinPrice":      PRICE_TRIGGERED_MIN_PRICE,
             "favoriteMaxPrice":      PRICE_TRIGGERED_MAX_PRICE,
             # 2026-09-14 依使用者要求加上 0.85 停損；買價改 0.88～0.92 後緩衝太小，再依要求下調為 0.60。
-            "favoriteStopLossPrice": 0.60,
+            "favoriteStopLossPrice": 0.85,   # 2026-09-16 依使用者要求 0.60 → 0.85
             "favoriteTakeProfitPrice": None,   # 2026-09-14 調回 04:25～06:51 的設定：不做獲利了結
             "favoriteStableSeconds": PRICE_TRIGGERED_STABLE_SECONDS,
         })
@@ -650,15 +650,15 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
              favoriteWindowSeconds=PRICE_TRIGGERED_WINDOW_SECONDS * k, favoriteMinPrice=FOLLOW_TAKER_MIN_PRICE, favoriteMaxPrice=0.99,
              favoriteStopLossPrice=None, favoriteStableSeconds=0.0, simOnly=False),   # 2026-09-14 開放實盤選用（ETH）
         dict(common, id=f"{aid}-price-triggered-favorite",
-             label=f"{label} 價格觸發買領先方（≥{PRICE_TRIGGERED_MIN_PRICE:.2f} 穩定 {PRICE_TRIGGERED_STABLE_SECONDS:.0f}s、停損 0.60）",
+             label=f"{label} 價格觸發買領先方（≥{PRICE_TRIGGERED_MIN_PRICE:.2f} 穩定 {PRICE_TRIGGERED_STABLE_SECONDS:.0f}s、停損 0.85）",
              favoriteWindowSeconds=PRICE_TRIGGERED_WINDOW_SECONDS * k, favoriteMinPrice=PRICE_TRIGGERED_MIN_PRICE,
-             favoriteMaxPrice=PRICE_TRIGGERED_MAX_PRICE, favoriteStopLossPrice=0.60, favoriteStableSeconds=PRICE_TRIGGERED_STABLE_SECONDS),
+             favoriteMaxPrice=PRICE_TRIGGERED_MAX_PRICE, favoriteStopLossPrice=0.85, favoriteStableSeconds=PRICE_TRIGGERED_STABLE_SECONDS),
         dict(common, id=f"{aid}-last60-098-hold", label=f"{label} 最後 {60 * k:.0f} 秒買 ≥0.98 抱到結算（穩定 10s、翻面偵測）",
              favoriteWindowSeconds=60.0 * k, favoriteMinPrice=0.98, favoriteMaxPrice=0.99, favoriteStopLossPrice=None,
              favoriteStableSeconds=10.0, favoriteFlipLookbackSeconds=FAVORITE_FLIP_LOOKBACK_SECONDS * k, favoriteFlipThreshold=FAVORITE_FLIP_THRESHOLD),
-        dict(common, id=f"{aid}-last30-45-088-092", label=f"{label} 最後 {30 * k:.0f}～{45 * k:.0f} 秒買領先方（0.88～0.92、停損 0.60）",
+        dict(common, id=f"{aid}-last30-45-088-092", label=f"{label} 最後 {30 * k:.0f}～{45 * k:.0f} 秒買領先方（0.88～0.92、停損 0.85）",
              favoriteWindowSeconds=45.0 * k, favoriteMinRemaining=30.0 * k, favoriteMinPrice=0.88, favoriteMaxPrice=0.92,
-             favoriteStopLossPrice=0.60, favoriteStableSeconds=0.0, simOnly=False),   # 2026-09-15 開放實盤選用（ETH）
+             favoriteStopLossPrice=0.85, favoriteStableSeconds=0.0, simOnly=False),   # 2026-09-15 開放實盤選用（ETH）
         dict(common, id=f"{aid}-last10-30-092-095", label=f"{label} 最後 {10 * k:.0f}～{30 * k:.0f} 秒買領先方（0.92～0.95、不停損）",
              favoriteWindowSeconds=30.0 * k, favoriteMinRemaining=10.0 * k, favoriteMinPrice=0.92, favoriteMaxPrice=0.95,
              favoriteStopLossPrice=None, favoriteStableSeconds=0.0, simOnly=False),   # 2026-09-15 開放實盤選用（BTC 15m）
