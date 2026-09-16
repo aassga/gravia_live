@@ -73,6 +73,11 @@ EMERGENCY_UNWIND_ORDER_INTERVAL = max(0.5, float(os.environ.get("POLY_EMERGENCY_
 # 但緊急平倉的目標是「不計代價盡快出場」，不是「盡量拿到好價格」，值得比平常更激進：
 # 在正常保守限價之上，再多讓這麼多格 tick，犧牲一點價格換取更高的立即成交機率。
 EMERGENCY_UNWIND_EXTRA_TICKS = max(0, int(os.environ.get("POLY_EMERGENCY_UNWIND_EXTRA_TICKS", "3")))
+# 2026-09-16 依使用者要求：方向性進場的 FOK 限價比判斷價再多讓幾格 tick（0 = 關閉），並在 FOK 被拒後
+# 用最新書價重算一次再送（最多 1 次）。09:29:45 實盤 6 股 @0.55 被 CLOB 以 "couldn't be fully filled" 拒絕兩次，
+# 模擬盤同一瞬間以快照成交 +6.33——T-15s 的書在快照到撮合的幾百毫秒內就移走了。
+LATE_DIRECTION_EXTRA_TICKS = max(0, int(os.environ.get("POLY_LIVE_DIRECTION_EXTRA_TICKS", "3")))
+LATE_DIRECTION_RETRY_ON_REJECT = os.environ.get("POLY_LIVE_DIRECTION_RETRY", "true").strip().lower() == "true"
 _validated_order_path_slug: str | None = None
 _live_data_guard_log_at = 0.0
 _ORDER_SIGN_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="poly-order-sign")
@@ -755,6 +760,22 @@ def _aggressive_sell_plan(side: str, book: dict, shares: float) -> dict | None:
     return plan
 
 
+def _aggressive_buy_plan(plan: dict, book: dict, extra_ticks: int) -> dict:
+    """方向性進場專用：在 _buy_plan 的判斷價上再多讓 extra_ticks 格 tick，換立即成交機率（上限 1 − tick）。"""
+    if not plan or extra_ticks <= 0:
+        return plan
+    tick_value = float(book.get("tickSize", 0.01) or 0.01)
+    tick = Decimal(str(tick_value))
+    price = Decimal(str(plan["limitPrice"])) + tick * extra_ticks
+    price = float(max(tick, min(Decimal("1") - tick, price)))
+    out = dict(plan)
+    out["baseLimitPrice"] = plan["limitPrice"]
+    out["limitPrice"] = price
+    out["riskNotional"] = plan["shares"] * price
+    out["fee"] = _fee_from_plan(out, plan["shares"], price)
+    return out
+
+
 def _late_direction_plan(
     up_book: dict,
     down_book: dict,
@@ -863,6 +884,8 @@ def _late_direction_plan(
                 targetShares=shares,
             )
         return None
+    # 上限（<= 0.92）用判斷價比對；緩衝加在比對之後，最差成交價可到 max + extra_ticks。
+    plan = _aggressive_buy_plan(plan, book, LATE_DIRECTION_EXTRA_TICKS)
     plan["_deltaPct"] = delta_pct
     plan["_signalSource"] = signal_source
     plan["_signalObservedAt"] = signal_observed_at
@@ -906,10 +929,44 @@ async def _try_late_direction_entry(
         f"剩餘={remaining_seconds:.1f}s"
     )
     result = await _enter_position(slug, plan, dry_run)
+    if result == "not_filled":
+        result = await _retry_direction_entry_with_fresh_book(slug, dry_run)
     if result == "filled":
         live_state["position"]["strategy"] = "late_direction"
         save_live_state()
     return result == "filled"
+
+
+async def _retry_direction_entry_with_fresh_book(slug: str, dry_run: bool) -> str:
+    """FOK 被拒（書已移走）→ 用最新 WS 書價重算一次計畫再送，最多一次；仍在進場秒數內才試。"""
+    if not LATE_DIRECTION_RETRY_ON_REJECT or live_state.get("position") is not None:
+        return "not_filled"
+    market = sim.state.get("market") or {}
+    if market.get("slug") != slug:
+        return "not_filled"
+    remaining = max(0.0, float(sim.state.get("windowEndsAt") or 0) / 1000 - sim.real_now())
+    if remaining < sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:
+        record_live_window_diagnostic(slug, "direction_retry_too_late", remainingSeconds=remaining)
+        return "not_filled"
+    up_book, down_book = sim.state.get("upBook"), sim.state.get("downBook")
+    if not up_book or not down_book:
+        return "not_filled"
+    cash = _strategy_cash_sync(dry_run)
+    if cash is None:
+        return "not_filled"
+    shares, budget = _target_pair_order(cash)
+    if budget < 1.0 or shares < 1.0:
+        return "not_filled"
+    plan = _late_direction_plan(up_book, down_book, remaining, shares, diagnostic_slug=slug)
+    if not plan:
+        return "not_filled"
+    log.info(
+        f"[LIVE] 方向性 FOK 被拒，用最新書價重送一次：{plan['side']} limit=${plan['limitPrice']:.3f} "
+        f"shares={plan['shares']:.0f} 剩餘={remaining:.1f}s"
+    )
+    record_live_window_diagnostic(slug, "direction_retry_with_fresh_book", selectedSide=plan["side"],
+                                  directionLimitPrice=plan["limitPrice"], remainingSeconds=remaining)
+    return await _enter_position(slug, plan, dry_run)
 
 
 def _single_leg_entry_plan(
@@ -2922,6 +2979,8 @@ async def _run_ws_late_direction_entry(
             f"Δ={plan['_deltaPct']:+.3f}% age={plan['_signalAgeSeconds']:.3f}s（WS 即時觸發）"
         )
         result = await _enter_position(slug, plan, dry_run)
+        if result == "not_filled":
+            result = await _retry_direction_entry_with_fresh_book(slug, dry_run)
         if result == "filled":
             live_state["position"]["strategy"] = "late_direction"
             save_live_state()

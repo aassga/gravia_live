@@ -970,6 +970,44 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["side"], "Down")
         self.assertEqual(plan["_signalSource"], expected_source)
 
+    async def test_direction_plan_adds_extra_ticks_and_retries_with_fresh_book(self):
+        # 2026-09-16：方向性 FOK 限價 = 判斷價 + 3 tick；FOK 被拒後用最新書價重送一次
+        self._set_chainlink_signal(opening=100.0, current=99.5)
+        up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 100}], "bids": [{"price": 0.97, "size": 100}]}
+        down_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.53, "size": 100}], "bids": [{"price": 0.52, "size": 100}]})
+        with patch.object(strategy, "LATE_DIRECTION_EXTRA_TICKS", 3):
+            plan = strategy._late_direction_plan(up_book, down_book, 5.0, 10.0)
+        self.assertIsNotNone(plan)
+        self.assertAlmostEqual(plan["limitPrice"], plan["baseLimitPrice"] + 0.03, places=6)
+        self.assertAlmostEqual(plan["riskNotional"], plan["shares"] * plan["limitPrice"], places=6)
+        with patch.object(strategy, "LATE_DIRECTION_EXTRA_TICKS", 0):
+            plain = strategy._late_direction_plan(up_book, down_book, 5.0, 10.0)
+        self.assertNotIn("baseLimitPrice", plain)
+        # 重送：用 sim.state 的最新書重算後再送一次
+        strategy.sim.state["market"] = {"slug": "btc-window", "outcomes": json.dumps(["Up", "Down"]), "clobTokenIds": json.dumps(["u", "d"])}
+        strategy.sim.state["windowEndsAt"] = (strategy.sim.real_now() + 8) * 1000
+        strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up_book, down_book
+        strategy.live_state["position"] = None
+        calls = []
+
+        async def fake_enter(slug, plan, dry_run):
+            calls.append(plan["limitPrice"])
+            return "filled"
+
+        with (
+            patch.object(strategy, "_enter_position", fake_enter),
+            patch.object(strategy, "_strategy_cash_sync", lambda dry: 100.0),
+            patch.object(strategy, "LATE_DIRECTION_RETRY_ON_REJECT", True),
+            patch.object(strategy, "LATE_DIRECTION_EXTRA_TICKS", 3),
+        ):
+            self.assertEqual(await strategy._retry_direction_entry_with_fresh_book("btc-window", True), "filled")
+            self.assertEqual(len(calls), 1)
+            self.assertAlmostEqual(calls[0], plan["limitPrice"], places=6)
+            # 剩餘秒數不足就不重送
+            strategy.sim.state["windowEndsAt"] = (strategy.sim.real_now() + 1) * 1000
+            self.assertEqual(await strategy._retry_direction_entry_with_fresh_book("btc-window", True), "not_filled")
+            self.assertEqual(len(calls), 1)
+
     def test_direct_pair_checks_worst_case_limit_and_fees(self):
         up_book = {
             "tickSize": 0.01,
