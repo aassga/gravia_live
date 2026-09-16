@@ -364,7 +364,8 @@ function onData(d){
 }
 
 function connect(){
-  ws = new WebSocket('ws://localhost:8767');
+  // 2026-09-17 多實盤：?port=8768 看第二個實盤
+  ws = new WebSocket('ws://localhost:' + ((new URLSearchParams(location.search).get('port')) || '8767'));
   ws.onmessage = (ev) => {
     try{ onData(JSON.parse(ev.data)); }catch(e){}
   };

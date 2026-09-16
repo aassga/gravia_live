@@ -45,7 +45,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("polymarket_live_strategy")
 
 POLL_INTERVAL = 3
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_live_strategy_state.json")
+# 2026-09-17 多實盤：第二個實盤進程用 POLY_LIVE_STATE_FILE／POLY_LIVE_ENV_FILE 指到自己的檔案。
+STATE_FILE = os.environ.get("POLY_LIVE_STATE_FILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_live_strategy_state.json")
+# 同一錢包的其他實盤進程的狀態檔（逗號分隔）：算「總資產」時要把它們在場的部位成本加回來。
+PEER_STATE_FILES = [p.strip() for p in os.environ.get("POLY_LIVE_PEER_STATE_FILES", "").split(",") if p.strip()]
+# 每注比例的基準：cash（現金，原本行為）或 equity（現金＋所有實盤在場部位成本＝總資產；算法 B）。
+SIZING_MODE = os.environ.get("POLY_LIVE_SIZING_MODE", "cash").strip().lower()
 
 STAKE_PCT = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
 STRATEGY_ARMED = os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
@@ -54,7 +59,7 @@ REAL_EXECUTION_ENABLED = live.LIVE_TRADING and STRATEGY_ARMED and not live.VALID
 # A non-empty ID arms a one-shot gate for the first new REAL trade. The ID makes
 # the gate survive process restarts without accidentally re-arming an old run.
 FIRST_TRADE_GUARD_ID = os.environ.get("POLY_FIRST_TRADE_GUARD_ID", "").strip()
-ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+ENV_FILE = os.environ.get("POLY_LIVE_ENV_FILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 _LATE_DIRECTION_REQUESTED = os.environ.get("POLY_ENABLE_LATE_DIRECTION", "false").strip().lower() == "true"
 MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
@@ -1201,9 +1206,41 @@ async def _try_late_favorite_entry(
     return result == "filled"
 
 
+def _open_positions_cost() -> float:
+    """自己＋同錢包其他實盤進程目前在場（未結算）的部位成本；DRY-RUN 部位不算。"""
+    total = 0.0
+    own = live_state.get("position")
+    if own and not own.get("dryRun", True):
+        total += _position_paid_cost(own)
+    for pos in live_state.get("pendingSettlements") or []:
+        if not pos.get("dryRun", True):
+            total += _position_paid_cost(pos)
+    for path in PEER_STATE_FILES:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                st = json.load(f)
+        except Exception:
+            continue
+        for pos in [st.get("position")] + list(st.get("pendingSettlements") or []):
+            if pos and not pos.get("dryRun", True):
+                total += _position_paid_cost(pos)
+    return total
+
+
 def _target_pair_order(cash: float) -> tuple[float, float]:
     """跟模擬版共用同一個計算函式（sim.target_pair_order），只是帶入真實版自己的
-    下注比例／資金上限／保留額——公式本身跟模擬版保證一致，不會各寫一份長歪。"""
+    下注比例／資金上限／保留額——公式本身跟模擬版保證一致，不會各寫一份長歪。
+    2026-09-17 SIZING_MODE=equity（算法 B）：比例的基準是「現金＋所有實盤在場部位成本」，
+    讓兩個各 30% 的策略都拿到完整 30%；但預算仍不能超過手上現金。"""
+    if SIZING_MODE == "equity" and not (live_state.get("runtimeDryRun") or not REAL_EXECUTION_ENABLED):
+        base = cash + _open_positions_cost()
+        shares, budget = sim.target_pair_order(base, STAKE_PCT, LOCK_MAX_SUM, MAX_PAIR_BUDGET_USD, MIN_CASH_RESERVE_USD)
+        affordable = max(0.0, cash - MIN_CASH_RESERVE_USD)
+        if budget > affordable:
+            budget = affordable
+            per_share = LOCK_MAX_SUM + 2 * sim.SIM_TAKER_FEE_RATE * 0.25
+            shares = float((Decimal(str(budget)) / Decimal(str(per_share))).to_integral_value(rounding=ROUND_DOWN)) if budget > 0 else 0.0
+        return shares, budget
     return sim.target_pair_order(cash, STAKE_PCT, LOCK_MAX_SUM, MAX_PAIR_BUDGET_USD, MIN_CASH_RESERVE_USD)
 
 

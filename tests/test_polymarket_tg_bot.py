@@ -98,9 +98,17 @@ class TelegramBotTests(unittest.TestCase):
             self.assertEqual(text.count("POLY_STRATEGY_ARMED="), 1)
             bot.write_env_flag("POLY_NEW_FLAG", "1", p)
             self.assertTrue(open(p, encoding="utf-8").read().endswith("POLY_NEW_FLAG=1\n"))
-        self.assertEqual(bot.live_toggle_keyboard(True)[0][0]["callback_data"], "live:dry")
-        self.assertEqual(bot.live_toggle_keyboard(False)[0][0]["callback_data"], "live:real")
-        self.assertEqual(bot.live_confirm_keyboard("real")[0][0]["callback_data"], "live:real:confirm")
+        self.assertEqual(bot.live_toggle_keyboard(True)[0][0]["callback_data"], "live:0:dry")
+        self.assertEqual(bot.live_toggle_keyboard(False, 1)[0][0]["callback_data"], "live:1:real")
+        self.assertEqual(bot.live_confirm_keyboard("real", 1)[0][0]["callback_data"], "live:1:real:confirm")
+        self.assertEqual(len(bot.LIVE_INSTANCES), 1)                       # 沒設 TG_LIVE_INSTANCES → 單實盤
+        os.environ["TG_LIVE_INSTANCES"] = "實盤A|ws://a|/tmp/a.env|gravia.service gravia-status.service|/tmp/a.json;實盤B|ws://b|/tmp/b.env|gravia-live2.service|/tmp/b.json"
+        try:
+            insts = bot._parse_live_instances()
+        finally:
+            del os.environ["TG_LIVE_INSTANCES"]
+        self.assertEqual([i["name"] for i in insts], ["實盤A", "實盤B"])
+        self.assertEqual(insts[1]["services"], ["gravia-live2.service"])
         self.assertIn("/live", bot.HELP_TEXT)
 
     def test_sim_formatting_sorts_by_pnl(self):

@@ -28,14 +28,14 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding="utf-8")
 
 HOST = "localhost"
-PORT = 8767
+PORT = int(os.environ.get("POLY_LIVE_STATUS_PORT", "8767"))   # 2026-09-17 多實盤：第二個用 8768
 POLL_INTERVAL = 10  # 真實帳戶查詢，別抓太快，10 秒一次就夠
 
 # 跟 polymarket_server.py 用同一個環境變數名稱，同一台機器上兩支程式回報一致的地區標籤。
 SERVER_REGION = os.environ.get("SERVER_REGION", "未設定地區")
 
-BASELINE_FILE = os.path.join(os.path.dirname(__file__), "polymarket_live_baseline.json")
-STRATEGY_STATE_FILE = os.path.join(os.path.dirname(__file__), "polymarket_live_strategy_state.json")
+BASELINE_FILE = os.environ.get("POLY_LIVE_BASELINE_FILE") or os.path.join(os.path.dirname(__file__), "polymarket_live_baseline.json")
+STRATEGY_STATE_FILE = os.environ.get("POLY_LIVE_STATE_FILE") or os.path.join(os.path.dirname(__file__), "polymarket_live_strategy_state.json")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("polymarket_live_status")

@@ -36,6 +36,27 @@ ALLOWED_USER_IDS = {
 }
 LIVE_WS = os.environ.get("TG_LIVE_STATUS_WS", "ws://127.0.0.1:8767")
 SIM_WS = os.environ.get("TG_SIM_STATUS_WS", "ws://127.0.0.1:8766")
+# 2026-09-17 多實盤：TG_LIVE_INSTANCES="名稱|狀態WS|env檔|要重啟的服務(空白分隔)|狀態檔;名稱|..."
+# 沒設就只有一個實盤（原本的 LIVE_WS／.env／gravia.service）。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _parse_live_instances() -> list[dict]:
+    raw = os.environ.get("TG_LIVE_INSTANCES", "").strip()
+    if not raw:
+        return [{"name": "實盤", "ws": LIVE_WS, "env": os.path.join(_HERE, ".env"),
+                 "services": ["gravia.service", "gravia-status.service"],
+                 "state": os.path.join(_HERE, "polymarket_live_strategy_state.json")}]
+    out = []
+    for chunk in raw.split(";"):
+        parts = [p.strip() for p in chunk.split("|")]
+        if len(parts) < 5:
+            continue
+        out.append({"name": parts[0], "ws": parts[1], "env": parts[2], "services": parts[3].split(), "state": parts[4]})
+    return out
+
+
+LIVE_INSTANCES = _parse_live_instances()
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 TAIPEI = timezone(timedelta(hours=8))
 ALERT_POLL_SECONDS = 15.0
@@ -203,57 +224,60 @@ def write_env_flag(key: str, value: str, path: str = ENV_FILE) -> None:
     os.replace(tmp, path)
 
 
-def live_toggle_keyboard(execution_enabled: bool) -> list[list[dict]]:
+def live_toggle_keyboard(execution_enabled: bool, idx: int = 0) -> list[list[dict]]:
     if execution_enabled:
-        return [[{"text": "🔴 切換為 DRY-RUN（停止真實下單）", "callback_data": "live:dry"}]]
-    return [[{"text": "🟢 開啟真實下單（REAL）", "callback_data": "live:real"}]]
+        return [[{"text": "🔴 切換為 DRY-RUN（停止真實下單）", "callback_data": f"live:{idx}:dry"}]]
+    return [[{"text": "🟢 開啟真實下單（REAL）", "callback_data": f"live:{idx}:real"}]]
 
 
-def live_confirm_keyboard(target: str) -> list[list[dict]]:
+def live_confirm_keyboard(target: str, idx: int = 0) -> list[list[dict]]:
     label = "✅ 確認開啟真實下單" if target == "real" else "✅ 確認切換為 DRY-RUN"
-    return [[{"text": label, "callback_data": f"live:{target}:confirm"}], [{"text": "取消", "callback_data": "live:cancel"}]]
+    return [[{"text": label, "callback_data": f"live:{idx}:{target}:confirm"}], [{"text": "取消", "callback_data": "live:cancel"}]]
 
 
-def _live_position_open() -> bool:
+def _live_position_open(state_path: str = LIVE_STATE_FILE) -> bool:
     try:
-        with open(LIVE_STATE_FILE, "r", encoding="utf-8") as f:
+        with open(state_path, "r", encoding="utf-8") as f:
             st = json.load(f)
     except Exception:
         return False
     return bool(st.get("position")) or bool(st.get("pendingSettlements"))
 
 
-async def apply_live_mode(target: str) -> str:
-    """target: 'real' | 'dry'。回傳給使用者看的結果文字。"""
-    if _live_position_open():
-        return "⏸ 實盤目前有持倉或待結算，先不切換；等結算完再按一次。"
-    write_env_flag("POLY_STRATEGY_ARMED", "true" if target == "real" else "false")
+async def apply_live_mode(target: str, idx: int = 0) -> str:
+    """target: 'real' | 'dry'；idx = 第幾個實盤。回傳給使用者看的結果文字。"""
+    inst = LIVE_INSTANCES[idx] if 0 <= idx < len(LIVE_INSTANCES) else LIVE_INSTANCES[0]
+    if _live_position_open(inst["state"]):
+        return f"⏸ {inst['name']}目前有持倉或待結算，先不切換；等結算完再按一次。"
+    write_env_flag("POLY_STRATEGY_ARMED", "true" if target == "real" else "false", inst["env"])
     proc = await asyncio.create_subprocess_exec(
-        "sudo", "-n", "systemctl", "restart", "gravia.service", "gravia-status.service",
+        "sudo", "-n", "systemctl", "restart", *inst["services"],
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     out, _ = await asyncio.wait_for(proc.communicate(), 90)
+    mode = "REAL" if target == "real" else "DRY-RUN"
     if proc.returncode != 0:
-        return f"⚠️ .env 已改為 {'REAL' if target == 'real' else 'DRY-RUN'}，但重啟失敗（{proc.returncode}）：{(out or b'').decode(errors='replace')[:300]}"
-    return ("🟢 已開啟真實下單（REAL），服務已重啟。" if target == "real" else "🔴 已切換為 DRY-RUN，服務已重啟。")
+        return f"⚠️ {inst['name']} 的 env 已改為 {mode}，但重啟失敗（{proc.returncode}）：{(out or b'').decode(errors='replace')[:300]}"
+    return (f"🟢 {inst['name']}已開啟真實下單（REAL），服務已重啟。" if target == "real" else f"🔴 {inst['name']}已切換為 DRY-RUN，服務已重啟。")
 
 
 async def send_live_menu(client: httpx.AsyncClient, chat_id: int) -> None:
-    try:
-        live = await fetch_snapshot(LIVE_WS)
-    except Exception as exc:
-        await tg_send(client, chat_id, f"⚠️ 讀不到實盤狀態（{exc.__class__.__name__}）。")
-        return
-    enabled = bool(live.get("strategyExecutionEnabled"))
-    cfg = live.get("strategyConfig") or {}
-    pos = (live.get("strategyState") or {}).get("position")
-    text = (f"實盤目前：{'🟢 REAL 真實下單' if enabled else '🔴 DRY-RUN'}\n"
-            f"策略：{cfg.get('label') or '—'}\n"
-            f"部位：{'持倉中（切換要等結算）' if pos else '空手'}")
-    try:
-        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": text,
-                                                        "reply_markup": {"inline_keyboard": live_toggle_keyboard(enabled)}})
-    except Exception as exc:
-        log.warning(f"sendMessage(live menu) failed: {exc}")
+    for idx, inst in enumerate(LIVE_INSTANCES):
+        try:
+            live = await fetch_snapshot(inst["ws"])
+        except Exception as exc:
+            await tg_send(client, chat_id, f"⚠️ 讀不到{inst['name']}狀態（{exc.__class__.__name__}）。")
+            continue
+        enabled = bool(live.get("strategyExecutionEnabled"))
+        cfg = live.get("strategyConfig") or {}
+        pos = (live.get("strategyState") or {}).get("position")
+        text = (f"{inst['name']}目前：{'🟢 REAL 真實下單' if enabled else '🔴 DRY-RUN'}\n"
+                f"策略：{cfg.get('label') or '—'}\n"
+                f"部位：{'持倉中（切換要等結算）' if pos else '空手'}")
+        try:
+            await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": text,
+                                                            "reply_markup": {"inline_keyboard": live_toggle_keyboard(enabled, idx)}})
+        except Exception as exc:
+            log.warning(f"sendMessage(live menu) failed: {exc}")
 
 REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "weekly")
 _scan_running = {"v": False}
@@ -307,6 +331,19 @@ async def run_scan_in_background(client: httpx.AsyncClient, chat_id: int, hours:
         _scan_running["v"] = False
 
 
+async def _for_each_live(fmt) -> str:
+    """多實盤：每個實盤各跑一次格式化，前面加名稱；單實盤不加標題。"""
+    if len(LIVE_INSTANCES) == 1:
+        return fmt(await fetch_snapshot(LIVE_INSTANCES[0]["ws"]))
+    out = []
+    for inst in LIVE_INSTANCES:
+        try:
+            out.append(f"【{inst['name']}】\n" + fmt(await fetch_snapshot(inst["ws"])))
+        except Exception as exc:
+            out.append(f"【{inst['name']}】\n⚠️ 讀不到狀態（{exc.__class__.__name__}）")
+    return "\n\n".join(out)
+
+
 async def handle_command(text: str) -> str:
     parts = (text or "").strip().split()
     if not parts:
@@ -314,12 +351,12 @@ async def handle_command(text: str) -> str:
     cmd = parts[0].split("@")[0].lower()
     try:
         if cmd in ("/status", "/start"):
-            return format_status(await fetch_snapshot(LIVE_WS))
+            return await _for_each_live(format_status)
         if cmd == "/pnl":
-            return format_pnl(await fetch_snapshot(LIVE_WS))
+            return await _for_each_live(format_pnl)
         if cmd == "/trades":
             limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 10
-            return format_trades(await fetch_snapshot(LIVE_WS), max(1, min(limit, 30)))
+            return await _for_each_live(lambda live: format_trades(live, max(1, min(limit, 30))))
         if cmd == "/sim":
             asset = parts[1].lower() if len(parts) > 1 else None
             alias = {"eth": "eth-alt", "15m": "btc-15m", "btc15m": "btc-15m"}
@@ -369,22 +406,24 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                         continue
                     data_str = str(cq.get("data") or "")
                     if data_str.startswith("live:"):
-                        parts_cb = data_str.split(":")
+                        parts_cb = data_str.split(":")          # live:<idx>:<real|dry>[:confirm]
                         if data_str == "live:cancel":
                             await tg_send(client, chat_id, "已取消。")
-                        elif len(parts_cb) == 2 and parts_cb[1] in ("real", "dry"):
-                            warn = ("⚠️ 這會用真錢下單。" if parts_cb[1] == "real" else "")
+                        elif len(parts_cb) == 3 and parts_cb[1].isdigit() and parts_cb[2] in ("real", "dry"):
+                            idx, target = int(parts_cb[1]), parts_cb[2]
+                            name = LIVE_INSTANCES[idx]["name"] if idx < len(LIVE_INSTANCES) else "實盤"
+                            warn = ("⚠️ 這會用真錢下單。" if target == "real" else "")
                             try:
                                 await client.post(f"{API}/sendMessage", json={
                                     "chat_id": chat_id,
-                                    "text": f"{warn}確定要{'開啟真實下單（REAL）' if parts_cb[1] == 'real' else '切換為 DRY-RUN'}？會重啟 gravia.service。",
-                                    "reply_markup": {"inline_keyboard": live_confirm_keyboard(parts_cb[1])}})
+                                    "text": f"{warn}確定要把{name}{'開啟真實下單（REAL）' if target == 'real' else '切換為 DRY-RUN'}？會重啟其服務。",
+                                    "reply_markup": {"inline_keyboard": live_confirm_keyboard(target, idx)}})
                             except Exception as exc:
                                 log.warning(f"sendMessage(live confirm) failed: {exc}")
-                        elif len(parts_cb) == 3 and parts_cb[2] == "confirm" and parts_cb[1] in ("real", "dry"):
-                            log.info(f"[TG] user {uid} switching live to {parts_cb[1]}")
+                        elif len(parts_cb) == 4 and parts_cb[1].isdigit() and parts_cb[3] == "confirm" and parts_cb[2] in ("real", "dry"):
+                            log.info(f"[TG] user {uid} switching live#{parts_cb[1]} to {parts_cb[2]}")
                             try:
-                                await tg_send(client, chat_id, await apply_live_mode(parts_cb[1]))
+                                await tg_send(client, chat_id, await apply_live_mode(parts_cb[2], int(parts_cb[1])))
                             except Exception as exc:
                                 await tg_send(client, chat_id, f"⚠️ 切換失敗：{exc}")
                         continue
@@ -442,23 +481,25 @@ def diff_alerts(prev: dict | None, cur: dict) -> list[str]:
 
 
 async def alert_loop(client: httpx.AsyncClient) -> None:
-    prev: dict | None = None
+    prev: dict[int, dict | None] = {}
     while True:
-        try:
-            cur = await fetch_snapshot(LIVE_WS)
-            for text in diff_alerts(prev, cur):
-                for uid in ALLOWED_USER_IDS:
-                    await tg_send(client, uid, text)
-            prev = cur
-        except Exception as exc:
-            log.warning(f"alert snapshot failed: {exc}")
+        for idx, inst in enumerate(LIVE_INSTANCES):
+            try:
+                cur = await fetch_snapshot(inst["ws"])
+                prefix = f"【{inst['name']}】" if len(LIVE_INSTANCES) > 1 else ""
+                for text in diff_alerts(prev.get(idx), cur):
+                    for uid in ALLOWED_USER_IDS:
+                        await tg_send(client, uid, prefix + text)
+                prev[idx] = cur
+            except Exception as exc:
+                log.warning(f"alert snapshot failed ({inst['name']}): {exc}")
         await asyncio.sleep(ALERT_POLL_SECONDS)
 
 
 async def main() -> None:
     if not BOT_TOKEN or not ALLOWED_USER_IDS:
         raise SystemExit("需要 TG_BOT_TOKEN 與 TG_ALLOWED_USER_IDS")
-    log.info(f"TG bot 啟動：白名單 {sorted(ALLOWED_USER_IDS)} · live={LIVE_WS} · sim={SIM_WS}")
+    log.info(f"TG bot 啟動：白名單 {sorted(ALLOWED_USER_IDS)} · live={[i['name'] + '@' + i['ws'] for i in LIVE_INSTANCES]} · sim={SIM_WS}")
     async with httpx.AsyncClient() as client:
         await asyncio.gather(poll_updates(client), alert_loop(client))
 

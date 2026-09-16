@@ -32,3 +32,12 @@ polymarket_altcoins.err.log
 # 測試快取
 tests/__pycache__/
 .pytest_cache/
+
+# 第二個實盤進程的執行期檔案
+.env.live2
+polymarket_live2_state.json
+polymarket_live2_state.json.tmp
+polymarket_live2_baseline.json
+polymarket_sim_live2.sqlite3
+polymarket_sim_live2.sqlite3-wal
+polymarket_sim_live2.sqlite3-shm

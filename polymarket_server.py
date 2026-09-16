@@ -338,6 +338,10 @@ def _load_json_file(path: str, default):
 
 
 _AUTO_VARIANT_SPECS = [s for s in (_load_json_file(SIM_AUTO_VARIANTS_FILE, []) or []) if isinstance(s, dict)]
+# 2026-09-17 多實盤：POLY_SIM_ONLY_VARIANTS 有設時，自動變體只保留在清單內的，也不為其他資產自動開資產。
+_SIM_ONLY_VARIANT_IDS = {v.strip() for v in os.environ.get("POLY_SIM_ONLY_VARIANTS", "").split(",") if v.strip()}
+if _SIM_ONLY_VARIANT_IDS:
+    _AUTO_VARIANT_SPECS = [s for s in _AUTO_VARIANT_SPECS if s.get("id") in _SIM_ONLY_VARIANT_IDS]
 _AUTO_DISABLED_IDS = {str(x) for x in (_load_json_file(SIM_DISABLED_VARIANTS_FILE, []) or []) if x}
 for _spec in _AUTO_VARIANT_SPECS:
     _a = _spec.get("asset") or {}
@@ -791,6 +795,12 @@ _SIM_DISABLED_VARIANT_IDS = {
     if value.strip()
 } | _AUTO_DISABLED_IDS
 AB_VARIANTS = [v for v in AB_VARIANTS if v["id"] not in _SIM_DISABLED_VARIANT_IDS]
+# 2026-09-17 多實盤：第二個實盤進程用 POLY_SIM_ONLY_VARIANTS=<id,...> 只保留自己要用的變體，
+# 不重複跑整個模擬盤（模擬盤仍由主進程負責）。
+if _SIM_ONLY_VARIANT_IDS:
+    AB_VARIANTS = [v for v in AB_VARIANTS if v["id"] in _SIM_ONLY_VARIANT_IDS]
+    if not AB_VARIANTS:
+        raise RuntimeError(f"POLY_SIM_ONLY_VARIANTS 沒有選到任何已知變體：{sorted(_SIM_ONLY_VARIANT_IDS)}")
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
 MARKET_MAKER_VARIANTS = [v for v in AB_VARIANTS if v.get("marketMakerOnly")]
 

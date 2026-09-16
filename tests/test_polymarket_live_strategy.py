@@ -956,6 +956,33 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(await strategy._prewarm_with_retry(["a", "b"], "cond"))
 
+    def test_equity_sizing_adds_peer_positions_but_caps_at_cash(self):
+        # 2026-09-17 算法 B：30% 的基準 = 現金 + 自己與同錢包其他實盤在場部位成本；預算不超過現金
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            peer = os.path.join(d, "peer_state.json")
+            with open(peer, "w", encoding="utf-8") as f:
+                json.dump({"position": {"entryNotional": 12.0, "entryFee": 0.6, "dryRun": False}, "pendingSettlements": []}, f)
+            strategy.live_state["position"] = None
+            strategy.live_state["pendingSettlements"] = []
+            with (
+                patch.object(strategy, "SIZING_MODE", "equity"),
+                patch.object(strategy, "PEER_STATE_FILES", [peer]),
+                patch.object(strategy, "REAL_EXECUTION_ENABLED", True),
+                patch.object(strategy, "STAKE_PCT", 30.0),
+                patch.object(strategy, "MIN_CASH_RESERVE_USD", 0.0),
+            ):
+                strategy.live_state["runtimeDryRun"] = False
+                self.assertAlmostEqual(strategy._open_positions_cost(), 12.6, places=6)
+                shares, budget = strategy._target_pair_order(29.4)          # 現金 29.4 + 對方 12.6 = 42 → 30% = 12.6
+                self.assertAlmostEqual(budget, 12.6, places=6)
+                shares2, budget2 = strategy._target_pair_order(5.0)         # 現金只剩 5 → 預算封頂在 5
+                self.assertAlmostEqual(budget2, 5.0, places=6)
+                self.assertLess(shares2, shares)
+            with patch.object(strategy, "SIZING_MODE", "cash"), patch.object(strategy, "STAKE_PCT", 30.0), patch.object(strategy, "MIN_CASH_RESERVE_USD", 0.0):
+                _, budget3 = strategy._target_pair_order(29.4)              # 原本算法：30% × 現金
+                self.assertAlmostEqual(budget3, 8.82, places=6)
+
     def test_live_direction_stop_plan_respects_entry_price_guard(self):
         # 2026-09-17：方向性單腿停損 0.60；進場價 <= 0.60 不設；觸發後用積極賣價（多讓 3 tick）
         up_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.56, "size": 100}], "bids": [{"price": 0.55, "size": 100}]})
