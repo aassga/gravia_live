@@ -5,7 +5,7 @@
 每輪：
   1. 探測 Polymarket 上所有 <幣>-updown-<週期> 系列，各掃最近 24 小時的公開成交。
   2. 在「最後 N 秒買領先方」家族內找粗估總收益為正、樣本夠的規則（買價 × 進場秒數），
-     依總收益排序（使用者要求：主要看總收益），每輪最多新增 MAX_ADD_PER_RUN 個、每市場最多 1 個到模擬盤
+     依總收益排序（使用者要求：主要看總收益），每輪最多新增 MAX_ADD_PER_RUN 個、每市場最多 MAX_ADD_PER_MARKET 個到模擬盤
      （寫 sim_auto_variants.json，polymarket_server.py 啟動時讀入）。
   3. 模擬盤累計虧損 <= -DISABLE_LOSS_USD 的變體寫進 sim_disabled_variants.json（只停用，歷史保留）。
   4. 有任何變更且實盤無持倉 → 重啟 gravia.service 讓變更生效；有持倉就留到下一輪。
@@ -40,8 +40,9 @@ LIVE_STATE_FILE = os.path.join(HERE, "polymarket_live_strategy_state.json")
 REPORT_DIR = os.path.join(HERE, "reports", "autopilot")
 SIM_WS = os.environ.get("TG_SIM_STATUS_WS", "ws://127.0.0.1:8766")
 
-MAX_ADD_PER_RUN = 3
-MAX_ADD_PER_MARKET = 1
+# 2026-09-16 依使用者要求：每市場不再限 1 組（改 3），每輪總數放寬到 6。
+MAX_ADD_PER_RUN = 6
+MAX_ADD_PER_MARKET = 3
 DISABLE_LOSS_USD = 350.0
 SCAN_HOURS = 24.0
 
