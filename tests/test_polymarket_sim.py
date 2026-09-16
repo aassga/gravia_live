@@ -312,7 +312,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         d = sim.AB_VARIANT_BY_ID["btc-last30-90-092-095"]
         self.assertEqual((d["favoriteWindowSeconds"], d["favoriteMinRemaining"], d["favoriteMinPrice"], d["favoriteMaxPrice"], d["favoriteStopLossPrice"]), (90.0, 30.0, 0.92, 0.95, 0.85))
         c = sim.AB_VARIANT_BY_ID["btc-last10-30-092-095"]
-        self.assertEqual((c["favoriteWindowSeconds"], c["favoriteMinRemaining"], c["favoriteMinPrice"], c["favoriteMaxPrice"], c["favoriteStopLossPrice"]), (30.0, 10.0, 0.92, 0.95, None))
+        self.assertEqual((c["favoriteWindowSeconds"], c["favoriteMinRemaining"], c["favoriteMinPrice"], c["favoriteMaxPrice"], c["favoriteStopLossPrice"]), (30.0, 10.0, 0.92, 0.95, 0.85))
         # (2) 只在剩 30～45 秒進：剩 50 秒不進、剩 40 秒進
         up, down = self._favorite_books(up_ask=0.90, down_ask=0.11)
         sim.simulate_trading("btc-last30-45-088-092", "btc-window", up, down, 50.0, None)
