@@ -1188,9 +1188,17 @@ def estimate_fair_up(asset_id: str) -> dict | None:
     if not reference or reference <= 0:
         return None
 
-    closes = [float(k["c"]) for k in klines[-30:] if float(k.get("c", 0)) > 0]
-    returns = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
-    sigma_60s = pstdev(returns) if len(returns) >= 5 else 0.0
+    # 2026-09-17 CPU 優化：波動率只在 K 線變動時重算（每分鐘一次），Binance 每個 tick 不再重跑 pstdev。
+    last = klines[-1]
+    cache_key = (len(klines), last.get("t"), last.get("c"))
+    cache = ms.get("_sigmaCache")
+    if cache and cache.get("key") == cache_key:
+        sigma_60s = cache["sigma60"]
+    else:
+        closes = [float(k["c"]) for k in klines[-30:] if float(k.get("c", 0)) > 0]
+        returns = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
+        sigma_60s = pstdev(returns) if len(returns) >= 5 else 0.0
+        ms["_sigmaCache"] = {"key": cache_key, "sigma60": sigma_60s}
     sigma_per_second = max(SIM_MIN_SIGMA_PER_SECOND.get(asset_id, 0.00003), sigma_60s / math.sqrt(60))
     remaining = max(1.0, ms["windowEndsAt"] / 1000 - real_now())
     # TWAP 會平滑最後一段價格，加入半個資料窗作為保守的有效預測期。
@@ -1721,6 +1729,22 @@ async def chainlink_twap_loop() -> None:
         await asyncio.sleep(delay)
 
 
+# 2026-09-17 CPU 優化（py-spy：Binance tick 重跑整個模擬盤佔 70%）：
+#  (1) 每個資產最多每 BINANCE_SIM_TICK_MIN_INTERVAL 秒跑一次模擬，中間的 tick 只更新 spotPrice；
+#      間隔內最後一個 tick 會用 call_later 補跑一次，不會漏掉最新價。中價沒變也跳過。
+#  (3) 只跑真的用到現貨價／公平價的變體（鎖利、歷史混合、方向性、庫存旋轉）；買領先方家族、
+#      做市、暴跌補腿、開盤動能／反向只靠 Polymarket 訂單簿 tick 評估（原本就有）。
+BINANCE_SIM_TICK_MIN_INTERVAL = max(0.0, float(os.environ.get("POLY_BINANCE_SIM_TICK_MS", "250")) / 1000.0)
+_binance_sim_throttle: dict = {}   # aid -> {"lastRun": monotonic, "lastPrice": float, "timer": TimerHandle|None}
+
+
+def _variant_uses_spot_price(variant: dict) -> bool:
+    return not (
+        variant.get("lateFavorite") or variant.get("marketMakerOnly") or variant.get("dumpThenHedge")
+        or variant.get("openMomentum") or variant.get("openReversal")
+    )
+
+
 def _run_binance_simulation_tick(aid: str) -> None:
     ms = markets_state[aid]
     fair = estimate_fair_up(aid)
@@ -1734,7 +1758,7 @@ def _run_binance_simulation_tick(aid: str) -> None:
     up_book, down_book = ms.get("upBook"), ms.get("downBook")
     if up_book and down_book:
         for variant_id, variant in AB_VARIANT_BY_ID.items():
-            if variant["assetId"] == aid and _variant_books_are_coherent(
+            if variant["assetId"] == aid and _variant_uses_spot_price(variant) and _variant_books_are_coherent(
                 aid, variant, up_book, down_book
             ):
                 simulate_trading(
@@ -1742,6 +1766,31 @@ def _run_binance_simulation_tick(aid: str) -> None:
                     allow_early_exit=False,
                     evaluation_source="binance",
                 )
+
+
+def _throttled_binance_simulation_tick(aid: str, price: float, run) -> None:
+    """節流：間隔內只排一次補跑，價格沒變就不跑。run 是實際要執行的 callable。"""
+    st = _binance_sim_throttle.setdefault(aid, {"lastRun": 0.0, "lastPrice": None, "timer": None})
+    now = time.monotonic()
+    if st["lastPrice"] == price and st["timer"] is None:
+        return
+    elapsed = now - st["lastRun"]
+    if elapsed >= BINANCE_SIM_TICK_MIN_INTERVAL:
+        st["lastRun"], st["lastPrice"] = now, price
+        run()
+        return
+    if st["timer"] is None:
+        def fire() -> None:
+            st["timer"] = None
+            st["lastRun"] = time.monotonic()
+            st["lastPrice"] = get_binance_ws_price(next(a["binanceSymbol"] for a in ASSETS if a["id"] == aid)) or price
+            run()
+        try:
+            st["timer"] = asyncio.get_running_loop().call_later(BINANCE_SIM_TICK_MIN_INTERVAL - elapsed, fire)
+        except RuntimeError:   # 沒有事件迴圈（測試）：直接跑
+            st["timer"] = None
+            st["lastRun"], st["lastPrice"] = now, price
+            run()
 
 
 def _on_binance_price_tick(symbol: str) -> None:
@@ -1770,11 +1819,12 @@ def _on_binance_price_tick(symbol: str) -> None:
             and _notify_ws_price_listeners(ms["upTokenId"], "binance")
         )
         if live_action:
-            _defer_simulation_tick(
-                "binance", aid, lambda aid=aid: _run_binance_simulation_tick(aid)
+            _throttled_binance_simulation_tick(
+                aid, price,
+                lambda aid=aid: _defer_simulation_tick("binance", aid, lambda aid=aid: _run_binance_simulation_tick(aid)),
             )
         else:
-            _run_binance_simulation_tick(aid)
+            _throttled_binance_simulation_tick(aid, price, lambda aid=aid: _run_binance_simulation_tick(aid))
 
 
 async def fetch_outcome(session: aiohttp.ClientSession, slug: str) -> str | None:

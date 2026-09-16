@@ -947,8 +947,53 @@ class PolymarketSimulationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_binance_tick_is_throttled_and_skips_variants_without_spot_dependency(self):
+        # 2026-09-17 CPU 優化：同價不重跑、間隔內合併成一次補跑；買領先方變體不在 Binance tick 上評估
+        sim._binance_sim_throttle.clear()
+        ms = sim.markets_state["btc"]
+        ms.update({"market": {"slug": "btc-window"}, "upTokenId": None})
+        runs = []
+        with (
+            patch.object(sim, "get_binance_ws_price", side_effect=[100.0, 100.0, 100.1, 100.2]),
+            patch.object(sim, "_run_binance_simulation_tick", side_effect=lambda aid: runs.append(aid)),
+            patch.object(sim, "BINANCE_SIM_TICK_MIN_INTERVAL", 60.0),
+        ):
+            sim._on_binance_price_tick("BTCUSDT")        # 第一次：跑
+            sim._on_binance_price_tick("BTCUSDT")        # 同價：不跑
+            self.assertEqual(runs, ["btc"])
+
+            async def scenario():
+                sim._on_binance_price_tick("BTCUSDT")    # 價變、間隔內：排一次補跑
+                sim._on_binance_price_tick("BTCUSDT")    # 已排：不再排
+                self.assertEqual(runs, ["btc"])
+                self.assertIsNotNone(sim._binance_sim_throttle["btc"]["timer"])
+                sim._binance_sim_throttle["btc"]["timer"].cancel()
+            asyncio.run(scenario())
+        sim._binance_sim_throttle.clear()
+        self.assertFalse(sim._variant_uses_spot_price({"lateFavorite": True}))
+        self.assertFalse(sim._variant_uses_spot_price({"openReversal": True}))
+        self.assertTrue(sim._variant_uses_spot_price({"historicalHybrid": True, "lateDirectionOnly": True}))
+        self.assertTrue(sim._variant_uses_spot_price({"entryMaxPrice": None, "lockMaxSum": 0.95}))
+
+    def test_fair_sigma_is_cached_until_klines_change(self):
+        ms = sim.markets_state["btc"]
+        ms["market"] = {"slug": "btc-updown-5m-1000000"}
+        ms["windowEndsAt"] = (sim.real_now() + 100) * 1000
+        ms["spotPrice"] = 100.05
+        ms["klines"] = [{"t": (1_000_000 - 600 + 60 * i) * 1000, "o": 100.0 + 0.01 * i, "c": 100.0 + 0.02 * i} for i in range(12)]
+        ms.pop("_sigmaCache", None)
+        with patch.object(sim, "pstdev", wraps=sim.pstdev) as spy:
+            self.assertIsNotNone(sim.estimate_fair_up("btc"))
+            self.assertIsNotNone(sim.estimate_fair_up("btc"))
+            self.assertEqual(spy.call_count, 1)                      # 第二次用快取
+            ms["klines"] = ms["klines"] + [{"t": (1_000_000 + 120) * 1000, "o": 100.2, "c": 100.3}]
+            self.assertIsNotNone(sim.estimate_fair_up("btc"))
+            self.assertEqual(spy.call_count, 2)                      # K 線變了才重算
+        ms.pop("_sigmaCache", None)
+
     def test_live_action_runs_before_deferred_binance_simulation(self):
         events = []
+        sim._binance_sim_throttle.clear()
         ms = sim.markets_state["btc"]
         ms.update({"market": {"slug": "btc-window"}, "upTokenId": "btc-up-token"})
 
@@ -979,6 +1024,7 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_binance_tick_notifies_live_listener_immediately_for_btc(self):
         received = []
         callback = received.append
+        sim._binance_sim_throttle.clear()
         ms = sim.markets_state["btc"]
         ms["market"] = {"slug": "btc-window"}
         ms["upTokenId"] = "btc-up-token"
