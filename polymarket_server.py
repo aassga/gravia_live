@@ -764,7 +764,9 @@ _SIM_DEFAULT_DISABLED = (
     # 2026-09-15 14:25：XRP 最後 60 秒 0.88～0.95（新增後 7 筆就 -377）。
     "xrp-last60-088-095,"
     # 2026-09-16 依使用者要求：BTC 15m 暴跌後補腿（3s/-15%）、BTC 15m 最後 90～135 秒 0.88～0.92。
-    "btc-15m-dump-then-hedge,btc-15m-last30-45-088-092"
+    "btc-15m-dump-then-hedge,btc-15m-last30-45-088-092,"
+    # 2026-09-16 14:1x 依使用者要求停用累計虧損 20 以上者：SOL 10～30s、XRP 10～30s、SOL 5～30s、ETH 10～30s、XRP 30～45s。
+    "sol-last10-30-092-095,xrp-last10-30-092-095,sol-last5-30-088-092,eth-alt-last10-30-092-095,xrp-last30-45-088-092"
 )
 _SIM_DISABLED_VARIANT_IDS = {
     value.strip()
