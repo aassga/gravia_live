@@ -5,7 +5,7 @@
 每輪：
   1. 探測 Polymarket 上所有 <幣>-updown-<週期> 系列，各掃最近 24 小時的公開成交。
   2. 在「最後 N 秒買領先方」家族內找粗估總收益為正、樣本夠的規則（買價 × 進場秒數），
-     依總收益排序（使用者要求：主要看總收益），每輪最多新增 MAX_ADD_PER_RUN 個、每市場最多 MAX_ADD_PER_MARKET 個到模擬盤
+     依總收益排序（使用者要求：主要看總收益），符合條件的全部加進模擬盤（MAX_ADD_* 為 None 即不限）
      （寫 sim_auto_variants.json，polymarket_server.py 啟動時讀入）。
   3. 模擬盤累計虧損 <= -DISABLE_LOSS_USD 的變體寫進 sim_disabled_variants.json（只停用，歷史保留）。
   4. 有任何變更且實盤無持倉 → 重啟 gravia.service 讓變更生效；有持倉就留到下一輪。
@@ -40,9 +40,9 @@ LIVE_STATE_FILE = os.path.join(HERE, "polymarket_live_strategy_state.json")
 REPORT_DIR = os.path.join(HERE, "reports", "autopilot")
 SIM_WS = os.environ.get("TG_SIM_STATUS_WS", "ws://127.0.0.1:8766")
 
-# 2026-09-16 依使用者要求：每市場不再限 1 組（改 3），每輪總數放寬到 6。
-MAX_ADD_PER_RUN = 6
-MAX_ADD_PER_MARKET = 3
+# 2026-09-16 依使用者要求：不設上限——每輪把所有符合條件（總收益 > 0、n >= 100）的規則一次全加進模擬盤。
+MAX_ADD_PER_RUN = None        # None = 不限
+MAX_ADD_PER_MARKET = None     # None = 不限
 DISABLE_LOSS_USD = 350.0
 SCAN_HOURS = 24.0
 
@@ -65,17 +65,17 @@ def _save(path, data) -> None:
 # ── 純邏輯（可測試） ────────────────────────────────────────────────────────
 
 def pick_new_variants(candidates: list[dict], existing_ids: set[str], disabled_ids: set[str],
-                      max_total: int = MAX_ADD_PER_RUN, max_per_market: int = MAX_ADD_PER_MARKET) -> list[dict]:
-    """從各市場候選（已依 score 排序、合併）挑要新增的：跳過已存在／已停用，每市場最多 max_per_market。"""
+                      max_total: int | None = MAX_ADD_PER_RUN, max_per_market: int | None = MAX_ADD_PER_MARKET) -> list[dict]:
+    """從各市場候選（已依 score 排序、合併）挑要新增的：跳過已存在／已停用；上限為 None 表示不限。"""
     chosen, per_market = [], {}
     for c in sorted(candidates, key=lambda c: c["stats"]["score"], reverse=True):
         if c["id"] in existing_ids or c["id"] in disabled_ids:
             continue
-        if per_market.get(c["market"], 0) >= max_per_market:
+        if max_per_market is not None and per_market.get(c["market"], 0) >= max_per_market:
             continue
         chosen.append(c)
         per_market[c["market"]] = per_market.get(c["market"], 0) + 1
-        if len(chosen) >= max_total:
+        if max_total is not None and len(chosen) >= max_total:
             break
     return chosen
 

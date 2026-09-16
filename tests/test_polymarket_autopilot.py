@@ -43,9 +43,9 @@ class AutopilotTests(unittest.TestCase):
         ]
         chosen = ap.pick_new_variants(cands, existing_ids={"c1"}, disabled_ids={"b1"}, max_total=3, max_per_market=1)
         self.assertEqual([c["id"] for c in chosen], ["a1", "d1"])          # a2 同市場第二個、b1 已停用、c1 已存在
-        chosen = ap.pick_new_variants(cands, existing_ids={"c1"}, disabled_ids={"b1"})   # 預設：每市場 3、每輪 6
+        chosen = ap.pick_new_variants(cands, existing_ids={"c1"}, disabled_ids={"b1"})   # 預設：不限
         self.assertEqual([c["id"] for c in chosen], ["a1", "a2", "d1"])
-        self.assertEqual((ap.MAX_ADD_PER_RUN, ap.MAX_ADD_PER_MARKET), (6, 3))
+        self.assertEqual((ap.MAX_ADD_PER_RUN, ap.MAX_ADD_PER_MARKET), (None, None))
         sims = [{"id": "x", "totalPnl": -350.0, "totalTrades": 9}, {"id": "y", "totalPnl": -349.9}, {"id": "z", "totalPnl": 12}]
         self.assertEqual([d["id"] for d in ap.pick_disable(sims, set())], ["x"])
         self.assertEqual(ap.pick_disable(sims, {"x"}), [])
