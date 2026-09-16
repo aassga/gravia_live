@@ -293,8 +293,9 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_hybrid_direction_leg_has_stop_loss_060_only_when_entry_above_it(self):
         # 2026-09-17：歷史混合的方向性腿加停損 0.60；進場價 <= 0.60 的單不設
         vid = "btc-historical-hybrid"
-        self.assertEqual(sim.AB_VARIANT_BY_ID[vid]["directionStopLossPrice"], 0.60)
+        self.assertIsNone(sim.AB_VARIANT_BY_ID[vid]["directionStopLossPrice"])   # 2026-09-17 依使用者要求移除；下面用 0.60 測機制
         self._set_chainlink_signal(opening=100.0, current=100.3)
+        sim.AB_VARIANT_BY_ID[vid]["directionStopLossPrice"] = 0.60
         up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.80, "size": 100}], "bids": [{"price": 0.79, "size": 100}]})
         down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.21, "size": 100}], "bids": [{"price": 0.20, "size": 100}]})
         sim.simulate_trading(vid, "btc-window", up, down, 6.0, None)
@@ -314,6 +315,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNotNone(sim.ab_states[vid]["position"])
         sim.simulate_trading(vid, "btc-window-2", up2, down2, 3.0, None)
         self.assertIsNotNone(sim.ab_states[vid]["position"])
+        sim.AB_VARIANT_BY_ID[vid]["directionStopLossPrice"] = None
 
     def test_late_favorite_take_profit_sells_when_bid_reaches_099(self):
         # 買 Up 0.96 後 bid 到 0.99 → 獲利了結，不等結算

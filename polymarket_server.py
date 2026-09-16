@@ -440,10 +440,9 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-historical-hybrid",
             "assetId":               "btc",
-            "label":                 "BTC 歷史混合（鎖利→Chainlink T-20s、Δ≥0.01%、方向性停損 0.60）",
-            # 2026-09-17 依使用者要求：方向性那條腿加停損 0.60（持有腿保守可賣價 <= 0.60 就賣）。
-            # 只在進場價 > 停損價時啟用——T-20s 常在 0.5～0.9 進場，進場價已低於 0.60 的單不設停損。
-            "directionStopLossPrice": 0.60,
+            "label":                 "BTC 歷史混合（鎖利→Chainlink T-20s、Δ≥0.01%）",
+            # 2026-09-17：曾加方向性停損 0.60，同日依使用者要求移除（None = 不停損）；機制保留，要用再填。
+            "directionStopLossPrice": None,
             "lateDirectionWindowSeconds": 20.0,   # 2026-09-14 依使用者要求 10 → 20
             "lateDirectionMinDeltaPct":   0.01,   # 2026-09-14 依使用者要求 0.02 → 0.01
             "entryMaxPrice":         None,
