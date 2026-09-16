@@ -742,10 +742,24 @@ _append_auto_variants()
 # 2026-09-16 依使用者要求：模擬盤所有買領先方變體一律停損（原本「不停損」的也改；0.85 → 同日改 0.60），
 # 含自動駕駛加進來的；標籤同步改寫。open-reversal 等非買領先方變體沒有停損機制，不動。
 SIM_FAVORITE_STOP_LOSS_DEFAULT = 0.60   # 2026-09-16 使用者要求 0.85 → 0.60
+# 2026-09-16 16:3x 依使用者要求：當時模擬盤累計收益為負的 22 組買領先方變體，停損改為 0.80（其餘維持 0.60）。
+SIM_FAVORITE_STOP_OVERRIDES = {vid: 0.80 for vid in (
+    "doge-follow-taker,doge-last30-45-088-092,doge-last10-30-092-095,doge-auto-45-60s-098-099,eth-alt-auto-15-30s-098-099,"
+    "xrp-follow-taker,eth-alt-last20-60-092-098,sol-last60-098-hold,doge-price-triggered-favorite,btc-15m-price-triggered-favorite,"
+    "btc-15m-last120-095-099-hold,btc-15m-last60-098-hold,btc-15m-auto-90-120s-098-099,eth-alt-auto-45-60s-092-095,"
+    "btc-auto-30-45s-098-099,btc-15m-auto-30-60s-098-099,eth-alt-last30-45-088-092,btc-15m-last120-092-098-hold,"
+    "btc-auto-45-60s-088-092,xrp-price-triggered-favorite,btc-15m-auto-30-60s-092-095,eth-alt-auto-45-60s-095-098"
+).split(",")}
 for _v in AB_VARIANTS:
-    if _v.get("lateFavorite") and _v.get("favoriteStopLossPrice") is None:
+    if not _v.get("lateFavorite"):
+        continue
+    if _v.get("favoriteStopLossPrice") is None:
         _v["favoriteStopLossPrice"] = SIM_FAVORITE_STOP_LOSS_DEFAULT
         _v["label"] = _v["label"].replace("不停損", f"停損 {SIM_FAVORITE_STOP_LOSS_DEFAULT:.2f}")
+    if _v["id"] in SIM_FAVORITE_STOP_OVERRIDES:
+        _old = _v["favoriteStopLossPrice"]
+        _v["favoriteStopLossPrice"] = SIM_FAVORITE_STOP_OVERRIDES[_v["id"]]
+        _v["label"] = _v["label"].replace(f"停損 {_old:.2f}", f"停損 {_v['favoriteStopLossPrice']:.2f}")
 del _v
 # 2026-09-14 依使用者要求從模擬盤移除 btc-main（0.40/0.95）、btc-loose（0.45/0.98）、
 # btc-binance-late-direction（Binance T-10s）、btc-two-sided-maker（被動雙邊掛單，212 筆 -$62）、
