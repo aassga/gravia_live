@@ -671,6 +671,11 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
         },
     ]
     if aid == "btc-15m":
+        # 2026-09-16 依使用者要求：BTC 15m 的「最後 30～90 秒 0.92～0.95」加停損 0.85（模擬與實盤同步）。
+        for v in fam:
+            if v["id"] == "btc-15m-last10-30-092-095":
+                v["favoriteStopLossPrice"] = 0.85
+                v["label"] = "BTC 15m 最後 30～90 秒買領先方（0.92～0.95、停損 0.85）"
         fam.append(dict(common, id="btc-15m-last120-092-098-hold", label="BTC 15m 最後 120 秒買領先方（0.92～0.98、不停損）",
                         favoriteWindowSeconds=120.0, favoriteMinPrice=0.92, favoriteMaxPrice=0.98,
                         favoriteStopLossPrice=None, favoriteStableSeconds=0.0))
