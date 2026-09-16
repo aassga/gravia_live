@@ -436,7 +436,10 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-historical-hybrid",
             "assetId":               "btc",
-            "label":                 "BTC 歷史混合（鎖利→Chainlink T-20s、Δ≥0.01%）",
+            "label":                 "BTC 歷史混合（鎖利→Chainlink T-20s、Δ≥0.01%、方向性停損 0.60）",
+            # 2026-09-17 依使用者要求：方向性那條腿加停損 0.60（持有腿保守可賣價 <= 0.60 就賣）。
+            # 只在進場價 > 停損價時啟用——T-20s 常在 0.5～0.9 進場，進場價已低於 0.60 的單不設停損。
+            "directionStopLossPrice": 0.60,
             "lateDirectionWindowSeconds": 20.0,   # 2026-09-14 依使用者要求 10 → 20
             "lateDirectionMinDeltaPct":   0.01,   # 2026-09-14 依使用者要求 0.02 → 0.01
             "entryMaxPrice":         None,
@@ -3130,6 +3133,30 @@ def _try_late_favorite_stop_loss(variant_id: str, slug: str, up_book: dict, down
     save_sim_state()
 
 
+def _try_direction_stop_loss(variant_id: str, slug: str, up_book: dict, down_book: dict) -> None:
+    """方向性單腿停損：持有腿保守可賣價 <= directionStopLossPrice 就整筆賣掉；進場價 <= 停損價的單不設。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    stop_price = variant.get("directionStopLossPrice")
+    st = ab_states[variant_id]
+    pos = st["position"]
+    if stop_price is None or pos is None or pos.get("hedged"):
+        return
+    if float(pos.get("entryPrice") or 0) <= float(stop_price):
+        return
+    held_book = up_book if pos["side"] == "Up" else down_book
+    if not _simulation_direction_book_is_fresh(variant["assetId"], pos["side"], held_book):
+        return
+    fill = simulate_sell_fill(held_book, float(pos["shares"]))
+    if not fill or fill["decisionPrice"] > float(stop_price):
+        return
+    record_window_diagnostic(
+        variant_id, slug, "direction_stop_loss",
+        selectedSide=pos["side"], exitDecisionPrice=fill["decisionPrice"], directionStopLossPrice=stop_price,
+    )
+    _close_directional_position(variant_id, fill, "direction_stop_loss")
+    save_sim_state()
+
+
 def _close_directional_position(variant_id: str, fill: dict, reason: str) -> None:
     st = ab_states[variant_id]
     pos = st["position"]
@@ -3915,6 +3942,8 @@ def _simulate_trading_impl(
         # 晚進場方向性策略的核心就是抱著這個部位到結算，不補鎖利、不提早出場——
         # 進場當下對邊通常正好夠便宜可以「鎖利」，但那樣等於把方向性優勢換成
         # 極小的鎖利價差，違背了這組存在的目的。
+        # 2026-09-17：唯一例外是 directionStopLossPrice（歷史混合 0.60）。
+        _try_direction_stop_loss(variant_id, slug, up_book, down_book)
         return
 
     other_side = "Down" if pos["side"] == "Up" else "Up"
@@ -4955,6 +4984,7 @@ def build_ab_leaderboard() -> list:
             "openMaxElapsedSeconds": v.get("openMaxElapsedSeconds"),
             "openMaxPrice": v.get("openMaxPrice"),
             "openMinMovePct": v.get("openMinMovePct"),
+            "directionStopLossPrice": v.get("directionStopLossPrice"),
             "favoriteWindowSeconds": v.get("favoriteWindowSeconds"),
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),

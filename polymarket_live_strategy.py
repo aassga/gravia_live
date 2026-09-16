@@ -158,6 +158,13 @@ LATE_FAVORITE_STOP_LOSS_PRICE = (
     (float(_fav_stop_raw) if float(_fav_stop_raw) > 0 else None)
     if _fav_stop_raw else _LIVE_VARIANT.get("favoriteStopLossPrice")
 )
+# 2026-09-17：方向性單腿停損（歷史混合 0.60）。POLY_LIVE_DIRECTION_STOP_LOSS_PRICE 可覆寫，0 = 關閉。
+# 只在進場價 > 停損價時啟用。
+_dir_stop_raw = os.environ.get("POLY_LIVE_DIRECTION_STOP_LOSS_PRICE", "").strip()
+LATE_DIRECTION_STOP_LOSS_PRICE = (
+    (float(_dir_stop_raw) if float(_dir_stop_raw) > 0 else None)
+    if _dir_stop_raw else _LIVE_VARIANT.get("directionStopLossPrice")
+)
 DIRECT_PAIR_ENABLED = (
     not bool(_LIVE_VARIANT.get("lateDirectionOnly")) or bool(_LIVE_VARIANT.get("historicalHybrid"))
 ) and not LATE_FAVORITE_ENABLED
@@ -2596,7 +2603,10 @@ async def _evaluate_and_act_impl(
     if pos.get("strategy") == "late_direction":
         # 晚進場方向性進場後就抱到結算，不補鎖利、不提早出場——道理跟 sim 那邊一樣：
         # 進場當下對邊常常正好夠便宜可以「鎖利」，但那樣等於把方向性優勢換成極小的
-        # 鎖利價差，違背了這條路存在的目的。
+        # 鎖利價差，違背了這條路存在的目的。2026-09-17：唯一例外是方向性停損。
+        exit_plan = _late_direction_stop_plan(pos, up_book, down_book)
+        if exit_plan:
+            await _close_late_favorite_stop(exit_plan, bool(pos.get("dryRun", True)), slug, reason="direction_stop_loss")
         return
 
     dry_run = bool(pos.get("dryRun", True))
@@ -2887,6 +2897,12 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
             )
         return
     if pos.get("strategy") == "late_direction":
+        exit_plan = _late_direction_stop_plan(pos, up_book, down_book)
+        if exit_plan:
+            _ws_action_in_flight["v"] = True
+            asyncio.get_running_loop().create_task(
+                _run_ws_late_direction_stop(exit_plan, bool(pos.get("dryRun", True)), slug, decision_lock)
+            )
         return
 
     dry_run = bool(pos.get("dryRun", True))
@@ -3041,9 +3057,12 @@ async def _close_late_favorite_take_profit(exit_plan: dict, dry_run: bool, slug:
     await _close_position(exit_plan, dry_run, "favorite_take_profit")
 
 
-def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict) -> dict | None:
-    """領先方翻面：持有腿保守可賣價 <= LATE_FAVORITE_STOP_LOSS_PRICE 就回傳賣出計畫。"""
-    if LATE_FAVORITE_STOP_LOSS_PRICE is None:
+def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict, stop_price: float | None = None) -> dict | None:
+    """持有腿保守可賣價 <= 停損價就回傳賣出計畫（預設用 LATE_FAVORITE_STOP_LOSS_PRICE；
+    方向性單腿傳 LATE_DIRECTION_STOP_LOSS_PRICE）。"""
+    if stop_price is None:
+        stop_price = LATE_FAVORITE_STOP_LOSS_PRICE
+    if stop_price is None:
         return None
     held_book = up_book if pos["side"] == "Up" else down_book
     if not _live_direction_book_is_fresh(pos["side"], held_book):
@@ -3051,7 +3070,7 @@ def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict) -> dict 
     if not pos.get("dryRun", True) and not live.order_tokens_and_fees_are_warm([_token_id(pos["side"])]):
         return None
     exit_plan = _sell_plan(pos["side"], held_book, float(pos["shares"]))
-    if not exit_plan or exit_plan["limitPrice"] > float(LATE_FAVORITE_STOP_LOSS_PRICE):
+    if not exit_plan or exit_plan["limitPrice"] > float(stop_price):
         return None
     # 2026-09-14 依使用者要求「停損單改積極」：觸發判斷仍用保守可賣價，但送出的 FOK 限價
     # 改用緊急平倉那套（再多讓 EMERGENCY_UNWIND_EXTRA_TICKS 格 tick），避免翻面時第一張
@@ -3060,22 +3079,35 @@ def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict) -> dict 
     if aggressive:
         aggressive = dict(aggressive)
         aggressive["_triggerPrice"] = exit_plan["limitPrice"]
+        aggressive["_stopPrice"] = float(stop_price)
         return aggressive
+    exit_plan = dict(exit_plan)
+    exit_plan["_stopPrice"] = float(stop_price)
     return exit_plan
 
 
-async def _close_late_favorite_stop(exit_plan: dict, dry_run: bool, slug: str) -> None:
+def _late_direction_stop_plan(pos: dict, up_book: dict, down_book: dict) -> dict | None:
+    """方向性單腿停損：同 _late_favorite_stop_plan，但用 LATE_DIRECTION_STOP_LOSS_PRICE，且進場價 <= 停損價的單不設。"""
+    if LATE_DIRECTION_STOP_LOSS_PRICE is None or pos.get("hedged"):
+        return None
+    if float(pos.get("entryPrice") or 0) <= float(LATE_DIRECTION_STOP_LOSS_PRICE):
+        return None
+    return _late_favorite_stop_plan(pos, up_book, down_book, stop_price=LATE_DIRECTION_STOP_LOSS_PRICE)
+
+
+async def _close_late_favorite_stop(exit_plan: dict, dry_run: bool, slug: str, reason: str = "favorite_stop_loss") -> None:
+    stop_price = float(exit_plan.get("_stopPrice", LATE_FAVORITE_STOP_LOSS_PRICE or 0))
+    label = "方向性停損" if reason == "direction_stop_loss" else "領先方翻面停損"
     log.warning(
-        f"[LIVE] 領先方翻面停損 {exit_plan['side']} 可賣價=${exit_plan.get('_triggerPrice', exit_plan['limitPrice']):.3f} "
-        f"<= 停損價=${float(LATE_FAVORITE_STOP_LOSS_PRICE):.2f}，送出限價=${exit_plan['limitPrice']:.3f}"
+        f"[LIVE] {label} {exit_plan['side']} 可賣價=${exit_plan.get('_triggerPrice', exit_plan['limitPrice']):.3f} "
+        f"<= 停損價=${stop_price:.2f}，送出限價=${exit_plan['limitPrice']:.3f}"
         f"（多讓 {EMERGENCY_UNWIND_EXTRA_TICKS} tick）"
     )
     record_live_window_diagnostic(
-        slug, "favorite_stop_loss",
-        selectedSide=exit_plan["side"], exitLimitPrice=exit_plan["limitPrice"],
-        favoriteStopLossPrice=LATE_FAVORITE_STOP_LOSS_PRICE,
+        slug, reason,
+        selectedSide=exit_plan["side"], exitLimitPrice=exit_plan["limitPrice"], stopLossPrice=stop_price,
     )
-    await _close_position(exit_plan, dry_run, "favorite_stop_loss")
+    await _close_position(exit_plan, dry_run, reason)
 
 
 async def _run_ws_late_favorite_take_profit(exit_plan: dict, dry_run: bool, slug: str, decision_lock: asyncio.Lock) -> None:
@@ -3101,6 +3133,18 @@ async def _run_ws_late_favorite_stop(exit_plan: dict, dry_run: bool, slug: str, 
         if not latest:
             return
         await _close_late_favorite_stop(latest, dry_run, slug)
+
+
+async def _run_ws_late_direction_stop(exit_plan: dict, dry_run: bool, slug: str, decision_lock: asyncio.Lock) -> None:
+    _ws_action_in_flight["v"] = False
+    async with decision_lock:
+        pos = live_state.get("position")
+        if not pos or pos.get("strategy") != "late_direction" or pos.get("windowSlug") != slug:
+            return
+        latest = _late_direction_stop_plan(pos, sim.state.get("upBook") or {}, sim.state.get("downBook") or {})
+        if not latest:
+            return
+        await _close_late_favorite_stop(latest, dry_run, slug, reason="direction_stop_loss")
 
 
 async def _run_ws_hedge(hedge: dict, dry_run: bool, slug: str, decision_lock: asyncio.Lock) -> None:
@@ -3133,6 +3177,8 @@ def _log_startup_banner(mode: str) -> None:
     log.info(
         f"  active variant={LIVE_VARIANT_ID} · direct pair={'enabled' if DIRECT_PAIR_ENABLED else 'disabled'}"
     )
+    if LATE_DIRECTION_STOP_LOSS_PRICE is not None:
+        log.warning(f"  方向性單腿停損：持有腿可賣價 <= ${float(LATE_DIRECTION_STOP_LOSS_PRICE):.2f} 時 FOK 賣出（進場價 <= 停損價的單不設）")
     backend = live.signing_backend_name()
     if backend == "CoinCurveECCBackend":
         log.info(f"  signing backend={backend} (libsecp256k1 accelerated)")

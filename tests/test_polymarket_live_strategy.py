@@ -956,6 +956,21 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(await strategy._prewarm_with_retry(["a", "b"], "cond"))
 
+    def test_live_direction_stop_plan_respects_entry_price_guard(self):
+        # 2026-09-17：方向性單腿停損 0.60；進場價 <= 0.60 不設；觸發後用積極賣價（多讓 3 tick）
+        up_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.56, "size": 100}], "bids": [{"price": 0.55, "size": 100}]})
+        down_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.45, "size": 100}], "bids": [{"price": 0.44, "size": 100}]})
+        pos = {"side": "Up", "shares": 10.0, "entryPrice": 0.80, "dryRun": True, "strategy": "late_direction", "hedged": False}
+        with patch.object(strategy, "LATE_DIRECTION_STOP_LOSS_PRICE", 0.60):
+            plan = strategy._late_direction_stop_plan(pos, up_book, down_book)
+            self.assertIsNotNone(plan)
+            self.assertEqual(plan["_stopPrice"], 0.60)
+            self.assertLessEqual(plan["limitPrice"], 0.55)
+            self.assertIsNone(strategy._late_direction_stop_plan(dict(pos, entryPrice=0.55), up_book, down_book))
+            self.assertIsNone(strategy._late_direction_stop_plan(dict(pos, hedged=True), up_book, down_book))
+        with patch.object(strategy, "LATE_DIRECTION_STOP_LOSS_PRICE", None):
+            self.assertIsNone(strategy._late_direction_stop_plan(pos, up_book, down_book))
+
     def test_chainlink_late_direction_allows_original_market_disagreement_behavior(self):
         self._set_chainlink_signal(opening=100.0, current=99.5)
         expected_source = (

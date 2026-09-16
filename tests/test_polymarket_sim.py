@@ -290,6 +290,31 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading("btc-historical-hybrid", "btc-window-2", up2, down, 6.0, None)
         self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
 
+    def test_hybrid_direction_leg_has_stop_loss_060_only_when_entry_above_it(self):
+        # 2026-09-17：歷史混合的方向性腿加停損 0.60；進場價 <= 0.60 的單不設
+        vid = "btc-historical-hybrid"
+        self.assertEqual(sim.AB_VARIANT_BY_ID[vid]["directionStopLossPrice"], 0.60)
+        self._set_chainlink_signal(opening=100.0, current=100.3)
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.80, "size": 100}], "bids": [{"price": 0.79, "size": 100}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.21, "size": 100}], "bids": [{"price": 0.20, "size": 100}]})
+        sim.simulate_trading(vid, "btc-window", up, down, 6.0, None)
+        pos = sim.ab_states[vid]["position"]
+        self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up"); self.assertFalse(pos["hedged"])
+        # 持有腿可賣價掉到 0.55 → 停損賣出
+        up2 = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.56, "size": 100}], "bids": [{"price": 0.55, "size": 100}]})
+        down2 = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.45, "size": 100}], "bids": [{"price": 0.44, "size": 100}]})
+        sim.simulate_trading(vid, "btc-window", up2, down2, 3.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        self.assertEqual(sim.ab_states[vid]["trades"][0]["exitReason"], "direction_stop_loss")
+        # 進場價 0.52（<= 0.60）：即使可賣價更低也不停損
+        sim.ab_states[vid]["position"] = None
+        up3 = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.52, "size": 100}], "bids": [{"price": 0.51, "size": 100}]})
+        down3 = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.49, "size": 100}], "bids": [{"price": 0.48, "size": 100}]})
+        sim.simulate_trading(vid, "btc-window-2", up3, down3, 6.0, None)
+        self.assertIsNotNone(sim.ab_states[vid]["position"])
+        sim.simulate_trading(vid, "btc-window-2", up2, down2, 3.0, None)
+        self.assertIsNotNone(sim.ab_states[vid]["position"])
+
     def test_late_favorite_take_profit_sells_when_bid_reaches_099(self):
         # 買 Up 0.96 後 bid 到 0.99 → 獲利了結，不等結算
         self._set_chainlink_signal(opening=100.0, current=100.3)
