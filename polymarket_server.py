@@ -762,7 +762,9 @@ _SIM_DEFAULT_DISABLED = (
     # BTC 15m 跟單 T（-442）、SOL 價格觸發（-433）。
     "eth-alt-follow-taker,btc-last30-45-088-092,btc-15m-follow-taker,sol-price-triggered-favorite,"
     # 2026-09-15 14:25：XRP 最後 60 秒 0.88～0.95（新增後 7 筆就 -377）。
-    "xrp-last60-088-095"
+    "xrp-last60-088-095,"
+    # 2026-09-16 依使用者要求：BTC 15m 暴跌後補腿（3s/-15%）、BTC 15m 最後 90～135 秒 0.88～0.92。
+    "btc-15m-dump-then-hedge,btc-15m-last30-45-088-092"
 )
 _SIM_DISABLED_VARIANT_IDS = {
     value.strip()
