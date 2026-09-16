@@ -717,7 +717,8 @@ def _auto_variant_from_spec(spec: dict) -> dict | None:
     return {
         "id": str(spec["id"]), "assetId": aid,
         "label": str(spec.get("label") or f"⚙ 自動 {asset['label']} {spec['id']}"),
-        "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "lateFavorite": True, "simOnly": True, "auto": True,
+        # 2026-09-16 依使用者要求：自動變體也可供實盤選用（跟手動的買領先方家族同一套引擎）。
+        "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "lateFavorite": True, "simOnly": False, "auto": True,
         "favoriteWindowSeconds": float(spec.get("favoriteWindowSeconds", 60.0)),
         "favoriteMinRemaining": float(spec.get("favoriteMinRemaining", LATE_FAVORITE_MIN_REMAINING)),
         "favoriteMinPrice": float(spec.get("favoriteMinPrice", 0.92)),

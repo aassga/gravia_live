@@ -72,7 +72,7 @@ class AutopilotTests(unittest.TestCase):
             data = json.loads(out.stdout.strip().splitlines()[-1])
             self.assertIn("doge-15m", data["assets"])
             self.assertEqual(data["ids"], ["doge-15m-auto-30-45s-092-095"])      # eth 那個在停用清單
-            self.assertTrue(data["auto"]["lateFavorite"]); self.assertTrue(data["auto"]["simOnly"])
+            self.assertTrue(data["auto"]["lateFavorite"]); self.assertFalse(data["auto"]["simOnly"])   # 2026-09-16 開放實盤選用
             self.assertEqual(data["auto"]["favoriteMinRemaining"], 90.0)
 
     def test_render_telegram_mentions_live_untouched(self):
