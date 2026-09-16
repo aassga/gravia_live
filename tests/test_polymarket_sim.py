@@ -249,7 +249,7 @@ class PolymarketSimulationTests(unittest.TestCase):
     def test_follow_taker_buys_immediately_at_098_with_pct_sizing(self):
         vid = "btc-follow-taker"
         v = sim.AB_VARIANT_BY_ID[vid]
-        self.assertFalse(v.get("simOnly")); self.assertIsNone(v["favoriteStopLossPrice"]); self.assertIsNone(v.get("favoriteFixedShares"))
+        self.assertFalse(v.get("simOnly")); self.assertEqual(v["favoriteStopLossPrice"], 0.85); self.assertIsNone(v.get("favoriteFixedShares"))
         up, down = self._favorite_books(up_ask=0.97, down_ask=0.04)
         sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)     # 0.97 < 0.98 不進
         self.assertIsNone(sim.ab_states[vid]["position"])
@@ -306,11 +306,11 @@ class PolymarketSimulationTests(unittest.TestCase):
 
     def test_report_driven_variants_exist_with_expected_windows(self):
         a = sim.AB_VARIANT_BY_ID["btc-last60-098-hold"]
-        self.assertEqual((a["favoriteWindowSeconds"], a["favoriteMinPrice"], a["favoriteStopLossPrice"]), (60.0, 0.98, None))
+        self.assertEqual((a["favoriteWindowSeconds"], a["favoriteMinPrice"], a["favoriteStopLossPrice"]), (60.0, 0.98, 0.85))
         b = sim.AB_VARIANT_BY_ID["btc-last30-45-088-092"]
         self.assertEqual((b["favoriteWindowSeconds"], b["favoriteMinRemaining"], b["favoriteMinPrice"], b["favoriteMaxPrice"], b["favoriteStopLossPrice"]), (45.0, 30.0, 0.88, 0.92, 0.85))
         d = sim.AB_VARIANT_BY_ID["btc-last30-90-092-095"]
-        self.assertEqual((d["favoriteWindowSeconds"], d["favoriteMinRemaining"], d["favoriteMinPrice"], d["favoriteMaxPrice"], d["favoriteStopLossPrice"]), (90.0, 30.0, 0.92, 0.95, None))
+        self.assertEqual((d["favoriteWindowSeconds"], d["favoriteMinRemaining"], d["favoriteMinPrice"], d["favoriteMaxPrice"], d["favoriteStopLossPrice"]), (90.0, 30.0, 0.92, 0.95, 0.85))
         c = sim.AB_VARIANT_BY_ID["btc-last10-30-092-095"]
         self.assertEqual((c["favoriteWindowSeconds"], c["favoriteMinRemaining"], c["favoriteMinPrice"], c["favoriteMaxPrice"], c["favoriteStopLossPrice"]), (30.0, 10.0, 0.92, 0.95, None))
         # (2) 只在剩 30～45 秒進：剩 50 秒不進、剩 40 秒進
@@ -396,7 +396,7 @@ class PolymarketSimulationTests(unittest.TestCase):
         v2 = sim.AB_VARIANT_BY_ID["btc-15m-price-triggered-favorite"]
         self.assertEqual((v2["favoriteWindowSeconds"], v2["favoriteStableSeconds"], v2["favoriteStopLossPrice"]), (720.0, 10.0, 0.85))
         v3 = sim.AB_VARIANT_BY_ID["btc-15m-last120-092-098-hold"]
-        self.assertEqual((v3["favoriteWindowSeconds"], v3["favoriteMinPrice"], v3["favoriteMaxPrice"], v3["favoriteStopLossPrice"]), (120.0, 0.92, 0.98, None))
+        self.assertEqual((v3["favoriteWindowSeconds"], v3["favoriteMinPrice"], v3["favoriteMaxPrice"], v3["favoriteStopLossPrice"]), (120.0, 0.92, 0.98, 0.85))   # 2026-09-16 起全部停損 0.85
         self.assertNotIn("btc-follow-taker-x", ids)   # BTC 5m 沿用既有獨立定義，不重複生成
         self.assertEqual(sum(1 for v in sim.AB_VARIANTS if v["id"] == "btc-follow-taker"), 1)
 

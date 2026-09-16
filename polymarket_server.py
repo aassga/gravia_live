@@ -737,6 +737,15 @@ def _append_auto_variants() -> None:
 
 
 _append_auto_variants()
+
+# 2026-09-16 依使用者要求：模擬盤所有買領先方變體一律停損 0.85（原本「不停損」的也改），
+# 含自動駕駛加進來的；標籤同步改寫。open-reversal 等非買領先方變體沒有停損機制，不動。
+SIM_FAVORITE_STOP_LOSS_DEFAULT = 0.85
+for _v in AB_VARIANTS:
+    if _v.get("lateFavorite") and _v.get("favoriteStopLossPrice") is None:
+        _v["favoriteStopLossPrice"] = SIM_FAVORITE_STOP_LOSS_DEFAULT
+        _v["label"] = _v["label"].replace("不停損", f"停損 {SIM_FAVORITE_STOP_LOSS_DEFAULT:.2f}")
+del _v
 # 2026-09-14 依使用者要求從模擬盤移除 btc-main（0.40/0.95）、btc-loose（0.45/0.98）、
 # btc-binance-late-direction（Binance T-10s）、btc-two-sided-maker（被動雙邊掛單，212 筆 -$62）、
 # btc-open-momentum（開盤動能方向性）、btc-late-favorite（最後 60 秒 0.95～0.97 原版，24h -$2,022），2026-09-14 依使用者要求移除。用環境變數過濾而不是刪定義：測試仍能用這些變體
