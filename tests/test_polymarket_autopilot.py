@@ -50,7 +50,7 @@ class AutopilotTests(unittest.TestCase):
         cands2 = cands + [{"id": "e1", "market": "doge-15m", "stats": {"score": 99}}]
         chosen = ap.pick_new_variants(cands2, existing_ids=set(), disabled_ids=set())
         self.assertNotIn("e1", [c["id"] for c in chosen])
-        self.assertEqual(ap.CANDIDATE_MARKETS, {"btc", "btc-15m", "eth", "sol", "xrp"})
+        self.assertEqual(ap.CANDIDATE_MARKETS, {"btc", "btc-15m", "eth"})   # 2026-09-17 移除 SOL/XRP
         sims = [{"id": "x", "totalPnl": -350.0, "totalTrades": 9}, {"id": "y", "totalPnl": -349.9}, {"id": "z", "totalPnl": 12}]
         self.assertEqual([d["id"] for d in ap.pick_disable(sims, set())], ["x"])
         self.assertEqual(ap.pick_disable(sims, {"x"}), [])

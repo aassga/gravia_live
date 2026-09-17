@@ -47,7 +47,7 @@ DISABLE_LOSS_USD = 350.0
 SCAN_HOURS = 24.0
 # 2026-09-17 依使用者要求：只在白名單市場找候選加進模擬盤（其餘系列照掃、只進報告），
 # 避免自動駕駛把模擬盤資產越加越多拖慢實盤（曾一夜長到 11 個資產、98 組）。POLY_AUTOPILOT_MARKETS 可覆寫。
-CANDIDATE_MARKETS = {m.strip() for m in os.environ.get("POLY_AUTOPILOT_MARKETS", "btc,btc-15m,eth,sol,xrp").split(",") if m.strip()}
+CANDIDATE_MARKETS = {m.strip() for m in os.environ.get("POLY_AUTOPILOT_MARKETS", "btc,btc-15m,eth").split(",") if m.strip()}
 # 2026-09-17 依使用者要求：不再自動把新變體加進模擬盤（掃描、報告、停用虧損 >= 350 照跑）。
 # 要重新開啟：.env 設 POLY_AUTOPILOT_AUTO_ADD=true。
 AUTO_ADD_ENABLED = os.environ.get("POLY_AUTOPILOT_AUTO_ADD", "false").strip().lower() == "true"
