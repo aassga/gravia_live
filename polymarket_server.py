@@ -758,7 +758,9 @@ SIM_FAVORITE_STOP_OVERRIDES = {vid: 0.80 for vid in (
     "xrp-follow-taker,eth-alt-last20-60-092-098,sol-last60-098-hold,doge-price-triggered-favorite,btc-15m-price-triggered-favorite,"
     "btc-15m-last120-095-099-hold,btc-15m-last60-098-hold,btc-15m-auto-90-120s-098-099,eth-alt-auto-45-60s-092-095,"
     "btc-auto-30-45s-098-099,btc-15m-auto-30-60s-098-099,eth-alt-last30-45-088-092,btc-15m-last120-092-098-hold,"
-    "btc-auto-45-60s-088-092,xrp-price-triggered-favorite,btc-15m-auto-30-60s-092-095,eth-alt-auto-45-60s-095-098"
+    "btc-auto-45-60s-088-092,xrp-price-triggered-favorite,btc-15m-auto-30-60s-092-095,eth-alt-auto-45-60s-095-098,"
+    # 2026-09-17 13:5x 依使用者要求：ETH 自動 30～45 秒兩組（0.95～0.98、0.98～0.99）停損 0.60 → 0.80。
+    "eth-alt-auto-30-45s-098-099,eth-alt-auto-30-45s-095-098"
 ).split(",")}
 for _v in AB_VARIANTS:
     if not _v.get("lateFavorite"):
