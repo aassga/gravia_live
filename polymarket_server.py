@@ -706,7 +706,7 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
                 v["label"] = "BTC 15m 最後 30～90 秒買領先方（0.92～0.95、停損 0.40）"
         fam.append(dict(common, id="btc-15m-last120-092-098-hold", label="BTC 15m 最後 120 秒買領先方（0.92～0.98、不停損）",
                         favoriteWindowSeconds=120.0, favoriteMinPrice=0.92, favoriteMaxPrice=0.98,
-                        favoriteStopLossPrice=None, favoriteStableSeconds=0.0))
+                        favoriteStopLossPrice=None, favoriteStableSeconds=0.0, simOnly=False))   # 2026-09-17 開放實盤選用（實盤①）
     # 2026-09-15 依 24h 五市場掃描（以收益為主）新增的候選，各市場買價／進場秒數取掃描中每股淨利為正的區間：
     #   ETH 20～60s 0.92～0.98（各價位皆正、99.3% > 打平 95.3%）、BTC 15m ≥0.95（型態總損益 +988）、
     #   XRP 0.88～0.95（每股 +0.034，深度薄）、SOL 0.88～0.92 只在最後 30 秒（45～60s 區間為負）。
