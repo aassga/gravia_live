@@ -735,6 +735,8 @@ def _auto_variant_from_spec(spec: dict) -> dict | None:
         "favoriteMaxPrice": float(spec.get("favoriteMaxPrice", 0.99)),
         "favoriteStopLossPrice": spec.get("favoriteStopLossPrice"),
         "favoriteTakeProfitPrice": None, "favoriteStableSeconds": 0.0,
+        # 2026-09-17：noStop=true 的自動變體維持「不停損」（跟市場掃描的規則一致），不套用預設停損。
+        "noStop": bool(spec.get("noStop")),
         "addedAt": spec.get("addedAt"), "stats": spec.get("stats"),
     }
 
@@ -763,7 +765,7 @@ SIM_FAVORITE_STOP_OVERRIDES = {vid: 0.80 for vid in (
     "eth-alt-auto-30-45s-098-099,eth-alt-auto-30-45s-095-098"
 ).split(",")}
 for _v in AB_VARIANTS:
-    if not _v.get("lateFavorite"):
+    if not _v.get("lateFavorite") or _v.get("noStop"):
         continue
     if _v.get("favoriteStopLossPrice") is None:
         _v["favoriteStopLossPrice"] = SIM_FAVORITE_STOP_LOSS_DEFAULT
