@@ -385,6 +385,36 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading(vid, "btc-window-2", up, down, 295.0, None)
         self.assertIsNone(sim.ab_states[vid]["position"])
 
+    def test_wallet_follow_variant_copies_followed_wallet_buy(self):
+        # 2026-09-17：跟單錢包——看到跟單對象在本窗口 BUY，就買同一邊（ask <= 0.90）、每窗一次
+        vid = "btc-follow-0x167ef4"
+        v = sim.AB_VARIANT_BY_ID[vid]
+        wallet = v["followWallets"][0]
+        ms = sim.markets_state["btc"]
+        ms["walletSignals"] = {}
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.62, "size": 500}], "bids": [{"price": 0.61, "size": 500}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.39, "size": 500}], "bids": [{"price": 0.38, "size": 500}]})
+        sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)          # 沒訊號：不進
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        ms["walletSignals"][wallet] = {"slug": "btc-window", "side": "Up", "price": 0.60, "size": 500, "ts": int(sim.real_now()) - 8, "seenAt": sim.real_now()}
+        sim.simulate_trading(vid, "btc-window", up, down, 200.0, None)
+        pos = sim.ab_states[vid]["position"]
+        self.assertIsNotNone(pos); self.assertEqual(pos["side"], "Up"); self.assertTrue(pos["signalSource"].startswith("follow:"))
+        # 同窗口不再進第二次；別的窗口的訊號不算
+        sim.ab_states[vid]["position"] = None
+        sim.simulate_trading(vid, "btc-window", up, down, 150.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        sim.ab_states[vid]["followWindowSlug"] = None
+        sim.simulate_trading(vid, "btc-window-2", up, down, 200.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        # 對方買在 0.95 以上（超過 followMaxPrice）不跟
+        ms["walletSignals"][wallet] = {"slug": "btc-window-2", "side": "Up", "price": 0.96, "size": 100, "ts": int(sim.real_now()), "seenAt": sim.real_now()}
+        up_hi = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.96, "size": 500}], "bids": [{"price": 0.95, "size": 500}]})
+        sim.simulate_trading(vid, "btc-window-2", up_hi, down, 200.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        ms["walletSignals"] = {}
+        self.assertIn("btc-15m-follow-0x42811a", sim.AB_VARIANT_BY_ID)
+
     def test_open_reversal_buys_opposite_of_previous_window(self):
         # 2026-09-15：開盤 15～60s 買「與前一窗結果相反」那邊（0.48～0.56），前一窗結果由換窗時的中價決定
         vid = "btc-open-reversal"

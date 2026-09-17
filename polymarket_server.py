@@ -612,6 +612,15 @@ for _asset in ASSETS:
             "openMinPrice":          OPEN_REVERSAL_MIN_PRICE,
             "openMaxPrice":          OPEN_REVERSAL_MAX_PRICE,
         })
+        # 2026-09-17 依使用者要求：跟單市場上賺最多的錢包（24h 掃描）。每 WALLET_FOLLOW_POLL_SECONDS 秒查 data-api
+        # 該窗口的成交，看到跟單對象 BUY 就買同一邊（ask <= followMaxPrice）、抱到結算；每窗一次。
+        for _w in ("0x167ef4770dfd6038ce4d9dd9f76e1c70ca5c28d9",):
+            AB_VARIANTS.append({
+                "id": f"btc-follow-{_w[:8]}", "assetId": "btc",
+                "label": f"BTC 跟單錢包 {_w[:8]}（中段狙擊、24h +2,800）",
+                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": True,
+                "followWallets": [_w], "followMaxPrice": 0.90, "followMinRemaining": 5.0,
+            })
         AB_VARIANTS.append({
             "id":                    "btc-price-triggered-favorite",
             "assetId":               "btc",
@@ -680,6 +689,15 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
         },
     ]
     if aid == "btc-15m":
+        # 2026-09-17 跟單錢包（見 btc-follow-*）：0x167ef4（BTC 15m 24h +2,221）、0x42811a（中段順勢累積 +855）。
+        for _w, _note in (("0x167ef4770dfd6038ce4d9dd9f76e1c70ca5c28d9", "中段狙擊、24h +2,221"),
+                          ("0x42811a04202d471323a87c33885677187aff1a5a", "中段順勢累積、24h +855")):
+            fam.append({
+                "id": f"btc-15m-follow-{_w[:8]}", "assetId": "btc-15m",
+                "label": f"BTC 15m 跟單錢包 {_w[:8]}（{_note}）",
+                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": True,
+                "followWallets": [_w], "followMaxPrice": 0.90, "followMinRemaining": 10.0,
+            })
         # 2026-09-16 依使用者要求：BTC 15m 的「最後 30～90 秒 0.92～0.95」加停損（模擬與實盤同步；0.85 → 同日改 0.60）。
         # 2026-09-17：5 次停損有 3 次是假停損（跌破 0.60 又漲回贏），依使用者要求 0.60 → 0.40。
         for v in fam:
@@ -817,6 +835,7 @@ def _new_market_state() -> dict:
         "windowEndsAt":  None,   # 這個窗口結束時間（unix ms）
         "upPrice":       None,
         "prevWindowLeader": None,   # 上一窗口結束前的領先方（Up/Down/None），開盤反向變體用
+        "walletSignals":  {},       # 跟單：{wallet: {"slug","side","price","ts"}}，wallet_follow_loop 每幾秒更新
         "prevWindowLeaderSlug": None,
         "downPrice":     None,
         "upBook":        {"bids": [], "asks": []},
@@ -3046,6 +3065,101 @@ def _record_prev_window_leader(ms: dict, new_slug: str) -> None:
     ms["prevWindowLeaderSlug"] = new_slug
 
 
+WALLET_FOLLOW_POLL_SECONDS = 5.0
+DATA_API_TRADES = "https://data-api.polymarket.com/trades"
+
+
+def _follow_wallets_for_asset(aid: str) -> set:
+    out = set()
+    for v in AB_VARIANTS:
+        if v["assetId"] == aid:
+            out.update(w.lower() for w in v.get("followWallets") or [])
+    return out
+
+
+async def wallet_follow_loop() -> None:
+    """跟單：每 WALLET_FOLLOW_POLL_SECONDS 秒查一次各資產目前窗口的公開成交，記下跟單對象最新的 BUY。"""
+    wanted = {a["id"]: _follow_wallets_for_asset(a["id"]) for a in ASSETS}
+    wanted = {k: v for k, v in wanted.items() if v}
+    if not wanted:
+        return
+    log.info(f"[跟單] 監看 {sum(len(v) for v in wanted.values())} 個錢包：{ {k: [w[:8] for w in v] for k, v in wanted.items()} }")
+    async with aiohttp.ClientSession() as session:
+        while True:
+            for aid, wallets in wanted.items():
+                ms = markets_state.get(aid) or {}
+                market = ms.get("market") or {}
+                cond = market.get("conditionId")
+                if not cond:
+                    continue
+                try:
+                    async with session.get(DATA_API_TRADES, params={"market": cond, "limit": 200}, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                        trades = await r.json()
+                except Exception as exc:
+                    log.debug(f"[跟單:{aid}] data-api: {exc}")
+                    continue
+                if not isinstance(trades, list):
+                    continue
+                for t in trades:
+                    if not isinstance(t, dict) or t.get("side") != "BUY":
+                        continue
+                    w = str(t.get("proxyWallet") or "").lower()
+                    if w not in wallets:
+                        continue
+                    ts = int(t.get("timestamp") or 0)
+                    cur = ms["walletSignals"].get(w)
+                    if cur and cur.get("slug") == market.get("slug") and cur.get("ts", 0) >= ts:
+                        continue
+                    ms["walletSignals"][w] = {"slug": market.get("slug"), "side": t.get("outcome"), "price": float(t.get("price") or 0),
+                                              "size": float(t.get("size") or 0), "ts": ts, "seenAt": time.time()}
+            await asyncio.sleep(WALLET_FOLLOW_POLL_SECONDS)
+
+
+def _try_wallet_follow_entry(variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float) -> None:
+    variant = AB_VARIANT_BY_ID[variant_id]
+    st = ab_states[variant_id]
+    if st.get("followWindowSlug") == slug:
+        return
+    if remaining_seconds < float(variant.get("followMinRemaining", 5.0)):
+        record_window_diagnostic(variant_id, slug, "outside_entry_window", remainingSeconds=remaining_seconds)
+        return
+    ms = markets_state[variant["assetId"]]
+    sig = None
+    for w in variant.get("followWallets") or []:
+        s = (ms.get("walletSignals") or {}).get(w.lower())
+        if s and s.get("slug") == slug and s.get("side") in ("Up", "Down"):
+            sig = dict(s, wallet=w); break
+    if not sig:
+        return
+    side = sig["side"]; book = up_book if side == "Up" else down_book
+    asks = book.get("asks") or []
+    ask = float(asks[0]["price"]) if asks else None
+    max_price = float(variant.get("followMaxPrice", 0.90))
+    if ask is None or ask > max_price:
+        record_window_diagnostic(variant_id, slug, "follow_price_above_maximum", selectedSide=side, selectedAsk=ask, followMaxPrice=max_price)
+        return
+    if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
+        return
+    shares, budget = _target_order_size(variant_id)
+    if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_budget", targetShares=shares, budgetUsd=budget)
+        return
+    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    fill = simulate_buy_fill(book, shares) if shares >= float(book.get("minOrderSize", 1) or 1) else None
+    if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_ask_depth", targetShares=shares, selectedSide=side)
+        return
+    enter_position(variant_id, slug, side, fill, budget, None, None)
+    st["position"]["signalSource"] = f"follow:{sig['wallet'][:8]}"
+    st["position"]["signalReferencePrice"] = sig.get("price")
+    st["followWindowSlug"] = slug
+    record_window_diagnostic(variant_id, slug, "follow_entered", selectedSide=side, followedWallet=sig["wallet"][:8],
+                             followedPrice=sig.get("price"), lagSeconds=time.time() - sig["ts"], decisionPrice=fill["decisionPrice"])
+    save_sim_state()
+    log.info(f"[SIM:{variant_id}] 跟單 {sig['wallet'][:8]} 買 {side} 對方價 {sig.get('price'):.2f} 我方 ask=${ask:.2f} VWAP=${fill['vwap']:.4f} "
+             f"股數={fill['shares']:.2f} 延遲 {time.time() - sig['ts']:.0f}s 剩餘 {remaining_seconds:.0f}s")
+
+
 def _try_open_reversal_entry(
     variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float
 ) -> None:
@@ -3910,6 +4024,12 @@ def _simulate_trading_impl(
     if variant.get("openReversal"):
         if pos is None and remaining_seconds is not None:
             _try_open_reversal_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        return
+
+    if variant.get("followWallets"):
+        # 跟單：看到跟單對象買就跟著買同一邊、抱到結算，不補腿、不停損。
+        if pos is None and remaining_seconds is not None:
+            _try_wallet_follow_entry(variant_id, slug, up_book, down_book, remaining_seconds)
         return
 
     if variant.get("lateFavorite"):
@@ -5000,6 +5120,8 @@ def build_ab_leaderboard() -> list:
             "lateFavorite":  bool(v.get("lateFavorite")),
             "openMomentum":  bool(v.get("openMomentum")),
             "openReversal":  bool(v.get("openReversal")),
+            "followWallets": v.get("followWallets"),
+            "followMaxPrice": v.get("followMaxPrice"),
             "auto":          bool(v.get("auto")),
             "openMinElapsedSeconds": v.get("openMinElapsedSeconds"),
             "openMinPrice":  v.get("openMinPrice"),
@@ -5174,7 +5296,7 @@ async def main():
         log.info("  ⚠ --with-live 已啟用：會在這個進程裡跑真實下單邏輯（仍受 .env 雙開關控制）")
     log.info("=" * 50)
 
-    tasks = [data_fetcher(), broadcast_loop(), market_ws_loop(), binance_ws_loop()]
+    tasks = [data_fetcher(), broadcast_loop(), market_ws_loop(), binance_ws_loop(), wallet_follow_loop()]
     if any(asset.get("binanceSymbol") == "BTCUSDT" for asset in ASSETS):
         tasks.append(chainlink_twap_loop())
     if WITH_LIVE:
