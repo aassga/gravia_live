@@ -983,6 +983,41 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
                 _, budget3 = strategy._target_pair_order(29.4)              # 原本算法：30% × 現金
                 self.assertAlmostEqual(budget3, 8.82, places=6)
 
+    async def test_wallet_follow_plan_follows_signal_and_enters_once(self):
+        # 2026-09-17 實盤跟單：sim.state["walletSignals"] 有本窗口 BUY 訊號 → 買同一邊；每窗一次；ask > 0.90 不跟
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.62, "size": 500}], "bids": [{"price": 0.61, "size": 500}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.39, "size": 500}], "bids": [{"price": 0.38, "size": 500}]})
+        strategy.sim.state["walletSignals"] = {}
+        strategy.live_state["position"] = None; strategy.live_state["followWindowSlug"] = None
+        with (
+            patch.object(strategy, "FOLLOW_ENABLED", True),
+            patch.object(strategy, "FOLLOW_WALLETS", ["0xabc"]),
+            patch.object(strategy, "FOLLOW_MAX_PRICE", 0.90),
+            patch.object(strategy, "FOLLOW_MIN_REMAINING", 10.0),
+        ):
+            self.assertIsNone(strategy._wallet_follow_plan(up, down, 200.0, 100.0, "btc-window"))            # 沒訊號
+            strategy.sim.state["walletSignals"]["0xabc"] = {"slug": "btc-window", "side": "Up", "price": 0.60, "ts": time.time() - 8}
+            plan = strategy._wallet_follow_plan(up, down, 200.0, 100.0, "btc-window")
+            self.assertIsNotNone(plan); self.assertEqual(plan["side"], "Up"); self.assertLessEqual(plan["limitPrice"], 0.63)
+            self.assertTrue(plan["_signalSource"].startswith("follow:"))
+            self.assertIsNone(strategy._wallet_follow_plan(up, down, 5.0, 100.0, "btc-window"))              # 剩餘 < 10s
+            self.assertIsNone(strategy._wallet_follow_plan(up, down, 200.0, 100.0, "btc-window-2"))          # 別的窗口
+            with patch.object(strategy, "LATE_FAVORITE_ENABLED", False), patch.object(strategy, "DIRECT_PAIR_ENABLED", False), \
+                 patch.object(strategy, "ENABLE_LATE_DIRECTION", False), patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)):
+                strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up, down
+                await strategy.evaluate_and_act("btc-window", None, 200.0, None)
+                pos = strategy.live_state["position"]
+                self.assertIsNotNone(pos); self.assertEqual(pos["strategy"], "wallet_follow"); self.assertEqual(pos["side"], "Up")
+                self.assertEqual(strategy.live_state["followWindowSlug"], "btc-window")
+                # 持倉期間不補腿、不出場
+                with patch.object(strategy, "_hedge_position", AsyncMock()) as hedge, patch.object(strategy, "_close_position", AsyncMock()) as close:
+                    down_cheap = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.05, "size": 500}], "bids": [{"price": 0.04, "size": 500}]})
+                    strategy.sim.state["downBook"] = down_cheap
+                    await strategy.evaluate_and_act("btc-window", None, 100.0, None)
+                    hedge.assert_not_called(); close.assert_not_called()
+        strategy.sim.state["walletSignals"] = {}
+        strategy.live_state["position"] = None; strategy.live_state["followWindowSlug"] = None
+
     def test_favorite_entry_limit_is_capped_at_ask_plus_one_tick_and_max_price(self):
         # 2026-09-17：買領先方 FOK 限價 <= min(ask+1 tick, 0.95)；限價內深度不夠就縮股數，沒有就放棄
         book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,

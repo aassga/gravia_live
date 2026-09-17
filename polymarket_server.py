@@ -618,7 +618,7 @@ for _asset in ASSETS:
             AB_VARIANTS.append({
                 "id": f"btc-follow-{_w[:8]}", "assetId": "btc",
                 "label": f"BTC 跟單錢包 {_w[:8]}（中段狙擊、24h +2,800）",
-                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": True,
+                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": False,   # 2026-09-17 開放實盤選用
                 "followWallets": [_w], "followMaxPrice": 0.90, "followMinRemaining": 5.0,
             })
         AB_VARIANTS.append({
@@ -695,7 +695,7 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
             fam.append({
                 "id": f"btc-15m-follow-{_w[:8]}", "assetId": "btc-15m",
                 "label": f"BTC 15m 跟單錢包 {_w[:8]}（{_note}）",
-                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": True,
+                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": False,   # 2026-09-17 開放實盤選用
                 "followWallets": [_w], "followMaxPrice": 0.90, "followMinRemaining": 10.0,
             })
         # 2026-09-16 依使用者要求：BTC 15m 的「最後 30～90 秒 0.92～0.95」加停損（模擬與實盤同步；0.85 → 同日改 0.60）。

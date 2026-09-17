@@ -174,9 +174,15 @@ LATE_DIRECTION_STOP_LOSS_PRICE = (
     (float(_dir_stop_raw) if float(_dir_stop_raw) > 0 else None)
     if _dir_stop_raw else _LIVE_VARIANT.get("directionStopLossPrice")
 )
+# 2026-09-17 跟單錢包（實盤②）：模擬盤的 wallet_follow_loop 每 5 秒把跟單對象在本窗口的 BUY 寫進
+# sim.state["walletSignals"]，這裡看到就買同一邊（ask <= FOLLOW_MAX_PRICE）、每窗一次、抱到結算、不停損。
+FOLLOW_WALLETS = [w.lower() for w in (_LIVE_VARIANT.get("followWallets") or [])]
+FOLLOW_ENABLED = bool(FOLLOW_WALLETS)
+FOLLOW_MAX_PRICE = float(os.environ.get("POLY_LIVE_FOLLOW_MAX_PRICE") or _LIVE_VARIANT.get("followMaxPrice", 0.90))
+FOLLOW_MIN_REMAINING = float(_LIVE_VARIANT.get("followMinRemaining", 10.0))
 DIRECT_PAIR_ENABLED = (
     not bool(_LIVE_VARIANT.get("lateDirectionOnly")) or bool(_LIVE_VARIANT.get("historicalHybrid"))
-) and not LATE_FAVORITE_ENABLED
+) and not LATE_FAVORITE_ENABLED and not FOLLOW_ENABLED
 # 2026-09-07 實盤再次出現「快照上兩腿合計 0.92，但 346ms 後只成交一腿」。公開 API
 # 的 batch 不是原子交易，因此把門檻收緊、要求限價內有數倍深度，並只接受持續存在的機會。
 # 這些參數也由 btc-live-lock 模擬組讀取，避免模擬與實盤再次使用不同條件。
@@ -1107,6 +1113,93 @@ def _single_leg_entry_allowed(slug: str, remaining_seconds: float) -> bool:
         )
         return False
     return True
+
+
+def _wallet_follow_plan(up_book: dict, down_book: dict, remaining_seconds: float, cash: float, diagnostic_slug: str | None = None) -> dict | None:
+    """跟單：本窗口有跟單對象的 BUY 訊號 → 買同一邊。對齊模擬版 _try_wallet_follow_entry。"""
+    def diag(reason, **details):
+        if diagnostic_slug:
+            record_live_window_diagnostic(diagnostic_slug, reason, remainingSeconds=remaining_seconds, **details)
+    if remaining_seconds < FOLLOW_MIN_REMAINING:
+        diag("outside_follow_window")
+        return None
+    signals = sim.state.get("walletSignals") or {}
+    sig = None
+    for w in FOLLOW_WALLETS:
+        s = signals.get(w)
+        if s and s.get("slug") == diagnostic_slug and s.get("side") in ("Up", "Down"):
+            sig = dict(s, wallet=w); break
+    if not sig:
+        return None
+    side = sig["side"]; book = up_book if side == "Up" else down_book
+    asks = book.get("asks") or []
+    ask = float(asks[0]["price"]) if asks else None
+    if ask is None or ask > FOLLOW_MAX_PRICE:
+        diag("follow_price_above_maximum", selectedSide=side, selectedAsk=ask, followMaxPrice=FOLLOW_MAX_PRICE)
+        return None
+    if not _live_direction_book_is_fresh(side, book):
+        diag("follow_book_not_fresh", selectedSide=side)
+        return None
+    _, budget = _target_pair_order(cash)
+    if budget < sim.SIM_MIN_ORDER_NOTIONAL_USD:
+        diag("follow_budget_too_small", budgetUsd=budget)
+        return None
+    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    if shares < float(book.get("minOrderSize", 1) or 1):
+        diag("follow_below_minimum_shares", targetShares=shares)
+        return None
+    plan = _buy_plan(side, book, shares)
+    if not plan:
+        diag("follow_insufficient_depth", selectedSide=side, targetShares=shares)
+        return None
+    plan = _cap_favorite_entry_plan(plan, book, ask, diag)      # 同買領先方：限價 <= ask+1 tick
+    if not plan:
+        return None
+    if plan["limitPrice"] > FOLLOW_MAX_PRICE + 1e-9:
+        plan = dict(plan); plan["limitPrice"] = FOLLOW_MAX_PRICE
+        plan["riskNotional"] = plan["shares"] * FOLLOW_MAX_PRICE; plan["fee"] = _fee_from_plan(plan, plan["shares"], FOLLOW_MAX_PRICE)
+    if plan["riskNotional"] + plan["fee"] > cash:
+        diag("follow_insufficient_cash", cashUsd=cash)
+        return None
+    plan["_signalSource"] = f"follow:{sig['wallet'][:8]}"
+    plan["_deltaPct"] = None
+    plan["_signalObservedAt"] = int(sig.get("ts", 0) * 1000)
+    plan["_signalAgeSeconds"] = max(0.0, time.time() - float(sig.get("ts", 0)))
+    plan["_bookQuoteSource"] = book.get("quoteSource")
+    plan["_bookReceivedAtMonotonic"] = book.get("receivedAtMonotonic")
+    plan["_followedPrice"] = sig.get("price")
+    diag("follow_candidate", status="candidate", selectedSide=side, selectedAsk=ask, followedWallet=sig["wallet"][:8],
+         followedPrice=sig.get("price"), lagSeconds=plan["_signalAgeSeconds"], targetShares=plan["shares"])
+    return plan
+
+
+async def _try_wallet_follow_entry(slug: str, up_book: dict, down_book: dict, remaining_seconds: float, cash: float, dry_run: bool) -> bool:
+    if live_state.get("followWindowSlug") == slug:
+        return False
+    plan = _wallet_follow_plan(up_book, down_book, remaining_seconds, cash, diagnostic_slug=slug)
+    if not plan:
+        return False
+    log.info(f"[LIVE] 跟單 {plan['_signalSource']} 買 {plan['side']} 對方價 {plan['_followedPrice']} limit=${plan['limitPrice']:.3f} "
+             f"shares={plan['shares']:.0f} 延遲 {plan['_signalAgeSeconds']:.0f}s 剩餘 {remaining_seconds:.0f}s")
+    result = await _enter_position(slug, plan, dry_run)
+    if result == "filled":
+        live_state["position"]["strategy"] = "wallet_follow"
+        live_state["followWindowSlug"] = slug
+        save_live_state()
+    return result == "filled"
+
+
+async def _run_ws_wallet_follow_entry(slug: str, plan: dict, dry_run: bool, decision_lock: asyncio.Lock) -> None:
+    _ws_action_in_flight["v"] = False
+    async with decision_lock:
+        if live_state.get("position") is not None or live_state.get("followWindowSlug") == slug:
+            return
+        log.info(f"[LIVE] 跟單 {plan['_signalSource']} 買 {plan['side']} limit=${plan['limitPrice']:.3f} shares={plan['shares']:.0f}（WS 即時觸發）")
+        result = await _enter_position(slug, plan, dry_run)
+        if result == "filled":
+            live_state["position"]["strategy"] = "wallet_follow"
+            live_state["followWindowSlug"] = slug
+            save_live_state()
 
 
 def _cap_favorite_entry_plan(plan: dict, book: dict, ask: float, diag) -> dict | None:
@@ -2605,6 +2698,9 @@ async def _evaluate_and_act_impl(
         if LATE_FAVORITE_ENABLED:
             await _try_late_favorite_entry(slug, up_book, down_book, remaining_seconds, cash, dry_run)
             return
+        if FOLLOW_ENABLED:
+            await _try_wallet_follow_entry(slug, up_book, down_book, remaining_seconds, cash, dry_run)
+            return
 
         if DIRECT_PAIR_ENABLED:
             # 股數先按可見深度封頂；純方向性模式完全略過這段，不會先建立鎖利部位。
@@ -2677,6 +2773,8 @@ async def _evaluate_and_act_impl(
     if pos.get("emergencyUnwindPending"):
         await _emergency_unwind(session, pos.get("emergencyUnwind", {}).get("reason", "resume_emergency_unwind"))
         return
+    if pos.get("strategy") == "wallet_follow":
+        return   # 跟單：抱到結算，不補腿、不停損
     if pos.get("strategy") == "late_favorite":
         tp_plan = _late_favorite_take_profit_plan(pos, up_book, down_book)
         if tp_plan:
@@ -2841,6 +2939,20 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
     pos = live_state.get("position")
 
     if pos is None:
+        if FOLLOW_ENABLED:
+            if live_state.get("followWindowSlug") == slug or remaining <= 0 or _first_trade_guard_blocks_new_entry():
+                return
+            dry_run = not _real_execution_enabled()
+            if not dry_run and (live_state.get("preflightSlug") != slug or not live.order_tokens_and_fees_are_warm([up_id, down_id])):
+                return
+            cash = _strategy_cash_sync(dry_run)
+            if cash is None:
+                return
+            plan = _wallet_follow_plan(up_book, down_book, remaining, cash, diagnostic_slug=slug)
+            if plan:
+                _ws_action_in_flight["v"] = True
+                asyncio.get_running_loop().create_task(_run_ws_wallet_follow_entry(slug, plan, dry_run, decision_lock))
+            return
         if LATE_FAVORITE_ENABLED:
             # 2026-09-15 依使用者要求：買領先方也走 WS 快速路徑，對齊模擬盤「每個 tick 都評估」。
             # 原本只走 3 秒輪詢，0.92～0.95 這種只有 3 tick 寬的區間常在兩次輪詢之間掃過
@@ -2966,6 +3078,8 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
         return
     if pos.get("emergencyUnwindPending"):
         # 救援含餘額刷新與網路 I/O，交由 3 秒輪詢路徑執行；WS 快速路徑不重複排程。
+        return
+    if pos.get("strategy") == "wallet_follow":
         return
     if pos.get("strategy") == "late_favorite":
         tp_plan = _late_favorite_take_profit_plan(pos, up_book, down_book)
@@ -3274,6 +3388,8 @@ def _log_startup_banner(mode: str) -> None:
         f"  emergency unwind: wait={EMERGENCY_UNWIND_WAIT_SECONDS:.1f}s "
         f"balance poll={EMERGENCY_UNWIND_POLL_INTERVAL:.2f}s order retry={EMERGENCY_UNWIND_ORDER_INTERVAL:.1f}s"
     )
+    if FOLLOW_ENABLED:
+        log.warning(f"  跟單錢包已啟用：{[w[:8] for w in FOLLOW_WALLETS]}，看到對方本窗口 BUY 就買同一邊（ask <= {FOLLOW_MAX_PRICE:.2f}、剩餘 >= {FOLLOW_MIN_REMAINING:.0f}s）→ 抱到結算；鎖利／方向性／買領先方停用")
     if LATE_FAVORITE_ENABLED:
         log.warning(
             f"  買領先方已啟用：剩餘 {LATE_FAVORITE_MIN_REMAINING:.0f}~{LATE_FAVORITE_WINDOW_SECONDS:.0f}s、"
