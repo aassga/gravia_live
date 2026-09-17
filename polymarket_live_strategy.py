@@ -1568,9 +1568,31 @@ async def _ensure_no_unmanaged_current_position() -> bool:
     except Exception as exc:
         _set_halt(f"preflight_position_check_failed: {exc}")
         return False
-    if up_balance >= 0.01 or down_balance >= 0.01:
+    # 2026-09-17 多實盤：同一錢包的其他實盤進程若在同一市場持倉，這些 token 餘額是「它管的」，不算未管理。
+    peer_up = peer_down = 0.0
+    for path in PEER_STATE_FILES:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                st = json.load(f)
+        except Exception:
+            continue
+        for pos in [st.get("position")] + list(st.get("pendingSettlements") or []):
+            if not pos or pos.get("dryRun", True):
+                continue
+            tid = str(pos.get("tokenId") or "")
+            if tid == str(up_id):
+                peer_up += float(pos.get("shares") or 0)
+            elif tid == str(down_id):
+                peer_down += float(pos.get("shares") or 0)
+            if pos.get("hedged") and pos.get("hedgeShares"):
+                if pos.get("hedgeSide") == "Up":
+                    peer_up += float(pos.get("hedgeShares") or 0)
+                elif pos.get("hedgeSide") == "Down":
+                    peer_down += float(pos.get("hedgeShares") or 0)
+    if up_balance - peer_up >= 0.01 or down_balance - peer_down >= 0.01:
         _set_halt(
             f"unmanaged_current_market_position up={up_balance:.6f} down={down_balance:.6f}"
+            + (f" (peer up={peer_up:.6f} down={peer_down:.6f})" if (peer_up or peer_down) else "")
         )
         return False
     try:
