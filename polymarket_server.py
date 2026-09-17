@@ -440,9 +440,12 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-historical-hybrid",
             "assetId":               "btc",
-            "label":                 "BTC 歷史混合（鎖利→Chainlink T-20s、Δ≥0.01%）",
+            "label":                 "BTC 歷史混合（鎖利→Chainlink T-20s、Δ≥0.01%、市場同向 ≥0.50）",
             # 2026-09-17：曾加方向性停損 0.60，同日依使用者要求移除（None = 不停損）；機制保留，要用再填。
             "directionStopLossPrice": None,
+            # 2026-09-17 依使用者要求「方向性加市場同向」：買的那邊 ask 必須 >= 0.50（市場也認同這個方向）。
+            # 本輪 8 筆：ask >= 0.50 的 4 筆全勝 +18.46，< 0.50 的 4 筆 1 勝 3 敗 -8.97（TWAP 落後市場時的逆勢單）。
+            "lateDirectionMinMarketPrice": 0.50,
             "lateDirectionWindowSeconds": 20.0,   # 2026-09-14 依使用者要求 10 → 20
             "lateDirectionMinDeltaPct":   0.01,   # 2026-09-14 依使用者要求 0.02 → 0.01
             "entryMaxPrice":         None,
@@ -2803,6 +2806,11 @@ def _try_late_direction_entry(
         "selectedAsk": selected_ask,
         "selectedAskDepth": selected_depth,
     }
+    min_market_price = variant.get("lateDirectionMinMarketPrice")
+    if min_market_price is not None and (selected_ask is None or selected_ask < float(min_market_price)):
+        # 市場不同向：訊號方向那邊的 ask 太便宜＝市場認為它會輸（TWAP 落後即時價時常見），不進。
+        record_window_diagnostic(variant_id, slug, "direction_market_disagrees", minMarketPrice=min_market_price, **common)
+        return
     if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
         record_window_diagnostic(
             variant_id,
@@ -4994,6 +5002,7 @@ def build_ab_leaderboard() -> list:
             "openMaxPrice": v.get("openMaxPrice"),
             "openMinMovePct": v.get("openMinMovePct"),
             "directionStopLossPrice": v.get("directionStopLossPrice"),
+            "lateDirectionMinMarketPrice": v.get("lateDirectionMinMarketPrice"),
             "favoriteWindowSeconds": v.get("favoriteWindowSeconds"),
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),

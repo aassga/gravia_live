@@ -1007,10 +1007,17 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         )
         up_book = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 100}], "bids": [{"price": 0.97, "size": 100}]}
         down_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.20, "size": 100}], "bids": []})
-        plan = strategy._late_direction_plan(up_book, down_book, 5.0, 10.0)
+        # 2026-09-17：歷史混合預設要求市場同向（ask >= 0.50）→ Down 只有 0.20 不進；關掉檢查才照舊進
+        self.assertEqual(strategy.LATE_DIRECTION_MIN_MARKET_PRICE, 0.50)
+        self.assertIsNone(strategy._late_direction_plan(up_book, down_book, 5.0, 10.0))
+        with patch.object(strategy, "LATE_DIRECTION_MIN_MARKET_PRICE", None):
+            plan = strategy._late_direction_plan(up_book, down_book, 5.0, 10.0)
         self.assertIsNotNone(plan)
         self.assertEqual(plan["side"], "Down")
         self.assertEqual(plan["_signalSource"], expected_source)
+        down_ok = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.62, "size": 100}], "bids": [{"price": 0.61, "size": 100}]})
+        up_ok = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.39, "size": 100}], "bids": [{"price": 0.38, "size": 100}]}
+        self.assertEqual(strategy._late_direction_plan(up_ok, down_ok, 5.0, 10.0)["side"], "Down")
 
     async def test_direction_plan_adds_extra_ticks_and_retries_with_fresh_book(self):
         # 2026-09-16：方向性 FOK 限價 = 判斷價 + 3 tick；FOK 被拒後用最新書價重送一次

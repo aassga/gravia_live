@@ -290,6 +290,23 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading("btc-historical-hybrid", "btc-window-2", up2, down, 6.0, None)
         self.assertIsNone(sim.ab_states["btc-historical-hybrid"]["position"])
 
+    def test_hybrid_direction_requires_market_agreement(self):
+        # 2026-09-17：訊號方向那邊 ask < 0.50（市場不同向）不進；>= 0.50 才進
+        vid = "btc-historical-hybrid"
+        self.assertEqual(sim.AB_VARIANT_BY_ID[vid]["lateDirectionMinMarketPrice"], 0.50)
+        self._set_chainlink_signal(opening=100.0, current=100.3)          # 訊號 Up
+        up_cheap = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.41, "size": 100}], "bids": [{"price": 0.40, "size": 100}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.60, "size": 100}], "bids": [{"price": 0.59, "size": 100}]})
+        sim.simulate_trading(vid, "btc-window", up_cheap, down, 6.0, None)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        diag = sim._window_diagnostic(vid, "btc-window")
+        self.assertGreaterEqual(diag["reasonCounts"].get("direction_market_disagrees", 0), 1)
+        up_ok = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.70, "size": 100}], "bids": [{"price": 0.69, "size": 100}]})
+        down2 = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.31, "size": 100}], "bids": [{"price": 0.30, "size": 100}]})
+        sim.simulate_trading(vid, "btc-window", up_ok, down2, 6.0, None)
+        self.assertEqual(sim.ab_states[vid]["position"]["side"], "Up")
+        sim.ab_states[vid]["position"] = None
+
     def test_hybrid_direction_leg_has_stop_loss_060_only_when_entry_above_it(self):
         # 2026-09-17：歷史混合的方向性腿加停損 0.60；進場價 <= 0.60 的單不設
         vid = "btc-historical-hybrid"

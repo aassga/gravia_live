@@ -181,6 +181,12 @@ PAIR_MIN_DEPTH_MULTIPLIER = max(1.0, float(os.environ.get("POLY_PAIR_MIN_DEPTH_M
 PAIR_STABILITY_SECONDS = max(0.0, float(os.environ.get("POLY_PAIR_STABILITY_SECONDS", "0.15")))
 RESCUE_LOCK_MAX_SUM = max(LOCK_MAX_SUM, min(0.99, float(os.environ.get("POLY_RESCUE_LOCK_MAX_SUM", "0.99"))))
 LATE_DIRECTION_MAX_PRICE = float(_LIVE_VARIANT.get("lateDirectionMaxPrice", 0.92))
+# 2026-09-17 市場同向：訊號方向那邊的 ask 必須 >= 這個價才進（None = 不檢查）。POLY_LIVE_DIRECTION_MIN_MARKET_PRICE 可覆寫，0 = 關閉。
+_dir_mkt_raw = os.environ.get("POLY_LIVE_DIRECTION_MIN_MARKET_PRICE", "").strip()
+LATE_DIRECTION_MIN_MARKET_PRICE = (
+    (float(_dir_mkt_raw) if float(_dir_mkt_raw) > 0 else None)
+    if _dir_mkt_raw else _LIVE_VARIANT.get("lateDirectionMinMarketPrice")
+)
 # 2026-09-14：方向路徑的窗口秒數與最低偏離可由變體覆寫（歷史混合 20s / 0.01%），與模擬版對齊。
 LATE_DIRECTION_WINDOW_SECONDS = float(_LIVE_VARIANT.get("lateDirectionWindowSeconds", sim.LATE_DIRECTION_WINDOW_SECONDS))
 LATE_DIRECTION_MIN_DELTA_PCT = float(_LIVE_VARIANT.get("lateDirectionMinDeltaPct", sim.LATE_DIRECTION_MIN_DELTA_PCT))
@@ -842,6 +848,17 @@ def _late_direction_plan(
             )
         return None
     side, book = ("Up", up_book) if delta_pct > 0 else ("Down", down_book)
+    if LATE_DIRECTION_MIN_MARKET_PRICE is not None:
+        asks_now = book.get("asks") or []
+        selected_ask = float(asks_now[0]["price"]) if asks_now else None
+        if selected_ask is None or selected_ask < float(LATE_DIRECTION_MIN_MARKET_PRICE):
+            if diagnostic_slug:
+                record_live_window_diagnostic(
+                    diagnostic_slug, "direction_market_disagrees", remainingSeconds=remaining_seconds,
+                    signalSource=signal_source, signalDeltaPct=delta_pct, selectedSide=side,
+                    selectedAsk=selected_ask, minMarketPrice=LATE_DIRECTION_MIN_MARKET_PRICE,
+                )
+            return None
     if not _live_direction_book_is_fresh(side, book):
         if diagnostic_slug:
             record_live_window_diagnostic(
@@ -3250,7 +3267,7 @@ def _log_startup_banner(mode: str) -> None:
             f"  單腿方向性下注已啟用：{direction_source}，剩餘 "
             f"{sim.LATE_DIRECTION_MIN_ENTRY_REMAINING:.0f}~"
             f"{LATE_DIRECTION_WINDOW_SECONDS:.0f}s、偏移開盤價>={LATE_DIRECTION_MIN_DELTA_PCT:.2f}%、"
-            f"不要求市場同向、進場價<=${LATE_DIRECTION_MAX_PRICE}"
+            f"{'市場同向 ask>=' + format(float(LATE_DIRECTION_MIN_MARKET_PRICE), '.2f') if LATE_DIRECTION_MIN_MARKET_PRICE is not None else '不要求市場同向'}、進場價<=${LATE_DIRECTION_MAX_PRICE}"
         )
     else:
         log.info("  單腿方向性下注已停用（POLY_ENABLE_LATE_DIRECTION=false）")
