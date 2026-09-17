@@ -41,3 +41,10 @@ polymarket_live2_baseline.json
 polymarket_sim_live2.sqlite3
 polymarket_sim_live2.sqlite3-wal
 polymarket_sim_live2.sqlite3-shm
+.env.live3
+polymarket_live3_state.json
+polymarket_live3_state.json.tmp
+polymarket_live3_baseline.json
+polymarket_sim_live3.sqlite3
+polymarket_sim_live3.sqlite3-wal
+polymarket_sim_live3.sqlite3-shm

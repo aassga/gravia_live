@@ -1,0 +1,20 @@
+[Unit]
+Description=Gravia Polymarket read-only live status #3 (port 8770)
+Wants=network-online.target
+After=network-online.target gravia-live3.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+EnvironmentFile=/home/ubuntu/gravia_live/.env.live3
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_live_status_server.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
