@@ -82,6 +82,10 @@ EMERGENCY_UNWIND_EXTRA_TICKS = max(0, int(os.environ.get("POLY_EMERGENCY_UNWIND_
 # 用最新書價重算一次再送（最多 1 次）。09:29:45 實盤 6 股 @0.55 被 CLOB 以 "couldn't be fully filled" 拒絕兩次，
 # 模擬盤同一瞬間以快照成交 +6.33——T-15s 的書在快照到撮合的幾百毫秒內就移走了。
 LATE_DIRECTION_EXTRA_TICKS = max(0, int(os.environ.get("POLY_LIVE_DIRECTION_EXTRA_TICKS", "3")))
+# 2026-09-17 依使用者要求：買領先方進場的 FOK 限價最多 = 可見 ask + N tick，且不超過買價上限
+# （原本判斷價 = VWAP 進位 + 1 tick，ask 0.95 常成交在 0.97～0.98，把每股 5～8¢ 的利潤削掉一半）。
+# 限價內深度不夠就縮股數，縮到低於最小單量就放棄這一窗。POLY_LIVE_FAVORITE_ENTRY_EXTRA_TICKS，-1 = 關閉。
+LATE_FAVORITE_ENTRY_EXTRA_TICKS = int(os.environ.get("POLY_LIVE_FAVORITE_ENTRY_EXTRA_TICKS", "1"))
 LATE_DIRECTION_RETRY_ON_REJECT = os.environ.get("POLY_LIVE_DIRECTION_RETRY", "true").strip().lower() == "true"
 _validated_order_path_slug: str | None = None
 _live_data_guard_log_at = 0.0
@@ -1105,6 +1109,31 @@ def _single_leg_entry_allowed(slug: str, remaining_seconds: float) -> bool:
     return True
 
 
+def _cap_favorite_entry_plan(plan: dict, book: dict, ask: float, diag) -> dict | None:
+    """把買領先方的 FOK 限價封頂在 min(ask + LATE_FAVORITE_ENTRY_EXTRA_TICKS tick, LATE_FAVORITE_MAX_PRICE)；
+    限價內的可見深度不夠目標股數就縮股數，低於最小單量就放棄。"""
+    if LATE_FAVORITE_ENTRY_EXTRA_TICKS < 0:
+        return plan
+    tick = float(book.get("tickSize", 0.01) or 0.01)
+    cap = min(round(ask + tick * LATE_FAVORITE_ENTRY_EXTRA_TICKS, 6), float(LATE_FAVORITE_MAX_PRICE))
+    if plan["limitPrice"] <= cap + 1e-9:
+        return plan
+    depth = sum(float(l.get("size", 0)) for l in (book.get("asks") or []) if float(l["price"]) <= cap + 1e-9)
+    shares = float(Decimal(str(min(float(plan["shares"]), depth))).to_integral_value(rounding=ROUND_DOWN))
+    min_size = float(book.get("minOrderSize", 1) or 1)
+    if shares < min_size or shares <= 0:
+        diag("favorite_price_cap_no_depth", selectedAsk=ask, priceCap=cap, depthWithinCap=depth, targetShares=plan["shares"])
+        return None
+    out = dict(plan)
+    out["uncappedLimitPrice"] = plan["limitPrice"]
+    out["limitPrice"] = cap
+    out["shares"] = shares
+    out["riskNotional"] = shares * cap
+    out["fee"] = _fee_from_plan(out, shares, cap)
+    diag("favorite_price_capped", selectedAsk=ask, priceCap=cap, uncappedLimitPrice=plan["limitPrice"], targetShares=shares)
+    return out
+
+
 def _late_favorite_plan(
     up_book: dict, down_book: dict, remaining_seconds: float, cash: float, diagnostic_slug: str | None = None
 ) -> dict | None:
@@ -1171,8 +1200,11 @@ def _late_favorite_plan(
     if not plan:
         diag("favorite_insufficient_depth", selectedSide=side, targetShares=shares)
         return None
-    # 2026-09-14 依使用者要求：上限只比對看得到的 ask（上面已檢查），不再用判斷價二次過濾；
-    # FOK 限價仍是判斷價，最差成交價可能到 max + 2 tick。
+    # 2026-09-14 依使用者要求：上限只比對看得到的 ask（上面已檢查），不再用判斷價二次過濾。
+    # 2026-09-17：FOK 限價封頂在 min(ask + N tick, 買價上限)，限價內深度不夠就縮股數。
+    plan = _cap_favorite_entry_plan(plan, book, ask, diag)
+    if not plan:
+        return None
     if plan["riskNotional"] + plan["fee"] > cash:
         diag("favorite_insufficient_cash", cashUsd=cash, totalRiskCost=plan["riskNotional"] + plan["fee"])
         return None
@@ -3248,6 +3280,7 @@ def _log_startup_banner(mode: str) -> None:
             f"某邊 ask ${LATE_FAVORITE_MIN_PRICE:.2f}~${LATE_FAVORITE_MAX_PRICE:.2f}"
             f"{f'、連續 >= {LATE_FAVORITE_STABLE_SECONDS:.0f}s' if LATE_FAVORITE_STABLE_SECONDS > 0 else ''}"
             f"{f'、{LATE_FAVORITE_FLIP_LOOKBACK_SECONDS:.0f}s 內另一邊曾 >= {LATE_FAVORITE_FLIP_THRESHOLD:.2f} 不進' if LATE_FAVORITE_FLIP_LOOKBACK_SECONDS > 0 else ''}"
+            f"{f'、FOK 限價 <= ask+{LATE_FAVORITE_ENTRY_EXTRA_TICKS} tick 且 <= {LATE_FAVORITE_MAX_PRICE:.2f}' if LATE_FAVORITE_ENTRY_EXTRA_TICKS >= 0 else ''}"
             f"（不看 Chainlink）→ 買該邊抱到結算；"
             "兩腿鎖利／晚進場方向性／單邊進場全部停用"
         )

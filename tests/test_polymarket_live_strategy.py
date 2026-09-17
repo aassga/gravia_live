@@ -983,6 +983,36 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
                 _, budget3 = strategy._target_pair_order(29.4)              # 原本算法：30% × 現金
                 self.assertAlmostEqual(budget3, 8.82, places=6)
 
+    def test_favorite_entry_limit_is_capped_at_ask_plus_one_tick_and_max_price(self):
+        # 2026-09-17：買領先方 FOK 限價 <= min(ask+1 tick, 0.95)；限價內深度不夠就縮股數，沒有就放棄
+        book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+            "asks": [{"price": 0.95, "size": 5}, {"price": 0.97, "size": 100}], "bids": [{"price": 0.94, "size": 100}]})
+        diags = []
+        plan = strategy._buy_plan("Up", book, 20.0)
+        self.assertGreater(plan["limitPrice"], 0.95)                          # 未封頂：VWAP 進位 + 1 tick > 0.95
+        with patch.object(strategy, "LATE_FAVORITE_MAX_PRICE", 0.95), patch.object(strategy, "LATE_FAVORITE_ENTRY_EXTRA_TICKS", 1):
+            capped = strategy._cap_favorite_entry_plan(plan, book, 0.95, lambda r, **k: diags.append(r))
+            self.assertIsNotNone(capped)
+            self.assertAlmostEqual(capped["limitPrice"], 0.95, places=6)     # min(0.96, 0.95)
+            self.assertEqual(capped["shares"], 5.0)                          # 0.95 內只有 5 股
+            self.assertAlmostEqual(capped["riskNotional"], 4.75, places=6)
+            self.assertIn("favorite_price_capped", diags)
+            thin = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 5,
+                "asks": [{"price": 0.95, "size": 2}, {"price": 0.97, "size": 100}], "bids": [{"price": 0.94, "size": 100}]})
+            plan2 = strategy._buy_plan("Up", thin, 20.0)
+            self.assertIsNone(strategy._cap_favorite_entry_plan(plan2, thin, 0.95, lambda r, **k: diags.append(r)))
+            self.assertIn("favorite_price_cap_no_depth", diags)
+            deep = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1,
+                "asks": [{"price": 0.93, "size": 100}], "bids": [{"price": 0.92, "size": 100}]})
+            plan3 = strategy._buy_plan("Up", deep, 10.0)                    # 判斷價 0.95 = ask + 2 tick → 封頂到 0.94、股數不變
+            capped3 = strategy._cap_favorite_entry_plan(plan3, deep, 0.93, lambda r, **k: None)
+            self.assertAlmostEqual(capped3["limitPrice"], 0.94, places=6)
+            self.assertEqual(capped3["shares"], 10.0)
+            low = strategy._buy_plan("Up", deep, 10.0); low["limitPrice"] = 0.94
+            self.assertIs(strategy._cap_favorite_entry_plan(low, deep, 0.93, lambda r, **k: None), low)         # 已在 cap 內：不動
+        with patch.object(strategy, "LATE_FAVORITE_ENTRY_EXTRA_TICKS", -1):
+            self.assertIs(strategy._cap_favorite_entry_plan(plan, book, 0.95, lambda r, **k: None), plan)      # 關閉
+
     def test_live_direction_stop_plan_respects_entry_price_guard(self):
         # 2026-09-17：方向性單腿停損 0.60；進場價 <= 0.60 不設；觸發後用積極賣價（多讓 3 tick）
         up_book = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.56, "size": 100}], "bids": [{"price": 0.55, "size": 100}]})
