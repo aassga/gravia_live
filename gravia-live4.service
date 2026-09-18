@@ -1,0 +1,21 @@
+[Unit]
+Description=Gravia Polymarket live strategy #4 (own process; light sim with only its own variant)
+Wants=network-online.target
+After=network-online.target gravia.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+Environment=PYTHONUNBUFFERED=1
+# .env 先載入共用設定（私鑰、TG…），.env.live4 再覆寫這個實盤自己的變體／檔案／埠
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+EnvironmentFile=/home/ubuntu/gravia_live/.env.live4
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_server.py --with-live
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

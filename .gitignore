@@ -48,3 +48,13 @@ polymarket_live3_baseline.json
 polymarket_sim_live3.sqlite3
 polymarket_sim_live3.sqlite3-wal
 polymarket_sim_live3.sqlite3-shm
+.env.live4
+.env.live5
+polymarket_live4_state.json
+polymarket_live4_state.json.tmp
+polymarket_live4_baseline.json
+polymarket_sim_live4.sqlite3*
+polymarket_live5_state.json
+polymarket_live5_state.json.tmp
+polymarket_live5_baseline.json
+polymarket_sim_live5.sqlite3*
