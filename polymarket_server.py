@@ -809,7 +809,9 @@ del _v
 # BTC 30～90s、ETH 價格觸發），只停用不刪程式碼；同日再停用 BTC 5m 剩下三個買領先方變體
 # （跟單 T、價格觸發、≥0.98 抱到結算）——24h 掃描 BTC 5m 買領先方各價位皆為負。
 _SIM_DEFAULT_DISABLED = (
-    "btc-main,btc-loose,btc-binance-late-direction,btc-two-sided-maker,btc-open-momentum,btc-late-favorite,"
+    # 2026-09-18 依使用者要求還原 btc-binance-late-direction（= 9/3～9/7 的 btc-late-direction：T-10s、Binance Δ>=0.02%、<=0.92，
+    # 當時 68 筆 97.1% +396；9/8～9/14 同規則 22 筆 59% +30），重新加回模擬盤觀察。
+    "btc-main,btc-loose,btc-two-sided-maker,btc-open-momentum,btc-late-favorite,"
     "sol-last30-45-088-092,sol-follow-taker,btc-last10-30-092-095,btc-last30-90-092-095,eth-alt-price-triggered-favorite,"
     "btc-follow-taker,btc-price-triggered-favorite,btc-last60-098-hold,"
     # 2026-09-15 13:15 再依使用者要求停用累計虧損 350 以上者：ETH 跟單 T（-633）、BTC 30～45s（-569）、
