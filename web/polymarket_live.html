@@ -291,6 +291,7 @@ function onData(d){
 
   const cfg=d.strategyConfig||{};
   document.getElementById('strategy-name').textContent = cfg.label ? `策略：${cfg.label}` : '策略：—';
+  applyCoinFavicon(cfg.assetId, cfg.label, !!d.strategyExecutionEnabled);
   // 2026-09-14 依使用者要求：只顯示目前實盤策略真的用到的設定，停用的路徑（兩腿鎖利／方向性／單邊進場）
   // 及其參數一律隱藏，避免像「鎖利合計上限 $0.98」這種對現行策略沒作用的數字造成誤會。
   const pairOn = cfg.directPairEnabled !== false;
@@ -361,6 +362,32 @@ function onData(d){
 
   renderPositions(positions);
   renderTrades(strategy.trades || []);
+}
+
+// 2026-09-18 依使用者要求：分頁 favicon／標題顯示目前策略的主要幣種（多實盤分頁一眼區分）。
+const COIN_STYLE = {
+  btc: {sym:'₿', bg:'#f7931a'}, eth: {sym:'Ξ', bg:'#627eea'}, sol: {sym:'S', bg:'#9945ff'}, xrp: {sym:'X', bg:'#23292f'},
+  doge:{sym:'Ð', bg:'#c2a633'}, bnb: {sym:'B', bg:'#f3ba2f'}, hype:{sym:'H', bg:'#00c9a7'}, zec: {sym:'Z', bg:'#ecb244'},
+};
+let _lastFavKey = null;
+function applyCoinFavicon(assetId, label, real){
+  const base = String(assetId||'').split('-')[0].replace('alt','') || 'btc';
+  const st = COIN_STYLE[base] || {sym:'?', bg:'#555'};
+  const tf = /15m/.test(String(assetId||'')) ? '15' : (/4h/.test(String(assetId||'')) ? '4h' : '');
+  const key = base + tf + (real ? 'R' : 'D');
+  if (key === _lastFavKey) return;
+  _lastFavKey = key;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+    <circle cx="32" cy="32" r="30" fill="${st.bg}"/>
+    <text x="32" y="43" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="700" font-size="34" fill="#fff">${st.sym}</text>
+    ${tf ? `<rect x="36" y="38" width="26" height="20" rx="4" fill="#111"/><text x="49" y="53" text-anchor="middle" font-family="Arial" font-weight="700" font-size="15" fill="#fff">${tf}</text>` : ''}
+    ${real ? '<circle cx="12" cy="12" r="8" fill="#ff2d55" stroke="#fff" stroke-width="2"/>' : ''}
+  </svg>`;
+  let link = document.querySelector('link[rel="icon"]');
+  if (!link){ link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
+  link.type = 'image/svg+xml';
+  link.href = 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+  document.title = `${base.toUpperCase()}${tf ? ' ' + tf + 'm' : ''} ${real ? 'REAL' : 'DRY'} · 實盤`;
 }
 
 function connect(){
