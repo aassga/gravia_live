@@ -788,6 +788,8 @@ SIM_FAVORITE_STOP_OVERRIDES = {vid: 0.80 for vid in (
     # 2026-09-17 13:5x 依使用者要求：ETH 自動 30～45 秒兩組（0.95～0.98、0.98～0.99）停損 0.60 → 0.80。
     "eth-alt-auto-30-45s-098-099,eth-alt-auto-30-45s-095-098"
 ).split(",")}
+# 2026-09-18 依使用者要求：BTC 15m 價格觸發 0.80 → 0.70（6 次假停損有 4 次在 0.81～0.90 被掃出，真翻面 4 次）。
+SIM_FAVORITE_STOP_OVERRIDES["btc-15m-price-triggered-favorite"] = 0.70
 for _v in AB_VARIANTS:
     if not _v.get("lateFavorite") or _v.get("noStop"):
         continue
