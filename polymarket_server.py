@@ -440,14 +440,16 @@ for _asset in ASSETS:
         AB_VARIANTS.append({
             "id":                    "btc-historical-hybrid",
             "assetId":               "btc",
-            "label":                 "BTC 歷史混合（鎖利→Chainlink T-20s、Δ≥0.01%、市場同向 ≥0.50）",
+            "label":                 "BTC 歷史混合（鎖利→Chainlink T-20s、Δ≥0.05%、市場同向 ≥0.50）",
             # 2026-09-17：曾加方向性停損 0.60，同日依使用者要求移除（None = 不停損）；機制保留，要用再填。
             "directionStopLossPrice": None,
             # 2026-09-17 依使用者要求「方向性加市場同向」：買的那邊 ask 必須 >= 0.50（市場也認同這個方向）。
             # 本輪 8 筆：ask >= 0.50 的 4 筆全勝 +18.46，< 0.50 的 4 筆 1 勝 3 敗 -8.97（TWAP 落後市場時的逆勢單）。
             "lateDirectionMinMarketPrice": 0.50,
             "lateDirectionWindowSeconds": 20.0,   # 2026-09-14 依使用者要求 10 → 20
-            "lateDirectionMinDeltaPct":   0.01,   # 2026-09-14 依使用者要求 0.02 → 0.01
+            # 2026-09-18 依使用者要求 0.01 → 0.05：09-18 10:19 那筆 Δ 只有 +0.015%、市場 0.99 仍在最後一秒翻面（-32），
+            # 0.01% 對 BTC 只有幾美元差距，收盤前一個 tick 就能翻。
+            "lateDirectionMinDeltaPct":   0.05,
             "entryMaxPrice":         None,
             "lockMaxSum":            LIVE_MIRROR_LOCK_MAX_SUM,
             "lateDirectionOnly":     True,
@@ -702,10 +704,12 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
             })
         # 2026-09-16 依使用者要求：BTC 15m 的「最後 30～90 秒 0.92～0.95」加停損（模擬與實盤同步；0.85 → 同日改 0.60）。
         # 2026-09-17：5 次停損有 3 次是假停損（跌破 0.60 又漲回贏），依使用者要求 0.60 → 0.40。
+        # 2026-09-18 依使用者要求改為不停損：0.40 停損 03:28 那筆賣在 0.37 是假停損（-8.09），一筆吃掉整天獲利。
         for v in fam:
             if v["id"] == "btc-15m-last10-30-092-095":
-                v["favoriteStopLossPrice"] = 0.40
-                v["label"] = "BTC 15m 最後 30～90 秒買領先方（0.92～0.95、停損 0.40）"
+                v["favoriteStopLossPrice"] = None
+                v["noStop"] = True
+                v["label"] = "BTC 15m 最後 30～90 秒買領先方（0.92～0.95、不停損）"
         fam.append(dict(common, id="btc-15m-last120-092-098-hold", label="BTC 15m 最後 120 秒買領先方（0.92～0.98、不停損）",
                         favoriteWindowSeconds=120.0, favoriteMinPrice=0.92, favoriteMaxPrice=0.98,
                         favoriteStopLossPrice=None, favoriteStableSeconds=0.0, simOnly=False))   # 2026-09-17 開放實盤選用（實盤①）
