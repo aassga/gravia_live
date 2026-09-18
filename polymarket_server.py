@@ -674,7 +674,8 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
              simOnly=False),   # 2026-09-18 開放實盤選用（實盤① 改用 BTC 15m）
         dict(common, id=f"{aid}-last60-098-hold", label=f"{label} 最後 {60 * k:.0f} 秒買 ≥0.98 抱到結算（穩定 10s、翻面偵測）",
              favoriteWindowSeconds=60.0 * k, favoriteMinPrice=0.98, favoriteMaxPrice=0.99, favoriteStopLossPrice=None,
-             favoriteStableSeconds=10.0, favoriteFlipLookbackSeconds=FAVORITE_FLIP_LOOKBACK_SECONDS * k, favoriteFlipThreshold=FAVORITE_FLIP_THRESHOLD),
+             favoriteStableSeconds=10.0, favoriteFlipLookbackSeconds=FAVORITE_FLIP_LOOKBACK_SECONDS * k, favoriteFlipThreshold=FAVORITE_FLIP_THRESHOLD,
+             simOnly=False),   # 2026-09-18 開放實盤選用（實盤② 改用 ETH）
         dict(common, id=f"{aid}-last30-45-088-092", label=f"{label} 最後 {30 * k:.0f}～{45 * k:.0f} 秒買領先方（0.88～0.92、停損 0.60）",
              favoriteWindowSeconds=45.0 * k, favoriteMinRemaining=30.0 * k, favoriteMinPrice=0.88, favoriteMaxPrice=0.92,
              favoriteStopLossPrice=0.60, favoriteStableSeconds=0.0, simOnly=False),   # 2026-09-15 開放實盤選用（ETH）
