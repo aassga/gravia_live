@@ -4316,6 +4316,22 @@ async def retry_pending_settlements(session: aiohttp.ClientSession) -> None:
     if state_changed:
         save_sim_state()
 
+def _queue_orphaned_positions(asset_id: str, current_slug: str) -> None:
+    """把這個資產底下「窗口不是目前這個」的殘留持倉丟進待結算佇列（重啟後的清理）。"""
+    moved = 0
+    for variant_id, st in ab_states.items():
+        if AB_VARIANT_BY_ID.get(variant_id, {}).get("assetId") != asset_id:
+            continue
+        pos = st.get("position")
+        if pos is not None and pos.get("windowSlug") and pos["windowSlug"] != current_slug:
+            st["pendingSettlements"].append(pos)
+            st["position"] = None
+            moved += 1
+            log.warning(f"[SIM:{variant_id}] 重啟後發現殘留持倉 {pos['windowSlug']}（目前窗口 {current_slug}），移到待結算")
+    if moved:
+        save_sim_state()
+
+
 def queue_settlement(slug: str) -> None:
     """窗口換了：每一組 A/B 如果上一個窗口還有沒結算的倉位，各自丟進自己的待結算佇列，
     換一個乾淨的位置開始追蹤新窗口。"""
@@ -4986,6 +5002,10 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
         if cur is not None:
             queue_settlement(cur["slug"])
             _record_prev_window_leader(ms, new_market["slug"])
+        else:
+            # 2026-09-19：進程重啟後 cur 是 None，上一輪留在 ab_states 裡、窗口已結束的持倉不會被
+            # queue_settlement 收走 → 該變體永遠 hasPosition、再也不進場（btc-auto-45-60s 卡了 10 小時）。
+            _queue_orphaned_positions(aid, new_market["slug"])
         ms["market"] = new_market
         ms["windowEndsAt"] = _iso_to_ms(new_market["endDate"])
         ms["windowOpenSpotPrice"] = None  # 換窗口了，開盤價重新觀察

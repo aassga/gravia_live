@@ -415,6 +415,20 @@ class PolymarketSimulationTests(unittest.TestCase):
         ms["walletSignals"] = {}
         self.assertIn("btc-15m-follow-0x42811a", sim.AB_VARIANT_BY_ID)
 
+    def test_orphaned_position_is_queued_for_settlement_after_restart(self):
+        # 2026-09-19：重啟後殘留在舊窗口的持倉要移到待結算，不能永遠卡住 hasPosition
+        vid = "btc-relaxed-lock"
+        st = sim.ab_states[vid]
+        st["position"] = {"windowSlug": "btc-updown-5m-100", "side": "Up", "shares": 5.0, "entryPrice": 0.9, "entryTime": 1.0, "hedged": False}
+        st["pendingSettlements"] = []
+        sim._queue_orphaned_positions("btc", "btc-updown-5m-400")
+        self.assertIsNone(st["position"]); self.assertEqual(len(st["pendingSettlements"]), 1)
+        st["pendingSettlements"] = []
+        st["position"] = {"windowSlug": "btc-updown-5m-400", "side": "Up", "shares": 5.0, "entryPrice": 0.9, "entryTime": 1.0, "hedged": False}
+        sim._queue_orphaned_positions("btc", "btc-updown-5m-400")      # 同窗口不動
+        self.assertIsNotNone(st["position"])
+        st["position"] = None
+
     def test_single_leg_variants_skip_two_leg_coherence_guard(self):
         # 2026-09-19：買領先方只驗選到的那一腿；對邊 book 是舊的（REST）也要能進
         vid = "btc-auto-45-60s-098-099" if "btc-auto-45-60s-098-099" in sim.AB_VARIANT_BY_ID else "btc-late-favorite"
