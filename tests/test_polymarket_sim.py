@@ -195,6 +195,21 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading("btc-late-favorite", "btc-window", up3, down3, 40.0, None)
         self.assertIsNone(sim.ab_states["btc-late-favorite"]["position"])
 
+    def test_092_095_favorite_skips_inconsistent_book_where_other_side_ask_stays_high(self):
+        # 2026-09-19 ETH 15m 11:44：Down ask 0.94 但 Up ask 0.22（合計 1.16）→ 薄單假領先，不進；另一邊 0.07（合計 1.01）才進。
+        vid = "btc-last30-90-092-095"
+        self.assertEqual(sim.AB_VARIANT_BY_ID[vid]["favoriteMaxPairAskSum"], 1.03)
+        self.assertNotIn("favoriteMaxPairAskSum", sim.AB_VARIANT_BY_ID["btc-auto-45-60s-098-099"] if "btc-auto-45-60s-098-099" in sim.AB_VARIANT_BY_ID else {})
+        slug = "btc-updown-5m-inconsistent"
+        sim.start_window_diagnostics("btc", slug, 123_000.0)
+        up, down = self._favorite_books(up_ask=0.22, down_ask=0.94)
+        sim._try_late_favorite_entry(vid, slug, up, down, 47.0)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        self.assertEqual(sim._window_diagnostic(vid, slug)["reasonCounts"].get("favorite_book_inconsistent"), 1)
+        up2, down2 = self._favorite_books(up_ask=0.07, down_ask=0.94)
+        sim._try_late_favorite_entry(vid, slug, up2, down2, 47.0)
+        self.assertEqual(sim.ab_states[vid]["position"]["side"], "Down")
+
     def test_late_favorite_stop_loss_sells_when_leader_flips(self):
         # 停損機制驗證（btc-late-favorite 預設已改為不停損，這裡暫時給 0.85）：
         # 買 Down 0.96 後翻面，Down 買盤掉到 0.80 → 賣掉；掉到 0.88 → 不賣

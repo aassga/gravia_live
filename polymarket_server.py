@@ -801,6 +801,15 @@ for _v in AB_VARIANTS:
         _v["favoriteStopLossPrice"] = SIM_FAVORITE_STOP_OVERRIDES[_v["id"]]
         _v["label"] = _v["label"].replace(f"停損 {_old:.2f}", f"停損 {_v['favoriteStopLossPrice']:.2f}")
 del _v
+# 2026-09-19 依使用者要求（選項 b）：0.92～0.95 家族的買領先方加「訂單簿一致性」檢查——兩邊最佳 ask 合計必須 <= 1.03，
+# 否則視為薄單假領先不進（ETH 15m 11:44 Down ask 0.94 但 Down bid 0.80、Up ask 0.22，合計 1.16，結果翻 Up -89.82）。
+# 0.98～0.99 家族不套（另一邊得剩 0.01 才成立，本來就難被薄單騙）。
+FAVORITE_092_095_MAX_PAIR_ASK_SUM = 1.03
+for _v in AB_VARIANTS:
+    if (_v.get("lateFavorite") and abs(float(_v.get("favoriteMinPrice", 0)) - 0.92) < 1e-9
+            and abs(float(_v.get("favoriteMaxPrice", 0)) - 0.95) < 1e-9):
+        _v.setdefault("favoriteMaxPairAskSum", FAVORITE_092_095_MAX_PAIR_ASK_SUM)
+del _v
 # 2026-09-14 依使用者要求從模擬盤移除 btc-main（0.40/0.95）、btc-loose（0.45/0.98）、
 # btc-binance-late-direction（Binance T-10s）、btc-two-sided-maker（被動雙邊掛單，212 筆 -$62）、
 # btc-open-momentum（開盤動能方向性）、btc-late-favorite（最後 60 秒 0.95～0.97 原版，24h -$2,022），2026-09-14 依使用者要求移除。用環境變數過濾而不是刪定義：測試仍能用這些變體
@@ -2934,6 +2943,14 @@ def _try_late_favorite_entry(
         record_window_diagnostic(
             variant_id, slug, "favorite_price_above_maximum",
             selectedSide=side, selectedAsk=ask, favoriteMaxPrice=max_price, **common,
+        )
+        return
+    max_pair_sum = variant.get("favoriteMaxPairAskSum")
+    if max_pair_sum is not None and up_ask is not None and down_ask is not None and up_ask + down_ask > float(max_pair_sum) + 1e-9:
+        # 訂單簿不一致：領先方 ask 高只是因為賣單薄，另一邊 ask 沒有跟著掉 → 不是真的領先
+        record_window_diagnostic(
+            variant_id, slug, "favorite_book_inconsistent",
+            selectedSide=side, selectedAsk=ask, pairAskSum=round(up_ask + down_ask, 4), favoriteMaxPairAskSum=max_pair_sum, **common,
         )
         return
     if flip_lookback > 0:
