@@ -848,6 +848,19 @@ if any(a["id"] == "btc" for a in ASSETS):
                 "followWallets": [_w], "followMaxPrice": _maxp, "followMinRemaining": 5.0,
             })
     del _w, _lbl, _maxp
+# 2026-09-20 依使用者要求：XRP 5m 也做 (C)——24h XRP 5m 掃描（288 窗、22k 筆）最賺的兩個方向性錢包（市場小，單窗名目只有 $25～75，純觀察）。
+if any(a["id"] == "xrp" for a in ASSETS):
+    for _w, _lbl, _maxp in (
+        ("0xe3eeb127d5763a6e4ad597f773f9d259c94d5176", "XRP 跟單錢包 0xe3eeb1（中段買領先方 0.945、24h 55 窗 70%、+260）", 0.97),
+        ("0xa9369ef35c84e7fb6e569f673afc585309bd56ac", "XRP 跟單錢包 0xa9369e（中段 50/50 押方向 0.60、24h 29 窗 72%、+247）", 0.70),
+    ):
+        if not any(v["id"] == f"xrp-follow-{_w[:8]}" for v in AB_VARIANTS):
+            AB_VARIANTS.append({
+                "id": f"xrp-follow-{_w[:8]}", "assetId": "xrp", "label": _lbl,
+                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": True,
+                "followWallets": [_w], "followMaxPrice": _maxp, "followMinRemaining": 5.0,
+            })
+    del _w, _lbl, _maxp
 
 # 2026-09-16 依使用者要求：模擬盤所有買領先方變體一律停損（原本「不停損」的也改；0.85 → 同日改 0.60），
 # 含自動駕駛加進來的；標籤同步改寫。open-reversal 等非買領先方變體沒有停損機制，不動。
