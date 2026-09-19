@@ -417,6 +417,31 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual(sim.ab_states[vid]["trades"][0]["exitReason"], "favorite_stop_loss")
         self.assertLess(sim.ab_states[vid]["trades"][0]["pnl"], 0)
 
+    def test_mid_favorite_mid_momentum_and_follow_wallet_variants_from_scan(self):
+        # 2026-09-19 (A) 中段買領先方：剩 210～120s、ask 0.87～0.95、不停損、兩邊 ask 合計 <= 1.03
+        a = sim.AB_VARIANT_BY_ID["btc-mid-favorite-087-095"]
+        self.assertEqual((a["favoriteWindowSeconds"], a["favoriteMinRemaining"], a["favoriteMinPrice"], a["favoriteMaxPrice"], a["favoriteStopLossPrice"], a["favoriteMaxPairAskSum"]),
+                         (210.0, 120.0, 0.87, 0.95, None, 1.03))
+        a15 = sim.AB_VARIANT_BY_ID["btc-15m-mid-favorite-087-095"]
+        self.assertEqual((a15["favoriteWindowSeconds"], a15["favoriteMinRemaining"]), (630.0, 360.0))
+        up, down = self._favorite_books(up_ask=0.90, down_ask=0.11)
+        sim.simulate_trading("btc-mid-favorite-087-095", "btc-window", up, down, 250.0, None)   # 還沒到 T+90
+        self.assertIsNone(sim.ab_states["btc-mid-favorite-087-095"]["position"])
+        sim.simulate_trading("btc-mid-favorite-087-095", "btc-window", up, down, 100.0, None)   # 過了 T+180
+        self.assertIsNone(sim.ab_states["btc-mid-favorite-087-095"]["position"])
+        sim.simulate_trading("btc-mid-favorite-087-095", "btc-window", up, down, 150.0, None)   # T+150、ask 0.90 → 進
+        self.assertEqual(sim.ab_states["btc-mid-favorite-087-095"]["position"]["side"], "Up")
+        # (B) 中段動能方向性：T+60～120s、ask 0.45～0.60、無停利停損
+        b = sim.AB_VARIANT_BY_ID["btc-mid-momentum-hold"]
+        self.assertEqual((b["openMinElapsedSeconds"], b["openMaxElapsedSeconds"], b["openMinPrice"], b["openMaxPrice"], b["openMinMovePct"]), (60.0, 120.0, 0.45, 0.60, 0.02))
+        self.assertNotIn("favoriteStopLossPrice", b)
+        self.assertEqual((sim.AB_VARIANT_BY_ID["btc-15m-mid-momentum-hold"]["openMinElapsedSeconds"], sim.AB_VARIANT_BY_ID["btc-15m-mid-momentum-hold"]["openMaxElapsedSeconds"]), (180.0, 360.0))
+        # (C) 跟單兩個中段方向性錢包
+        c1 = sim.AB_VARIANT_BY_ID["btc-follow-0x17b3ba"]; c2 = sim.AB_VARIANT_BY_ID["btc-follow-0xa8278b"]
+        self.assertEqual((c1["followWallets"], c1["followMaxPrice"]), (["0x17b3babf88a6ed72458f3675ccdf2ade7ee2ff40"], 0.70))
+        self.assertEqual((c2["followWallets"], c2["followMaxPrice"]), (["0xa8278bd8002eddb9b26deb70d8331c23da45f959"], 0.95))
+        self.assertIn("0x17b3babf88a6ed72458f3675ccdf2ade7ee2ff40", sim._follow_wallets_for_asset("btc"))
+
     def test_open_momentum_buys_direction_of_previous_minute_within_first_seconds(self):
         vid = "btc-open-momentum"
         ms = sim.markets_state["btc"]

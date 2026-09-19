@@ -799,12 +799,55 @@ def _early_directional_exit_variant(asset: dict) -> dict:
     }
 
 
+def _mid_favorite_variant(asset: dict) -> dict:
+    """2026-09-19 (A)：側寫錢包 0xa8278bd8（24h 20 窗 100%、+2,250）——T+85～184s 買已領先的一邊 0.87～0.93、抱到結算、從不賣。
+    用買領先方引擎：剩餘 210～120s（5m；15m ×3）、ask 0.87～0.95、不停損；加訂單簿一致性檢查（兩邊 ask 合計 <= 1.03）。"""
+    k = float(asset.get("windowSeconds", 300)) / 300.0
+    return {
+        "id": f"{asset['id']}-mid-favorite-087-095", "assetId": asset["id"],
+        "label": f"{asset['label']} 中段買領先方（T+{90 * k:.0f}～{180 * k:.0f}s、0.87～0.95、不停損）",
+        "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "lateFavorite": True, "simOnly": True,
+        "favoriteWindowSeconds": 210.0 * k, "favoriteMinRemaining": 120.0 * k,
+        "favoriteMinPrice": 0.87, "favoriteMaxPrice": 0.95, "favoriteStopLossPrice": None, "favoriteTakeProfitPrice": None,
+        "favoriteStableSeconds": 0.0, "noStop": True, "favoriteMaxPairAskSum": 1.03,
+    }
+
+
+def _mid_momentum_hold_variant(asset: dict) -> dict:
+    """2026-09-19 (B)：側寫錢包 0x17b3babf（24h 59 窗 63%、+4,717）——T+35～120s 在近 50/50 時押一邊 0.46～0.64、抱到結算。
+    它的方向訊號看不到，用 Binance 最近 1 分鐘動能當代理：T+60～120s（15m ×3）、|Δ|>=0.02%、ask 0.45～0.60、無停利停損。"""
+    k = float(asset.get("windowSeconds", 300)) / 300.0
+    return {
+        "id": f"{asset['id']}-mid-momentum-hold", "assetId": asset["id"],
+        "label": f"{asset['label']} 中段動能方向性（T+{60 * k:.0f}～{120 * k:.0f}s 最近 1 分鐘動能、0.45～0.60、抱到結算）",
+        "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "openMomentum": True, "simOnly": True,
+        "openMinElapsedSeconds": 60.0 * k, "openMaxElapsedSeconds": 120.0 * k,
+        "openMinPrice": 0.45, "openMaxPrice": 0.60, "openMinMovePct": 0.02,
+    }
+
+
 for _asset in ASSETS:
     if _asset.get("marketMakerOnly"):
         continue
-    if not any(v["id"] == f"{_asset['id']}-early-directional-exit" for v in AB_VARIANTS):
-        AB_VARIANTS.append(_early_directional_exit_variant(_asset))
-del _asset
+    for _mk in (_early_directional_exit_variant, _mid_favorite_variant, _mid_momentum_hold_variant):
+        _nv = _mk(_asset)
+        if not any(v["id"] == _nv["id"] for v in AB_VARIANTS):
+            AB_VARIANTS.append(_nv)
+del _asset, _mk, _nv
+
+# 2026-09-19 (C) 依使用者要求：跟單 24h BTC 5m 掃描「窗口中段單邊方向性」最賺的兩個錢包（用現成跟單引擎複製它們的買單）。
+if any(a["id"] == "btc" for a in ASSETS):
+    for _w, _lbl, _maxp in (
+        ("0x17b3babf88a6ed72458f3675ccdf2ade7ee2ff40", "BTC 跟單錢包 0x17b3ba（中段 50/50 押方向、24h 59 窗 63%、+4,717）", 0.70),
+        ("0xa8278bd8002eddb9b26deb70d8331c23da45f959", "BTC 跟單錢包 0xa8278b（中段買領先方 0.87～0.93、24h 20 窗 100%、+2,250）", 0.95),
+    ):
+        if not any(v["id"] == f"btc-follow-{_w[:8]}" for v in AB_VARIANTS):
+            AB_VARIANTS.append({
+                "id": f"btc-follow-{_w[:8]}", "assetId": "btc", "label": _lbl,
+                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": True,
+                "followWallets": [_w], "followMaxPrice": _maxp, "followMinRemaining": 5.0,
+            })
+    del _w, _lbl, _maxp
 
 # 2026-09-16 依使用者要求：模擬盤所有買領先方變體一律停損（原本「不停損」的也改；0.85 → 同日改 0.60），
 # 含自動駕駛加進來的；標籤同步改寫。open-reversal 等非買領先方變體沒有停損機制，不動。
