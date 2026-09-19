@@ -2074,11 +2074,15 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertFalse(strategy.live_state.get("halted"))
 
-    async def test_preflight_check_halts_when_retry_also_fails(self):
+    async def test_preflight_check_skips_window_without_halting_when_retries_exhausted(self):
+        # 2026-09-20：唯讀查詢連續失敗（Polymarket 帳戶端點逾時）→ 重試 3 次後跳過本窗口，不再 _set_halt
         self._set_market_for_preflight()
+        strategy.sim.state["market"]["slug"] = "btc-updown-5m-preflight"
+        calls = {"n": 0}
 
         def always_fails(token_id):
-            raise OSError("[Errno 11] Resource temporarily unavailable")
+            calls["n"] += 1
+            raise OSError("The read operation timed out")
 
         with (
             patch.object(strategy.live, "get_conditional_balance", side_effect=always_fails),
@@ -2087,7 +2091,20 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             result = await strategy._ensure_no_unmanaged_current_position()
 
         self.assertFalse(result)
-        self.assertTrue(strategy.live_state.get("halted"))
+        self.assertFalse(strategy.live_state.get("halted"))
+        self.assertEqual(calls["n"], strategy.PREFLIGHT_RETRY_ATTEMPTS)
+        self.assertEqual(strategy.live_state.get("preflightSkipSlug"), "btc-updown-5m-preflight")
+        # 掛單查詢連續失敗同樣跳過不停機
+        strategy.live_state["preflightSkipSlug"] = None
+        with (
+            patch.object(strategy.live, "get_conditional_balance", return_value=0.0),
+            patch.object(strategy.live, "get_open_orders", side_effect=OSError("The read operation timed out")),
+            patch.object(strategy.asyncio, "sleep", AsyncMock()),
+        ):
+            result = await strategy._ensure_no_unmanaged_current_position()
+        self.assertFalse(result)
+        self.assertFalse(strategy.live_state.get("halted"))
+        self.assertEqual(strategy.live_state.get("preflightSkipSlug"), "btc-updown-5m-preflight")
 
     async def test_preflight_check_halts_on_real_unmanaged_position(self):
         self._set_market_for_preflight()

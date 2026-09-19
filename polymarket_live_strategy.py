@@ -1255,6 +1255,8 @@ async def _run_mirror_entry(slug: str, side: str, decision_lock: asyncio.Lock) -
             return
         dry_run = not _real_execution_enabled()
         if not dry_run and live_state.get("preflightSlug") != slug:
+            if live_state.get("preflightSkipSlug") == slug:
+                return   # 本窗口 preflight 查詢連續失敗，已決定跳過
             if not await _ensure_no_unmanaged_current_position():
                 return
             live_state["preflightSlug"] = slug; save_live_state()
@@ -1614,6 +1616,36 @@ def _strategy_cash_sync(dry_run: bool) -> float | None:
     return _cash_cache["value"]
 
 
+PREFLIGHT_RETRY_ATTEMPTS = 3
+PREFLIGHT_RETRY_DELAY_SECONDS = 1.0
+
+
+async def _preflight_query_with_retry(label: str, fn, *args):
+    """2026-09-20：preflight 的唯讀查詢（token 餘額、掛單）改為重試 PREFLIGHT_RETRY_ATTEMPTS 次；
+    Polymarket 帳戶端點間歇 read timeout 時，原本一次失敗就 _set_halt（且不會自動解除），09-19 實盤②③
+    因此停機。這些查詢失敗時本來就不會送單，改成由呼叫端跳過本窗口即可。"""
+    last_exc: Exception | None = None
+    for attempt in range(1, PREFLIGHT_RETRY_ATTEMPTS + 1):
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except Exception as exc:
+            last_exc = exc
+            log.warning(f"[LIVE] preflight {label} 失敗（第 {attempt}/{PREFLIGHT_RETRY_ATTEMPTS} 次）：{exc}")
+            if attempt < PREFLIGHT_RETRY_ATTEMPTS:
+                await asyncio.sleep(PREFLIGHT_RETRY_DELAY_SECONDS * attempt)
+    raise last_exc  # type: ignore[misc]
+
+
+def _skip_window_preflight_unavailable(check: str, exc: Exception) -> None:
+    """preflight 唯讀查詢連續失敗：不停機，記下本窗口 slug 讓這個窗口不再嘗試（下一窗口重新來）。"""
+    slug = (sim.state.get("market") or {}).get("slug")
+    live_state["preflightSkipSlug"] = slug
+    live_state["preflightSkipReason"] = f"{check}: {exc}"
+    save_live_state()
+    record_live_window_diagnostic(slug, "preflight_unavailable_skip_window", check=check, error=str(exc)[:200])
+    log.error(f"[LIVE] preflight {check} 連續 {PREFLIGHT_RETRY_ATTEMPTS} 次失敗，本窗口不下單（不停機）：{exc}")
+
+
 async def _query_conditional_balance_with_retry(token_id: str) -> float:
     """查詢單一 token 餘額，失敗重試一次。2026-09：這裡原本用 asyncio.gather 讓兩個
     token 的查詢同時發出，結果兩個背景執行緒在程式剛啟動時同時打中 py_clob_client_v2
@@ -1621,11 +1653,7 @@ async def _query_conditional_balance_with_retry(token_id: str) -> float:
     [Errno 11] Resource temporarily unavailable（連兩台不同 VPS 都一樣）。改成序列
     查詢完全避開這個 race，並加一次重試——這個檢查失敗會直接讓整個策略停止下單，
     不該讓單次暫時性錯誤就要人工介入重啟。"""
-    try:
-        return await asyncio.to_thread(live.get_conditional_balance, token_id)
-    except Exception:
-        await asyncio.sleep(1.0)
-        return await asyncio.to_thread(live.get_conditional_balance, token_id)
+    return await _preflight_query_with_retry("token 餘額", live.get_conditional_balance, token_id)
 
 
 WARMUP_RETRY_ATTEMPTS = 3
@@ -1656,7 +1684,7 @@ async def _ensure_no_unmanaged_current_position() -> bool:
         up_balance = await _query_conditional_balance_with_retry(up_id)
         down_balance = await _query_conditional_balance_with_retry(down_id)
     except Exception as exc:
-        _set_halt(f"preflight_position_check_failed: {exc}")
+        _skip_window_preflight_unavailable("position_check", exc)
         return False
     # 2026-09-17 多實盤：同一錢包的其他實盤進程若在同一市場持倉，這些 token 餘額是「它管的」，不算未管理。
     peer_up = peer_down = 0.0
@@ -1686,9 +1714,9 @@ async def _ensure_no_unmanaged_current_position() -> bool:
         )
         return False
     try:
-        open_orders = await asyncio.to_thread(live.get_open_orders)
+        open_orders = await _preflight_query_with_retry("掛單", live.get_open_orders)
     except Exception as exc:
-        _set_halt(f"preflight_open_order_check_failed: {exc}")
+        _skip_window_preflight_unavailable("open_order_check", exc)
         return False
     current_tokens = {str(up_id), str(down_id)}
     current_open_orders = []
@@ -2786,6 +2814,9 @@ async def _evaluate_and_act_impl(
 
         dry_run = not _real_execution_enabled()
         if not dry_run and live_state.get("preflightSlug") != slug:
+            if live_state.get("preflightSkipSlug") == slug:
+                record_live_window_diagnostic(slug, "preflight_unavailable_skip_window")
+                return
             if not await _ensure_no_unmanaged_current_position():
                 return
             live_state["preflightSlug"] = slug
