@@ -705,6 +705,23 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertAlmostEqual(cash, expected)
         self.assertAlmostEqual(portfolio, expected)
 
+    def test_total_staked_accumulates_and_roi_is_reported(self):
+        # 2026-09-20：每筆結算把 stakeUsd 累加到 totalStaked，payload 帶 roi（%）與 roiPerTrade
+        vid = "btc-late-favorite"
+        self._set_chainlink_signal(opening=100.0, current=100.3)
+        up, down = self._favorite_books()
+        sim.simulate_trading(vid, "btc-window", up, down, 40.0, None)
+        pos = sim.ab_states[vid]["position"]; self.assertIsNotNone(pos)
+        stake = float(pos["stakeUsd"])
+        sim.ab_states[vid]["position"] = None
+        sim.record_trade(vid, pos, sim._settle_pnl(pos, "Up"), "Up")
+        st = sim.ab_states[vid]
+        self.assertAlmostEqual(st["totalStaked"], stake, places=6)
+        self.assertGreater(st["totalPnl"], 0)
+        payload = next(v for v in sim.build_ab_leaderboard() if v["id"] == vid)
+        self.assertAlmostEqual(payload["roi"], st["totalPnl"] / stake * 100.0, places=6)
+        self.assertAlmostEqual(payload["roiPerTrade"], payload["roi"] / st["totalTrades"], places=6)
+
     def test_state_survives_restart(self):
         sim.ab_states["btc-main"]["totalPnl"] = 12.34
         sim.save_sim_state()

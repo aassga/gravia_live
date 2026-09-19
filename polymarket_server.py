@@ -974,6 +974,7 @@ def _new_variant_state() -> dict:
         "trades":             [],    # 已結算紀錄，最新在前，最多保留 50 筆
         "totalPnl":           0.0,
         "totalTrades":        0,
+        "totalStaked":        0.0,   # 2026-09-20：累計投入本金（每筆 stakeUsd 加總），ROI = totalPnl / totalStaked
         "wins":                0,
         "totalFees":           0.0,
         "lockedTrades":        0,
@@ -1506,6 +1507,13 @@ def load_sim_state() -> None:
                 ).fetchone()
                 if first and first[0]:
                     defaults["enabledAt"] = float(first[0])
+            if "totalStaked" not in loaded:
+                # 2026-09-20：舊狀態沒有累計投入：從這一輪的歷史成交回填（stakeUsd 加總）。
+                row = db.execute(
+                    "SELECT COALESCE(SUM(json_extract(trade_json,'$.stakeUsd')),0) FROM sim_trades WHERE run_id=? AND variant_id=?",
+                    (run_id, variant_id),
+                ).fetchone()
+                defaults["totalStaked"] = float(row[0] or 0.0)
             ab_states[variant_id] = defaults
         except Exception as exc:
             log.warning(f"[SIM:{variant_id}] 無法載入狀態，改用空白狀態：{exc}")
@@ -4369,6 +4377,7 @@ def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
     st["totalPnl"] += pnl
     st["totalFees"] += fees
     st["totalTrades"] += 1
+    st["totalStaked"] = float(st.get("totalStaked") or 0.0) + float(trade.get("stakeUsd") or _position_paid_cost(pos) or 0.0)
     if trade_type == "inventory_rotation":
         if float(trade.get("residualShares", 0)) > 1e-9:
             _rotation_stats(st)["unpairedSettlements"] += 1
@@ -5321,6 +5330,10 @@ def build_ab_leaderboard() -> list:
             "stabilitySeconds": float(v.get("stabilitySeconds", 0.0)),
             "totalPnl":      st["totalPnl"],
             "totalTrades":   st["totalTrades"],
+            "totalStaked":   float(st.get("totalStaked") or 0.0),
+            # ROI（%）= 累計損益 ÷ 累計投入本金；roiPerTrade = ROI ÷ 筆數
+            "roi":           (st["totalPnl"] / float(st["totalStaked"]) * 100.0) if float(st.get("totalStaked") or 0) > 0 else None,
+            "roiPerTrade":   (st["totalPnl"] / float(st["totalStaked"]) * 100.0 / st["totalTrades"]) if float(st.get("totalStaked") or 0) > 0 and st["totalTrades"] else None,
             "wins":          st["wins"],
             "winRate":       win_rate,
             "cash":          cash,

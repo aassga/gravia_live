@@ -173,8 +173,10 @@ def format_sim(sim: dict, asset_id: str | None = None) -> str:
             n = int(v.get("totalTrades") or 0)
             avg = (float(v.get("totalPnl") or 0) / n) if n else 0.0
             since = f" · 自 {_ts(v['enabledAt'])[:11]}" if v.get("enabledAt") else ""
+            roi = v.get("roi")
+            roi_txt = f" · ROI {roi:+.2f}%" if isinstance(roi, (int, float)) else ""
             lines.append(
-                f"{'★' if v is rows[0] else '·'} {v.get('label')}：{_money(v.get('totalPnl'))}"
+                f"{'★' if v is rows[0] else '·'} {v.get('label')}：{_money(v.get('totalPnl'))}{roi_txt}"
                 f" · {n} 筆 · 平均 {_money(avg)}/筆 · 回撤 ${float(v.get('maxDrawdown') or 0):.2f}"
                 f"{' · 持倉中' if v.get('hasPosition') else ''}{since}"
             )
