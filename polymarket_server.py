@@ -4497,6 +4497,12 @@ def _variant_books_are_coherent(asset_id: str, variant: dict, up_book: dict, dow
     # signal determines the side. Pair strategies still require both legs.
     if variant.get("lateDirectionOnly") or variant.get("dumpThenHedge"):
         return True
+    # 2026-09-19：買領先方／跟單／開盤反向也只用「選到的那一腿」，各自在進場前用
+    # _simulation_direction_book_is_fresh 驗證；不再要求兩腿都新鮮。原本套兩腿檢查時，最後一分鐘
+    # 落後那邊（0.02）常幾秒沒更新 → 整個窗口被「兩腿報價過舊／並非都來自 WS 快照」跳過，模擬盤
+    # 因此漏掉實盤有進的窗口（09-19 02:24、04:49 兩個翻面窗口都是），數字系統性比實盤漂亮。
+    if variant.get("lateFavorite") or variant.get("followWallets") or variant.get("openReversal") or variant.get("openMomentum"):
+        return True
     max_skew = SIM_BOOK_MAX_SKEW_SECONDS
     log_key = asset_id
     coherent = _simulation_books_are_coherent(

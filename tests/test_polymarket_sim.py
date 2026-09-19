@@ -415,6 +415,16 @@ class PolymarketSimulationTests(unittest.TestCase):
         ms["walletSignals"] = {}
         self.assertIn("btc-15m-follow-0x42811a", sim.AB_VARIANT_BY_ID)
 
+    def test_single_leg_variants_skip_two_leg_coherence_guard(self):
+        # 2026-09-19：買領先方只驗選到的那一腿；對邊 book 是舊的（REST）也要能進
+        vid = "btc-auto-45-60s-098-099" if "btc-auto-45-60s-098-099" in sim.AB_VARIANT_BY_ID else "btc-late-favorite"
+        v = sim.AB_VARIANT_BY_ID[vid]
+        fresh = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 500}], "bids": [{"price": 0.97, "size": 500}]})
+        stale = {"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.03, "size": 500}], "bids": [{"price": 0.02, "size": 500}], "quoteSource": "rest"}
+        self.assertTrue(sim._variant_books_are_coherent("btc", v, fresh, stale))
+        pair = sim.AB_VARIANT_BY_ID["btc-relaxed-lock"]
+        self.assertFalse(sim._variant_books_are_coherent("btc", pair, fresh, stale))   # 兩腿策略仍要求兩邊都新鮮
+
     def test_open_reversal_buys_opposite_of_previous_window(self):
         # 2026-09-15：開盤 15～60s 買「與前一窗結果相反」那邊（0.48～0.56），前一窗結果由換窗時的中價決定
         vid = "btc-open-reversal"
