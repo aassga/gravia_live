@@ -42,6 +42,7 @@ log = logging.getLogger("polymarket_live_status")
 
 CLIENTS: set = set()
 last_payload: dict = {"connected": False, "error": None, "fetchedAt": time.time()}
+_last_trades: list = []   # 成交紀錄查詢逾時時沿用的上一次結果
 _RESOLVED_TOKENS: set = set()  # 已確認市場結算、訂單簿撤掉的 token，之後不用再查，省 API 呼叫也省吵人的 404 log
 
 
@@ -176,7 +177,17 @@ def _fetch_state() -> dict:
     balance_raw = live.get_usdc_balance()
     ping_ms = (time.monotonic() - _ping_t0) * 1000
     orders = live.get_open_orders()
-    trades = live.get_trade_history(limit=30)
+    # 2026-09-20：Polymarket /data/trades 端點會間歇逾時（read timed out）；以前一逾時整份快照就丟掉，
+    # 頁面全空白。改成成交紀錄獨立容錯：失敗就沿用上一次成功的清單並標記 tradesError，餘額／策略狀態照常送。
+    global _last_trades
+    trades_error = None
+    try:
+        trades = live.get_trade_history(limit=30)
+        _last_trades = trades
+    except Exception as exc:
+        trades_error = f"{exc.__class__.__name__}: {str(exc)[:120]}"
+        log.warning(f"成交紀錄查詢失敗，沿用上一次的 {len(_last_trades)} 筆：{trades_error}")
+        trades = _last_trades
     positions = _compute_open_positions(trades)
     strategy_state = _load_strategy_state()
     _backfill_win_loss(strategy_state)
@@ -205,6 +216,7 @@ def _fetch_state() -> dict:
         "openOrders": orders,
         "openPositions": positions,
         "trades": trades,
+        "tradesError": trades_error,
         "strategyState": strategy_state,
         "strategyConfig": {
             # 2026-09-12：實盤單邊進場（POLY_LIVE_ENTRY_MAX_PRICE）是 .env 疊加在變體上的，

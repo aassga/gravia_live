@@ -253,9 +253,14 @@ function onData(d){
     regionBadge.className = 'badge ' + (typeof d.clobPingMs === 'number' && d.clobPingMs < 100 ? 'badge-live' : 'badge-off');
   }
 
-  if(d.connected){
+  if(d.connected && d.tradesError){
+    connBadge.className = 'badge badge-off';
+    connBadge.innerHTML = '<span class="badge-dot"></span> 已連線 · 成交紀錄暫時查不到（沿用上次）';
+    connBadge.title = d.tradesError;
+  } else if(d.connected){
     connBadge.className = 'badge badge-live';
     connBadge.innerHTML = '<span class="badge-dot"></span> 已連線 · 真實資料';
+    connBadge.title = '';
   } else {
     connBadge.className = 'badge badge-off';
     connBadge.innerHTML = '<span class="badge-dot"></span> 查詢失敗' + (d.error ? '：' + d.error : '');
