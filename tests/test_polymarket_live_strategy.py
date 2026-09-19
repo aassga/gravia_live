@@ -983,6 +983,43 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
                 _, budget3 = strategy._target_pair_order(29.4)              # 原本算法：30% × 現金
                 self.assertAlmostEqual(budget3, 8.82, places=6)
 
+    async def test_mirror_mode_enters_when_sim_variant_enters(self):
+        # 2026-09-19：鏡像模式——模擬盤同變體進場 → 實盤跟著買同一邊；別的變體／別的窗口不理
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.98, "size": 500}], "bids": [{"price": 0.97, "size": 500}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.03, "size": 500}], "bids": [{"price": 0.02, "size": 500}]})
+        strategy.sim.state["market"] = {"slug": "btc-window", "outcomes": json.dumps(["Up", "Down"]), "clobTokenIds": json.dumps(["u", "d"])}
+        strategy.sim.state["windowEndsAt"] = (strategy.sim.real_now() + 50) * 1000
+        strategy.sim.state["upBook"], strategy.sim.state["downBook"] = up, down
+        strategy.live_state["position"] = None; strategy.live_state["lateFavoriteWindowSlug"] = None
+        lock = asyncio.Lock()
+        with (
+            patch.object(strategy, "MIRROR_SIM", True),
+            patch.object(strategy, "LATE_FAVORITE_ENABLED", True),
+            patch.object(strategy, "LATE_FAVORITE_MAX_PRICE", 0.99),
+            patch.object(strategy, "LATE_FAVORITE_MIN_REMAINING", 5.0),
+            patch.object(strategy, "_strategy_cash", AsyncMock(return_value=100.0)),
+        ):
+            strategy._on_sim_entry("some-other-variant", "btc-window", "Up", {}, lock)
+            self.assertFalse(strategy._ws_action_in_flight["v"])
+            strategy._on_sim_entry(strategy.LIVE_VARIANT_ID, "btc-window-old", "Up", {}, lock)
+            self.assertFalse(strategy._ws_action_in_flight["v"])
+            strategy._on_sim_entry(strategy.LIVE_VARIANT_ID, "btc-window", "Up", {}, lock)
+            self.assertTrue(strategy._ws_action_in_flight["v"])
+
+            async def wait_entry():
+                while strategy._ws_action_in_flight["v"] or strategy.live_state["position"] is None:
+                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(wait_entry(), timeout=2.0)
+            pos = strategy.live_state["position"]
+            self.assertEqual(pos["side"], "Up"); self.assertEqual(pos["strategy"], "late_favorite")
+            self.assertLessEqual(pos["entryLimitPrice"], 0.99)
+            # 輪詢路徑在鏡像模式下不自己進場
+            strategy.live_state["position"] = None; strategy.live_state["lateFavoriteWindowSlug"] = None
+            with patch.object(strategy, "_try_late_favorite_entry", AsyncMock()) as own:
+                await strategy.evaluate_and_act("btc-window", None, 50.0, None)
+                own.assert_not_called()
+        strategy.live_state["position"] = None; strategy.live_state["lateFavoriteWindowSlug"] = None
+
     async def test_wallet_follow_plan_follows_signal_and_enters_once(self):
         # 2026-09-17 實盤跟單：sim.state["walletSignals"] 有本窗口 BUY 訊號 → 買同一邊；每窗一次；ask > 0.90 不跟
         up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.62, "size": 500}], "bids": [{"price": 0.61, "size": 500}]})

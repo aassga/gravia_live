@@ -2127,6 +2127,11 @@ def enter_position(
     )
     item["entryCount"] = int(item.get("entryCount", 0)) + 1
     save_sim_state()
+    for _cb in list(_sim_entry_listeners):
+        try:
+            _cb(variant_id, slug, side, fill)
+        except Exception as exc:
+            log.warning(f"[SIM:{variant_id}] entry listener failed: {exc}")
     log.info(
         f"[SIM:{variant_id}] 進場 {side} VWAP=${fill['vwap']:.4f} decision=${fill['decisionPrice']:.4f} "
         f"fee=${fill['fee']:.4f} "
@@ -4380,6 +4385,16 @@ _ws_snapshot_tokens: set = set()
 _ws_book_updated_at: dict = {}
 _ws_last_message_at = 0.0
 _ws_price_listeners: set = set()
+# 2026-09-19 實盤鏡像模式：模擬變體一進場就通知（variant_id, slug, side, fill）；實盤據此跟著下同一邊。
+_sim_entry_listeners: set = set()
+
+
+def register_sim_entry_listener(callback) -> None:
+    _sim_entry_listeners.add(callback)
+
+
+def unregister_sim_entry_listener(callback) -> None:
+    _sim_entry_listeners.discard(callback)
 _ws_simulation_ticks_enabled = True
 _pending_simulation_ticks: set[tuple[str, str]] = set()
 _pending_ws_price_ticks: set[str] = set()

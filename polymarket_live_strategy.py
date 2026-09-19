@@ -176,6 +176,9 @@ LATE_DIRECTION_STOP_LOSS_PRICE = (
 )
 # 2026-09-17 跟單錢包（實盤②）：模擬盤的 wallet_follow_loop 每 5 秒把跟單對象在本窗口的 BUY 寫進
 # sim.state["walletSignals"]，這裡看到就買同一邊（ask <= FOLLOW_MAX_PRICE）、每窗一次、抱到結算、不停損。
+# 2026-09-19 依使用者要求「實盤只追蹤模擬盤的下注」：MIRROR_SIM=true 時實盤不自己判斷進場，
+# 只在同進程模擬盤的同一變體進場時，跟著買同一邊（股數照實盤自己的比例）；出場（停損／獲利了結）仍照實盤規則。
+MIRROR_SIM = os.environ.get("POLY_LIVE_MIRROR_SIM", "false").strip().lower() == "true"
 FOLLOW_WALLETS = [w.lower() for w in (_LIVE_VARIANT.get("followWallets") or [])]
 FOLLOW_ENABLED = bool(FOLLOW_WALLETS)
 FOLLOW_MAX_PRICE = float(os.environ.get("POLY_LIVE_FOLLOW_MAX_PRICE") or _LIVE_VARIANT.get("followMaxPrice", 0.90))
@@ -1200,6 +1203,93 @@ async def _run_ws_wallet_follow_entry(slug: str, plan: dict, dry_run: bool, deci
             live_state["position"]["strategy"] = "wallet_follow"
             live_state["followWindowSlug"] = slug
             save_live_state()
+
+
+def _mirror_entry_plan(side: str, slug: str, cash: float) -> dict | None:
+    """鏡像模式：模擬盤剛買了 side，實盤用最新 WS 書買同一邊（ask 不超過買價上限、限價 <= ask+1 tick）。"""
+    book = sim.state.get("upBook") if side == "Up" else sim.state.get("downBook")
+    if not book:
+        record_live_window_diagnostic(slug, "mirror_no_book", selectedSide=side); return None
+    asks = book.get("asks") or []
+    ask = float(asks[0]["price"]) if asks else None
+    max_price = float(LATE_FAVORITE_MAX_PRICE) if LATE_FAVORITE_ENABLED else 0.99
+    if ask is None or ask > max_price:
+        record_live_window_diagnostic(slug, "mirror_price_above_maximum", selectedSide=side, selectedAsk=ask, maxPrice=max_price); return None
+    if not _live_direction_book_is_fresh(side, book):
+        record_live_window_diagnostic(slug, "mirror_book_not_fresh", selectedSide=side); return None
+    _, budget = _target_pair_order(cash)
+    if budget < sim.SIM_MIN_ORDER_NOTIONAL_USD:
+        record_live_window_diagnostic(slug, "mirror_budget_too_small", budgetUsd=budget); return None
+    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    if shares < float(book.get("minOrderSize", 1) or 1):
+        record_live_window_diagnostic(slug, "mirror_below_minimum_shares", targetShares=shares); return None
+    plan = _buy_plan(side, book, shares)
+    if not plan:
+        record_live_window_diagnostic(slug, "mirror_insufficient_depth", selectedSide=side, targetShares=shares); return None
+    plan = _cap_favorite_entry_plan(plan, book, ask, lambda r, **k: record_live_window_diagnostic(slug, r, **k))
+    if not plan:
+        return None
+    if plan["riskNotional"] + plan["fee"] > cash:
+        record_live_window_diagnostic(slug, "mirror_insufficient_cash", cashUsd=cash); return None
+    plan["_signalSource"] = "mirror_sim"; plan["_deltaPct"] = None
+    plan["_signalObservedAt"] = int(time.time() * 1000); plan["_signalAgeSeconds"] = 0.0
+    plan["_bookQuoteSource"] = book.get("quoteSource"); plan["_bookReceivedAtMonotonic"] = book.get("receivedAtMonotonic")
+    record_live_window_diagnostic(slug, "mirror_candidate", status="candidate", selectedSide=side, selectedAsk=ask, targetShares=plan["shares"])
+    return plan
+
+
+async def _run_mirror_entry(slug: str, side: str, decision_lock: asyncio.Lock) -> None:
+    _ws_action_in_flight["v"] = False
+    async with decision_lock:
+        if live_state.get("position") is not None or live_state.get("halted"):
+            return
+        if live_state.get("lateFavoriteWindowSlug") == slug:
+            return
+        market = sim.state.get("market") or {}
+        if market.get("slug") != slug:
+            record_live_window_diagnostic(slug, "mirror_window_changed"); return
+        remaining = max(0.0, float(sim.state.get("windowEndsAt") or 0) / 1000 - sim.real_now())
+        if remaining < LATE_FAVORITE_MIN_REMAINING:
+            record_live_window_diagnostic(slug, "mirror_too_late", remainingSeconds=remaining); return
+        if _first_trade_guard_blocks_new_entry():
+            return
+        dry_run = not _real_execution_enabled()
+        if not dry_run and live_state.get("preflightSlug") != slug:
+            if not await _ensure_no_unmanaged_current_position():
+                return
+            live_state["preflightSlug"] = slug; save_live_state()
+        if not dry_run:
+            up_id, down_id = sim._market_tokens(market)
+            if not live.order_tokens_and_fees_are_warm([up_id, down_id]):
+                condition_id = _market_condition_id()
+                if not condition_id or not await _prewarm_with_retry([up_id, down_id], condition_id):
+                    record_live_window_diagnostic(slug, "mirror_warmup_failed"); return
+        cash = await _strategy_cash(dry_run)
+        plan = _mirror_entry_plan(side, slug, cash)
+        if not plan:
+            return
+        log.info(f"[LIVE] 鏡像模擬盤進場 {side} limit=${plan['limitPrice']:.3f} shares={plan['shares']:.0f} 剩餘={remaining:.0f}s")
+        result = await _enter_position(slug, plan, dry_run)
+        if result == "not_filled" and LATE_FAVORITE_ENABLED:
+            # 跟買領先方一樣：FOK 被拒就用最新書再試一次
+            plan2 = _mirror_entry_plan(side, slug, cash)
+            if plan2:
+                result = await _enter_position(slug, plan2, dry_run)
+        if result == "filled":
+            live_state["position"]["strategy"] = "late_favorite" if LATE_FAVORITE_ENABLED else "mirror"
+            live_state["lateFavoriteWindowSlug"] = slug
+            save_live_state()
+
+
+def _on_sim_entry(variant_id: str, slug: str, side: str, fill: dict, decision_lock: asyncio.Lock) -> None:
+    """模擬盤進場事件（同步呼叫）：只跟自己這個變體、目前窗口，排一個 task 去下單。"""
+    if variant_id != LIVE_VARIANT_ID or live_state.get("halted"):
+        return
+    market = sim.state.get("market") or {}
+    if market.get("slug") != slug or live_state.get("position") is not None:
+        return
+    _ws_action_in_flight["v"] = True
+    asyncio.get_running_loop().create_task(_run_mirror_entry(slug, side, decision_lock))
 
 
 def _cap_favorite_entry_plan(plan: dict, book: dict, ask: float, diag) -> dict | None:
@@ -2717,6 +2807,8 @@ async def _evaluate_and_act_impl(
         if budget < 1.0 or shares < 1.0:
             return
 
+        if MIRROR_SIM:
+            return   # 鏡像模式：進場只由模擬盤的進場事件觸發（_on_sim_entry）
         if LATE_FAVORITE_ENABLED:
             await _try_late_favorite_entry(slug, up_book, down_book, remaining_seconds, cash, dry_run)
             return
@@ -2961,6 +3053,8 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
     pos = live_state.get("position")
 
     if pos is None:
+        if MIRROR_SIM:
+            return
         if FOLLOW_ENABLED:
             if live_state.get("followWindowSlug") == slug or remaining <= 0 or _first_trade_guard_blocks_new_entry():
                 return
@@ -3590,6 +3684,9 @@ async def run_embedded() -> None:
             _on_ws_tick_sync(token_id, session, decision_lock)
 
         sim.register_ws_price_listener(on_ws_tick)
+        if MIRROR_SIM:
+            sim.register_sim_entry_listener(lambda vid, slug, side, fill: _on_sim_entry(vid, slug, side, fill, decision_lock))
+            log.warning(f"  鏡像模式已啟用：實盤只在模擬盤變體 {LIVE_VARIANT_ID} 進場時跟著買同一邊，不自行判斷進場")
         cash_task = asyncio.create_task(_cash_refresh_loop(), name="polymarket-cash-refresh")
         try:
             last_seen_slug: str | None = None
