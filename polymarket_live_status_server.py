@@ -293,14 +293,19 @@ async def poll_loop():
     while True:
         try:
             state = await asyncio.to_thread(_fetch_state)
-            last_payload = state
+            last_payload = state   # 成功：不帶 stale
             log.info(
                 f"真實帳戶狀態：餘額 ${state['balanceUsdc']:.2f}，"
                 f"持有部位 {len(state['openPositions'])} 個，成交 {len(state['trades'])} 筆"
             )
         except Exception as e:
             log.error(f"查詢真實帳戶狀態失敗：{e}")
-            last_payload = {"connected": False, "error": str(e), "fetchedAt": time.time()}
+            if last_payload.get("connected") or last_payload.get("stale"):
+                # 2026-09-20：Polymarket 帳戶查詢間歇逾時；整份失敗就沿用上一份成功快照，標 stale＋錯誤，
+                # 頁面不再在「有資料／全空白」之間閃。fetchedAt 保留成功時間，前端據此顯示「N 秒前」。
+                last_payload = dict(last_payload, stale=True, staleError=str(e), staleAt=time.time())
+            else:
+                last_payload = {"connected": False, "error": str(e), "fetchedAt": time.time()}
         await broadcast(json.dumps(last_payload))
         await asyncio.sleep(POLL_INTERVAL)
 

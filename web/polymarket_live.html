@@ -253,7 +253,11 @@ function onData(d){
     regionBadge.className = 'badge ' + (typeof d.clobPingMs === 'number' && d.clobPingMs < 100 ? 'badge-live' : 'badge-off');
   }
 
-  if(d.connected && d.tradesError){
+  if(d.connected && d.stale){
+    connBadge.className = 'badge badge-off';
+    connBadge.innerHTML = '<span class="badge-dot"></span> 資料為 ' + Math.max(0, Math.round((Date.now()/1000) - (d.fetchedAt||0))) + ' 秒前（Polymarket 查詢逾時，沿用上次）';
+    connBadge.title = d.staleError || '';
+  } else if(d.connected && d.tradesError){
     connBadge.className = 'badge badge-off';
     connBadge.innerHTML = '<span class="badge-dot"></span> 已連線 · 成交紀錄暫時查不到（沿用上次）';
     connBadge.title = d.tradesError;
