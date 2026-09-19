@@ -4772,7 +4772,7 @@ def _run_ws_simulation_tick(token_id: str) -> None:
             if aid == "btc":
                 log_price_sum_diagnostic(
                     f"sim-ws-{aid}", up_book, down_book,
-                    AB_VARIANT_BY_ID["btc-historical-hybrid"]["lockMaxSum"],
+                    (AB_VARIANT_BY_ID.get("btc-historical-hybrid") or {}).get("lockMaxSum", SIM_LOCK_MAX_SUM),
                 )
             for variant_id, variant in AB_VARIANT_BY_ID.items():
                 if variant["assetId"] == aid and _variant_books_are_coherent(
@@ -5093,7 +5093,7 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
     if aid == "btc" and _simulation_books_are_coherent(aid, ms["upBook"], ms["downBook"]):
         log_price_sum_diagnostic(
             f"sim-poll-{aid}", ms["upBook"], ms["downBook"],
-            AB_VARIANT_BY_ID["btc-historical-hybrid"]["lockMaxSum"],
+            (AB_VARIANT_BY_ID.get("btc-historical-hybrid") or {}).get("lockMaxSum", SIM_LOCK_MAX_SUM),
         )
     for variant_id, variant in AB_VARIANT_BY_ID.items():
         if variant["assetId"] == aid and _variant_books_are_coherent(
