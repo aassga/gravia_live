@@ -813,7 +813,8 @@ _SIM_DEFAULT_DISABLED = (
     # 當時 68 筆 97.1% +396；9/8～9/14 同規則 22 筆 59% +30），重新加回模擬盤觀察。
     "btc-main,btc-loose,btc-two-sided-maker,btc-open-momentum,btc-late-favorite,"
     "sol-last30-45-088-092,sol-follow-taker,btc-last10-30-092-095,btc-last30-90-092-095,eth-alt-price-triggered-favorite,"
-    "btc-follow-taker,btc-price-triggered-favorite,btc-last60-098-hold,"
+    # 2026-09-19：btc-last60-098-hold（穩定 10s＋翻面偵測）重新啟用，作為實盤① 無過濾版的對照。
+    "btc-follow-taker,btc-price-triggered-favorite,"
     # 2026-09-15 13:15 再依使用者要求停用累計虧損 350 以上者：ETH 跟單 T（-633）、BTC 30～45s（-569）、
     # BTC 15m 跟單 T（-442）、SOL 價格觸發（-433）。
     "eth-alt-follow-taker,btc-last30-45-088-092,btc-15m-follow-taker,sol-price-triggered-favorite,"
