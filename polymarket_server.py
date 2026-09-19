@@ -775,6 +775,37 @@ def _append_auto_variants() -> None:
 
 _append_auto_variants()
 
+
+def _early_directional_exit_variant(asset: dict) -> dict:
+    """2026-09-19 依使用者要求：把市場掃描「買了再賣（短線／停損）」最賺錢包 0xa6bd3069 的做法做成模擬變體，
+    每個模擬盤資產各一組。側寫：開盤後很早（T+22s 中位）在近 50/50 時買一邊（VWAP 0.48）、漲到 0.99 賣／
+    跌到 0.21 停損、否則抱到結算。這裡方向用 Binance 前一分鐘動能（同 open-momentum），時間參數依窗口長度等比放大。"""
+    k = float(asset.get("windowSeconds", 300)) / 300.0
+    return {
+        "id":                    f"{asset['id']}-early-directional-exit",
+        "assetId":               asset["id"],
+        "label":                 f"{asset['label']} 早段方向性＋主動出場（開盤 {10 * k:.0f}～{60 * k:.0f}s 動能方向、0.40～0.65、停利 0.90／停損 0.30）",
+        "entryMaxPrice":         None,
+        "lockMaxSum":            SIM_LOCK_MAX_SUM,
+        "openMomentum":          True,
+        "simOnly":               True,
+        "openMinElapsedSeconds": 10.0 * k,
+        "openMaxElapsedSeconds": 60.0 * k,
+        "openMinPrice":          0.40,
+        "openMaxPrice":          0.65,
+        "openMinMovePct":        OPEN_MOMENTUM_MIN_MOVE_PCT,
+        "favoriteTakeProfitPrice": 0.90,
+        "favoriteStopLossPrice": 0.30,
+    }
+
+
+for _asset in ASSETS:
+    if _asset.get("marketMakerOnly"):
+        continue
+    if not any(v["id"] == f"{_asset['id']}-early-directional-exit" for v in AB_VARIANTS):
+        AB_VARIANTS.append(_early_directional_exit_variant(_asset))
+del _asset
+
 # 2026-09-16 依使用者要求：模擬盤所有買領先方變體一律停損（原本「不停損」的也改；0.85 → 同日改 0.60），
 # 含自動駕駛加進來的；標籤同步改寫。open-reversal 等非買領先方變體沒有停損機制，不動。
 SIM_FAVORITE_STOP_LOSS_DEFAULT = 0.60   # 2026-09-16 使用者要求 0.85 → 0.60
@@ -3041,7 +3072,8 @@ def _try_open_momentum_entry(
     asset = next((a for a in ASSETS if a["id"] == variant["assetId"]), {})
     window_seconds = float(asset.get("windowSeconds", WINDOW_SECONDS))
     elapsed = window_seconds - remaining_seconds
-    if elapsed < 0 or elapsed > float(variant.get("openMaxElapsedSeconds", OPEN_MOMENTUM_MAX_ELAPSED_SECONDS)):
+    if (elapsed < float(variant.get("openMinElapsedSeconds") or 0)
+            or elapsed > float(variant.get("openMaxElapsedSeconds", OPEN_MOMENTUM_MAX_ELAPSED_SECONDS))):
         record_window_diagnostic(variant_id, slug, "outside_entry_window", remainingSeconds=remaining_seconds)
         return
     klines = markets_state[variant["assetId"]].get("klines") or []
@@ -3063,6 +3095,11 @@ def _try_open_momentum_entry(
     max_price = float(variant.get("openMaxPrice", OPEN_MOMENTUM_MAX_PRICE))
     if ask is None or ask > max_price:
         record_window_diagnostic(variant_id, slug, "momentum_price_above_maximum", selectedSide=side, selectedAsk=ask, momentumPct=move_pct)
+        return
+    min_price = variant.get("openMinPrice")
+    if min_price is not None and ask < float(min_price):
+        # 早段方向性＋主動出場：太便宜代表市場已明顯反向，不追
+        record_window_diagnostic(variant_id, slug, "momentum_price_below_minimum", selectedSide=side, selectedAsk=ask, momentumPct=move_pct)
         return
     if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
         record_window_diagnostic(variant_id, slug, "selected_book_not_fresh", selectedSide=side)
@@ -4049,9 +4086,15 @@ def _simulate_trading_impl(
         return
 
     if variant.get("openMomentum"):
-        # 開盤動能方向性：只在開盤後幾秒進一次，之後抱到結算，不補腿、不停損。
-        if pos is None and remaining_seconds is not None:
-            _try_open_momentum_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        # 開盤動能方向性：只在開盤後幾秒進一次，之後抱到結算，不補腿。
+        # 2026-09-19「早段方向性＋主動出場」變體另設 favoriteTakeProfitPrice／favoriteStopLossPrice：
+        # 持有腿 bid 到停利價就整筆賣、跌到停損價就整筆賣（跟買領先方共用同一套出場）。
+        if pos is None:
+            if remaining_seconds is not None:
+                _try_open_momentum_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        elif pos.get("windowSlug") == slug and not pos.get("hedged"):
+            if not _try_late_favorite_take_profit(variant_id, slug, up_book, down_book):
+                _try_late_favorite_stop_loss(variant_id, slug, up_book, down_book)
         return
 
     if variant.get("openReversal"):

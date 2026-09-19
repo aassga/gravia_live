@@ -379,6 +379,44 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading("btc-last30-45-088-092", "btc-window", up, down, 40.0, None)
         self.assertEqual(sim.ab_states["btc-last30-45-088-092"]["position"]["side"], "Up")
 
+    def test_early_directional_exit_variant_enters_mid_open_and_exits_on_take_profit_or_stop(self):
+        # 2026-09-19：每個資產一組「早段方向性＋主動出場」：開盤 10～60s、動能方向、ask 0.40～0.65、停利 bid>=0.90、停損 bid<=0.30
+        vid = "btc-early-directional-exit"
+        v = sim.AB_VARIANT_BY_ID[vid]
+        self.assertEqual((v["openMinElapsedSeconds"], v["openMaxElapsedSeconds"], v["openMinPrice"], v["openMaxPrice"],
+                          v["favoriteTakeProfitPrice"], v["favoriteStopLossPrice"]), (10.0, 60.0, 0.40, 0.65, 0.90, 0.30))
+        v15 = sim.AB_VARIANT_BY_ID["btc-15m-early-directional-exit"]
+        self.assertEqual((v15["openMinElapsedSeconds"], v15["openMaxElapsedSeconds"]), (30.0, 180.0))   # 15m 時間 ×3
+        sim.markets_state["btc"]["klines"] = [{"t": 1_000, "o": 100.0, "c": 100.0}, {"t": 61_000, "o": 100.0, "c": 100.05}]  # 前一分鐘 +0.05% → 買 Up
+
+        def books(up_ask, up_bid):
+            up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": up_ask, "size": 500}], "bids": [{"price": up_bid, "size": 500}]})
+            down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": round(1 - up_bid, 2), "size": 500}], "bids": [{"price": round(1 - up_ask, 2), "size": 500}]})
+            return up, down
+
+        up, down = books(0.55, 0.54)
+        sim.simulate_trading(vid, "btc-window", up, down, 295.0, None)     # 開盤 5 秒：還沒到 10s，不進
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        sim.simulate_trading(vid, "btc-window", *books(0.35, 0.34), 270.0, None)   # 0.35 < 0.40 太便宜不進
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        sim.simulate_trading(vid, "btc-window", up, down, 270.0, None)     # 開盤 30 秒、ask 0.55 → 進 Up
+        pos = sim.ab_states[vid]["position"]
+        self.assertEqual(pos["side"], "Up")
+        sim.simulate_trading(vid, "btc-window", *books(0.80, 0.79), 200.0, None)   # 0.79：還沒到停利
+        self.assertIsNotNone(sim.ab_states[vid]["position"])
+        sim.simulate_trading(vid, "btc-window", *books(0.92, 0.91), 150.0, None)   # bid 0.91 >= 0.90 → 停利賣出
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        self.assertEqual(sim.ab_states[vid]["trades"][0]["exitReason"], "favorite_take_profit")
+        self.assertGreater(sim.ab_states[vid]["trades"][0]["pnl"], 0)
+        # 下一窗口：進場後翻面，bid 掉到 0.25 → 停損
+        sim.markets_state["btc"]["klines"] = [{"t": 1_000, "o": 100.0, "c": 100.0}, {"t": 61_000, "o": 100.0, "c": 99.95}]  # 前一分鐘 -0.05% → 買 Down
+        sim.simulate_trading(vid, "btc-window-2", *books(0.45, 0.44), 270.0, None)  # Down ask 0.56 → 進 Down
+        self.assertEqual(sim.ab_states[vid]["position"]["side"], "Down")
+        sim.simulate_trading(vid, "btc-window-2", *books(0.76, 0.75), 200.0, None)  # Down bid 0.24 <= 0.30 → 停損
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        self.assertEqual(sim.ab_states[vid]["trades"][0]["exitReason"], "favorite_stop_loss")
+        self.assertLess(sim.ab_states[vid]["trades"][0]["pnl"], 0)
+
     def test_open_momentum_buys_direction_of_previous_minute_within_first_seconds(self):
         vid = "btc-open-momentum"
         ms = sim.markets_state["btc"]
