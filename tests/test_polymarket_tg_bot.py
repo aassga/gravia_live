@@ -85,6 +85,53 @@ class TelegramBotTests(unittest.TestCase):
         cur2 = dict(cur); cur2["strategyExecutionEnabled"] = False
         self.assertTrue(any("DRY-RUN" in a for a in bot.diff_alerts(cur, cur2)))
 
+    def test_strategy_switch_helpers(self):
+        # 2026-09-20 /strategy：候選＝lateFavorite 且非 simOnly；名稱；env 更新（①主 .env vs ②③輕量模擬盤）；TG 選單改名
+        import tempfile
+        sim = {"assetList": [{"id": "btc"}, {"id": "btc-15m"}],
+               "abVariants": [
+                   {"id": "btc-15m-auto-60-90s-098-099", "assetId": "btc-15m", "label": "⚙ BTC15m 60~90", "lateFavorite": True, "simOnly": False,
+                    "favoriteWindowSeconds": 90.0, "favoriteMinRemaining": 60.0, "favoriteMinPrice": 0.98, "favoriteMaxPrice": 0.99, "favoriteStopLossPrice": None,
+                    "totalPnl": 50.0, "totalTrades": 40, "roi": 1.5},
+                   {"id": "btc-auto-45-60s-098-099", "assetId": "btc", "label": "⚙ BTC 45~60", "lateFavorite": True, "simOnly": False,
+                    "favoriteWindowSeconds": 60.0, "favoriteMinRemaining": 45.0, "favoriteMinPrice": 0.98, "favoriteMaxPrice": 0.99, "favoriteStopLossPrice": 0.60,
+                    "totalPnl": 20.0, "totalTrades": 90, "roi": 0.4},
+                   {"id": "btc-mid-favorite-087-095", "assetId": "btc", "label": "sim only", "lateFavorite": True, "simOnly": True, "totalPnl": 99.0},
+                   {"id": "btc-follow-x", "assetId": "btc", "label": "follow", "followWallets": ["0x"], "simOnly": False, "totalPnl": 5.0},
+               ]}
+        rows = bot.strategy_candidates(sim)
+        self.assertEqual([v["id"] for v in rows], ["btc-auto-45-60s-098-099", "btc-15m-auto-60-90s-098-099"])   # 依資產順序，simOnly／跟單不列
+        self.assertEqual(bot.instance_short_name(2, rows[1]), "實盤③BTC15m-60~90s-098")
+        self.assertEqual(bot.instance_short_name(0, rows[0]), "實盤①BTC5m-45~60s-098")
+        kb = bot.strategy_list_keyboard(2, rows, "btc-15m-auto-60-90s-098-099")
+        self.assertTrue(kb[1][0]["text"].startswith("★ "))
+        self.assertEqual(kb[0][0]["callback_data"], "strat:2:0")
+        self.assertEqual(kb[-1][0]["callback_data"], "strat:cancel")
+        self.assertEqual(bot.strategy_confirm_keyboard(2, 1)[0][0]["callback_data"], "strat:2:1:confirm")
+        with tempfile.TemporaryDirectory() as d:
+            main_env = os.path.join(d, ".env"); env3 = os.path.join(d, ".env.live3")
+            with open(main_env, "w", encoding="utf-8") as f:
+                f.write("POLY_SIM_ASSETS=btc,eth-alt\nPOLY_LIVE_VARIANT_ID=old\nTG_LIVE_INSTANCES=實盤①X|ws://a|" + main_env + "|gravia.service|/tmp/a.json;實盤②Y|ws://b|/tmp/b.env|gravia-live2.service|/tmp/b.json;實盤③Z|ws://c|" + env3 + "|gravia-live3.service|/tmp/c.json\n")
+            with open(env3, "w", encoding="utf-8") as f:
+                f.write("POLY_LIVE_ASSET_ID=btc-15m\nPOLY_SIM_ASSETS=btc-15m\nPOLY_STAKE_PCT=30\n")
+            # ③：輕量模擬盤只跑該變體
+            upd = bot.strategy_env_updates({"env": env3}, rows[1], main_env=main_env)
+            self.assertEqual(upd["POLY_LIVE_VARIANT_ID"], "btc-15m-auto-60-90s-098-099")
+            self.assertEqual((upd["POLY_SIM_ASSETS"], upd["POLY_SIM_ONLY_VARIANTS"], upd["POLY_LIVE_FAVORITE_STOP_LOSS_PRICE"]), ("btc-15m", "btc-15m-auto-60-90s-098-099", "0"))
+            # ①：主 .env 只在資產不在清單時補上；停損 0.60
+            upd = bot.strategy_env_updates({"env": main_env}, rows[1], main_env=main_env)
+            self.assertEqual(upd["POLY_SIM_ASSETS"], "btc,eth-alt,btc-15m")
+            self.assertNotIn("POLY_SIM_ONLY_VARIANTS", upd)
+            upd = bot.strategy_env_updates({"env": main_env}, rows[0], main_env=main_env)
+            self.assertNotIn("POLY_SIM_ASSETS", upd)
+            self.assertEqual(upd["POLY_LIVE_FAVORITE_STOP_LOSS_PRICE"], "0.60")
+            # 改名只動第 idx 段
+            value = bot.rename_live_instance(2, "實盤③BTC15m-60~90s-098", main_env=main_env)
+            self.assertTrue(value.startswith("實盤①X|"))
+            self.assertIn(";實盤③BTC15m-60~90s-098|ws://c|", value)
+            self.assertIn("TG_LIVE_INSTANCES=實盤①X|", open(main_env, encoding="utf-8").read())
+        self.assertEqual(bot.live_toggle_keyboard(True, 1)[-1][0]["callback_data"], "strat:1")
+
     def test_live_toggle_env_writer_and_keyboards(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:

@@ -188,6 +188,7 @@ HELP_TEXT = (
     "可用指令：\n"
     "/status — 實盤開關、策略、部位、餘額\n"
     "/live — 實盤真實下單開關（REAL ↔ DRY-RUN，按鈕確認後切換並重啟）\n"
+    "/strategy — 更換實盤策略（選實盤 → 選模擬盤的買領先方變體 → 確認；不動每注%與 REAL/DRY-RUN）\n"
     "/pnl — 實盤損益、平均每筆、最好／最差、今日統計\n"
     "/trades [n] — 最近 n 筆真單（預設 10）\n"
     "/sim — 模擬盤各組損益\n"
@@ -228,8 +229,11 @@ def write_env_flag(key: str, value: str, path: str = ENV_FILE) -> None:
 
 def live_toggle_keyboard(execution_enabled: bool, idx: int = 0) -> list[list[dict]]:
     if execution_enabled:
-        return [[{"text": "🔴 切換為 DRY-RUN（停止真實下單）", "callback_data": f"live:{idx}:dry"}]]
-    return [[{"text": "🟢 開啟真實下單（REAL）", "callback_data": f"live:{idx}:real"}]]
+        rows = [[{"text": "🔴 切換為 DRY-RUN（停止真實下單）", "callback_data": f"live:{idx}:dry"}]]
+    else:
+        rows = [[{"text": "🟢 開啟真實下單（REAL）", "callback_data": f"live:{idx}:real"}]]
+    rows.append([{"text": "🔁 更換策略", "callback_data": f"strat:{idx}"}])   # 2026-09-20
+    return rows
 
 
 def live_confirm_keyboard(target: str, idx: int = 0) -> list[list[dict]]:
@@ -280,6 +284,161 @@ async def send_live_menu(client: httpx.AsyncClient, chat_id: int) -> None:
                                                             "reply_markup": {"inline_keyboard": live_toggle_keyboard(enabled, idx)}})
         except Exception as exc:
             log.warning(f"sendMessage(live menu) failed: {exc}")
+
+# ── 2026-09-20 依使用者要求：TG 上更換實盤策略 ──────────────────────────────
+# /strategy → 選實盤 → 列出主模擬盤「可供實盤選用」（lateFavorite 且非 simOnly）的變體 → 確認 → 寫該實盤 env
+# （資產／變體／買價區間／停損；②③ 另寫進程內輕量模擬盤的資產與變體）、自動改 TG 選單名稱、重啟該實盤服務。
+# 不動每注 % 與 POLY_STRATEGY_ARMED；有持倉／待結算時拒絕。
+_STRATEGY_CANDIDATES: dict[int, list[dict]] = {}
+_ASSET_SHORT = {"btc": "BTC5m", "btc-15m": "BTC15m", "eth-alt": "ETH", "eth": "ETH", "eth-15m": "ETH15m",
+                "xrp": "XRP", "xrp-15m": "XRP15m", "sol": "SOL", "sol-15m": "SOL15m", "doge": "DOGE", "bnb": "BNB"}
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨"
+
+
+def strategy_candidates(sim: dict) -> list[dict]:
+    """主模擬盤快照裡可供實盤選用的變體（買領先方家族、非 simOnly），依資產、損益排序。"""
+    rows = [v for v in (sim.get("abVariants") or []) if v.get("lateFavorite") and not v.get("simOnly")]
+    order = {a.get("id"): i for i, a in enumerate(sim.get("assetList") or [])}
+    rows.sort(key=lambda v: (order.get(v.get("assetId"), 99), -float(v.get("totalPnl") or 0)))
+    return rows
+
+
+def instance_short_name(idx: int, v: dict) -> str:
+    """TG 選單名稱，例：實盤③BTC15m-60~90s-098。"""
+    asset = _ASSET_SHORT.get(str(v.get("assetId")), str(v.get("assetId") or "").upper())
+    lo = int(float(v.get("favoriteMinRemaining") or 0)); hi = int(float(v.get("favoriteWindowSeconds") or 0))
+    price = f"{int(round(float(v.get('favoriteMinPrice') or 0) * 100)):03d}"
+    mark = _CIRCLED[idx] if idx < len(_CIRCLED) else str(idx + 1)
+    return f"實盤{mark}{asset}-{lo}~{hi}s-{price}"
+
+
+def _read_env_value(path: str, key: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith(key + "="):
+                    return line[len(key) + 1:].strip()
+    except FileNotFoundError:
+        pass
+    return ""
+
+
+def strategy_env_updates(inst: dict, v: dict, main_env: str = ENV_FILE) -> dict[str, str]:
+    """要寫進該實盤 env 的鍵值。① 用主 .env：只確認資產在 POLY_SIM_ASSETS 裡；②③ 的輕量模擬盤只跑這一組。"""
+    stop = v.get("favoriteStopLossPrice")
+    upd = {
+        "POLY_LIVE_ASSET_ID": str(v["assetId"]),
+        "POLY_LIVE_VARIANT_ID": str(v["id"]),
+        "POLY_LIVE_FAVORITE_MIN_PRICE": f"{float(v.get('favoriteMinPrice') or 0):.2f}",
+        "POLY_LIVE_FAVORITE_MAX_PRICE": f"{float(v.get('favoriteMaxPrice') or 0):.2f}",
+        "POLY_LIVE_FAVORITE_STOP_LOSS_PRICE": f"{float(stop):.2f}" if stop else "0",
+    }
+    if os.path.abspath(inst["env"]) == os.path.abspath(main_env):
+        assets = [a.strip() for a in _read_env_value(inst["env"], "POLY_SIM_ASSETS").split(",") if a.strip()]
+        if v["assetId"] not in assets:
+            upd["POLY_SIM_ASSETS"] = ",".join(assets + [str(v["assetId"])])
+    else:
+        upd["POLY_SIM_ASSETS"] = str(v["assetId"])
+        upd["POLY_SIM_ONLY_VARIANTS"] = str(v["id"])
+    return upd
+
+
+def rename_live_instance(idx: int, new_name: str, main_env: str = ENV_FILE) -> str | None:
+    """改主 .env 的 TG_LIVE_INSTANCES 第 idx 段的名稱；回傳新值（沒設 TG_LIVE_INSTANCES 就回 None）。"""
+    raw = _read_env_value(main_env, "TG_LIVE_INSTANCES")
+    if not raw:
+        return None
+    chunks = raw.split(";")
+    if idx >= len(chunks):
+        return None
+    parts = chunks[idx].split("|")
+    parts[0] = new_name
+    chunks[idx] = "|".join(parts)
+    value = ";".join(chunks)
+    write_env_flag("TG_LIVE_INSTANCES", value, main_env)
+    return value
+
+
+def strategy_instance_keyboard() -> list[list[dict]]:
+    return [[{"text": f"🔁 {inst['name']}", "callback_data": f"strat:{idx}"}] for idx, inst in enumerate(LIVE_INSTANCES)]
+
+
+def strategy_list_keyboard(idx: int, rows: list[dict], current_id: str | None) -> list[list[dict]]:
+    kb = []
+    for n, v in enumerate(rows):
+        star = "★ " if v.get("id") == current_id else ""
+        roi = v.get("roi")
+        roi_txt = f" ROI{roi:+.1f}%" if isinstance(roi, (int, float)) else ""
+        text = f"{star}{v.get('label')} {_money(v.get('totalPnl'))}/{int(v.get('totalTrades') or 0)}筆{roi_txt}"
+        kb.append([{"text": text[:60], "callback_data": f"strat:{idx}:{n}"}])
+    kb.append([{"text": "取消", "callback_data": "strat:cancel"}])
+    return kb
+
+
+def strategy_confirm_keyboard(idx: int, n: int) -> list[list[dict]]:
+    return [[{"text": "✅ 確認更換（會重啟該實盤服務）", "callback_data": f"strat:{idx}:{n}:confirm"}],
+            [{"text": "取消", "callback_data": "strat:cancel"}]]
+
+
+async def send_strategy_menu(client: httpx.AsyncClient, chat_id: int) -> None:
+    try:
+        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": "要更換哪個實盤的策略？",
+                                                        "reply_markup": {"inline_keyboard": strategy_instance_keyboard()}})
+    except Exception as exc:
+        log.warning(f"sendMessage(strategy menu) failed: {exc}")
+
+
+async def send_strategy_list(client: httpx.AsyncClient, chat_id: int, idx: int) -> None:
+    inst = LIVE_INSTANCES[idx]
+    try:
+        sim = await fetch_snapshot(SIM_WS)
+    except Exception as exc:
+        await tg_send(client, chat_id, f"⚠️ 讀不到模擬盤快照（{exc.__class__.__name__}），稍後再試。"); return
+    rows = strategy_candidates(sim)
+    if not rows:
+        await tg_send(client, chat_id, "模擬盤目前沒有可供實盤選用的變體。"); return
+    _STRATEGY_CANDIDATES[idx] = rows
+    current = _read_env_value(inst["env"], "POLY_LIVE_VARIANT_ID") or None
+    try:
+        await client.post(f"{API}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": f"{inst['name']} 目前：{current or '—'}\n選擇新策略（★＝目前使用中；數字＝模擬盤損益/筆數/ROI）：",
+            "reply_markup": {"inline_keyboard": strategy_list_keyboard(idx, rows, current)}})
+    except Exception as exc:
+        log.warning(f"sendMessage(strategy list) failed: {exc}")
+
+
+async def apply_strategy(idx: int, v: dict) -> tuple[str, bool]:
+    """套用策略：回傳 (給使用者的文字, 是否需要重啟 TG bot 本身以載入新名稱)。"""
+    inst = LIVE_INSTANCES[idx]
+    if _live_position_open(inst["state"]):
+        return f"⏸ {inst['name']}目前有持倉或待結算，先不更換；等結算完再按一次。", False
+    for key, value in strategy_env_updates(inst, v).items():
+        write_env_flag(key, value, inst["env"])
+    new_name = instance_short_name(idx, v)
+    renamed = rename_live_instance(idx, new_name) is not None
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "-n", "systemctl", "restart", *inst["services"],
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await asyncio.wait_for(proc.communicate(), 90)
+    armed = _read_env_value(inst["env"], "POLY_STRATEGY_ARMED").lower() == "true"
+    stake = _read_env_value(inst["env"], "POLY_STAKE_PCT") or "?"
+    if proc.returncode != 0:
+        return (f"⚠️ {inst['name']} 的 env 已改為 {v.get('label')}，但重啟失敗（{proc.returncode}）："
+                f"{(out or b'').decode(errors='replace')[:300]}"), renamed
+    stop = v.get("favoriteStopLossPrice")
+    return (f"🔁 {inst['name']} 已改為：{v.get('label')}\n"
+            f"買價 {float(v.get('favoriteMinPrice') or 0):.2f}～{float(v.get('favoriteMaxPrice') or 0):.2f}"
+            f" · {('停損 ' + format(float(stop), '.2f')) if stop else '不停損'}"
+            f" · 每注 {stake}% · 模式 {'REAL' if armed else 'DRY-RUN'}（未變）\n服務已重啟"
+            + (f"；TG 選單名稱改為「{new_name}」，bot 重啟中" if renamed else "")), renamed
+
+
+async def _restart_self_later() -> None:
+    await asyncio.sleep(1.0)
+    proc = await asyncio.create_subprocess_exec("sudo", "-n", "systemctl", "restart", "gravia-tg.service")
+    await proc.wait()
+
 
 REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "weekly")
 _scan_running = {"v": False}
@@ -429,6 +588,36 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                             except Exception as exc:
                                 await tg_send(client, chat_id, f"⚠️ 切換失敗：{exc}")
                         continue
+                    if data_str.startswith("strat:"):
+                        parts_cb = data_str.split(":")          # strat:<idx> | strat:<idx>:<n> | strat:<idx>:<n>:confirm | strat:cancel
+                        if data_str == "strat:cancel":
+                            await tg_send(client, chat_id, "已取消。")
+                        elif len(parts_cb) == 2 and parts_cb[1].isdigit() and int(parts_cb[1]) < len(LIVE_INSTANCES):
+                            await send_strategy_list(client, chat_id, int(parts_cb[1]))
+                        elif len(parts_cb) >= 3 and parts_cb[1].isdigit() and parts_cb[2].isdigit():
+                            idx, n = int(parts_cb[1]), int(parts_cb[2])
+                            rows = _STRATEGY_CANDIDATES.get(idx) or []
+                            if n >= len(rows):
+                                await tg_send(client, chat_id, "清單已過期，請重新 /strategy。")
+                            elif len(parts_cb) == 3:
+                                v = rows[n]
+                                try:
+                                    await client.post(f"{API}/sendMessage", json={
+                                        "chat_id": chat_id,
+                                        "text": f"確定把 {LIVE_INSTANCES[idx]['name']} 改為：\n{v.get('label')}\n（不動每注 % 與 REAL/DRY-RUN；有持倉會被拒絕）",
+                                        "reply_markup": {"inline_keyboard": strategy_confirm_keyboard(idx, n)}})
+                                except Exception as exc:
+                                    log.warning(f"sendMessage(strategy confirm) failed: {exc}")
+                            elif parts_cb[3] == "confirm":
+                                log.info(f"[TG] user {uid} switching live#{idx} strategy to {rows[n].get('id')}")
+                                try:
+                                    text, restart_self = await apply_strategy(idx, rows[n])
+                                    await tg_send(client, chat_id, text)
+                                    if restart_self:
+                                        asyncio.get_running_loop().create_task(_restart_self_later())
+                                except Exception as exc:
+                                    await tg_send(client, chat_id, f"⚠️ 更換失敗：{exc}")
+                        continue
                     if data_str.startswith("scan:"):
                         market = data_str.split(":", 1)[1]
                         label = next((l for l, k in SCAN_MARKETS if k == market), market)
@@ -446,6 +635,9 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                 parts = text.strip().split()
                 if parts and parts[0].split("@")[0].lower() == "/live":
                     await send_live_menu(client, chat_id)
+                    continue
+                if parts and parts[0].split("@")[0].lower() == "/strategy":
+                    await send_strategy_menu(client, chat_id)
                     continue
                 if parts and parts[0].split("@")[0].lower() == "/scan":
                     # 2026-09-16 依使用者要求：移除 /scan [小時]，一律出市場選單

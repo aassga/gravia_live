@@ -5300,6 +5300,7 @@ def build_ab_leaderboard() -> list:
             "followWallets": v.get("followWallets"),
             "followMaxPrice": v.get("followMaxPrice"),
             "auto":          bool(v.get("auto")),
+            "simOnly":       bool(v.get("simOnly")),   # False = 可供實盤選用（TG /strategy 只列這些）
             "openMinElapsedSeconds": v.get("openMinElapsedSeconds"),
             "openMinPrice":  v.get("openMinPrice"),
             "openMaxElapsedSeconds": v.get("openMaxElapsedSeconds"),
