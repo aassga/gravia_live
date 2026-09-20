@@ -5389,6 +5389,7 @@ def build_ab_leaderboard() -> list:
             "favoriteWindowSeconds": v.get("favoriteWindowSeconds"),
             "favoriteMinRemaining": v.get("favoriteMinRemaining"),
             "favoriteMinLeadPct": v.get("favoriteMinLeadPct"),
+            "favoriteMaxPairAskSum": v.get("favoriteMaxPairAskSum"),
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
