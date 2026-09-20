@@ -191,6 +191,7 @@ HELP_TEXT = (
     "/strategy — 更換實盤策略（選實盤 → 選模擬盤的買領先方變體 → 確認；不動每注%與 REAL/DRY-RUN）\n"
     "/stake — 改實盤每注 %（選實盤 → 選 5/10/15/20/25/30% → 確認；或 /stake <實盤編號> <數字>，0.5～30）\n"
     "/stop — 改模擬盤買領先方變體的停損（選資產 → 選變體 → 選值 → 確認）；有實盤在用同一變體會一起改並重啟\n"
+    "/loss — 分析某實盤最近的真實虧損原因（選實盤；或 /loss <實盤編號> [筆數]，預設 5 筆）\n"
     "/pnl — 實盤損益、平均每筆、最好／最差、今日統計\n"
     "/trades [n] — 最近 n 筆真單（預設 10）\n"
     "/sim — 模擬盤各組損益\n"
@@ -660,6 +661,30 @@ async def apply_stop(v: dict, stop: float) -> str:
     return "\n".join(lines)
 
 
+# ── 2026-09-20 依使用者要求：TG 上分析某實盤的虧損原因（純讀取）────────────────────
+SIM_DB_PATH = os.environ.get("POLY_SIM_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_sim.sqlite3"))
+
+
+def loss_instance_keyboard() -> list[list[dict]]:
+    return [[{"text": f"🔎 {inst['name']}", "callback_data": f"loss:{idx}"}] for idx, inst in enumerate(LIVE_INSTANCES)]
+
+
+async def send_loss_menu(client: httpx.AsyncClient, chat_id: int) -> None:
+    try:
+        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": "要分析哪個實盤的虧損？（也可 /loss <實盤編號> [筆數]）",
+                                                        "reply_markup": {"inline_keyboard": loss_instance_keyboard()}})
+    except Exception as exc:
+        log.warning(f"sendMessage(loss menu) failed: {exc}")
+
+
+async def run_loss_analysis(idx: int, limit: int = 5) -> str:
+    import polymarket_loss_analysis as loss
+    inst = LIVE_INSTANCES[idx]
+    asset_id = _read_env_value(inst["env"], "POLY_LIVE_ASSET_ID") or "btc"
+    variant_id = _read_env_value(inst["env"], "POLY_LIVE_VARIANT_ID") or ""
+    return await asyncio.to_thread(loss.analyze_losses, inst["state"], asset_id, variant_id, SIM_DB_PATH, limit, inst["name"])
+
+
 async def _restart_self_later() -> None:
     await asyncio.sleep(1.0)
     proc = await asyncio.create_subprocess_exec("sudo", "-n", "systemctl", "restart", "gravia-tg.service")
@@ -887,6 +912,14 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                         except Exception as exc:
                             await tg_send(client, chat_id, f"⚠️ 停損修改失敗：{exc}")
                         continue
+                    if data_str.startswith("loss:"):
+                        parts_cb = data_str.split(":")
+                        if len(parts_cb) == 2 and parts_cb[1].isdigit() and int(parts_cb[1]) < len(LIVE_INSTANCES):
+                            try:
+                                await tg_send(client, chat_id, await run_loss_analysis(int(parts_cb[1])))
+                            except Exception as exc:
+                                await tg_send(client, chat_id, f"⚠️ 分析失敗：{exc}")
+                        continue
                     if data_str.startswith("scan:"):
                         market = data_str.split(":", 1)[1]
                         label = next((l for l, k in SCAN_MARKETS if k == market), market)
@@ -907,6 +940,16 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                     continue
                 if parts and parts[0].split("@")[0].lower() == "/strategy":
                     await send_strategy_menu(client, chat_id)
+                    continue
+                if parts and parts[0].split("@")[0].lower() == "/loss":
+                    if len(parts) >= 2 and parts[1].isdigit() and 1 <= int(parts[1]) <= len(LIVE_INSTANCES):
+                        limit = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 5
+                        try:
+                            await tg_send(client, chat_id, await run_loss_analysis(int(parts[1]) - 1, max(1, min(limit, 20))))
+                        except Exception as exc:
+                            await tg_send(client, chat_id, f"⚠️ 分析失敗：{exc}")
+                    else:
+                        await send_loss_menu(client, chat_id)
                     continue
                 if parts and parts[0].split("@")[0].lower() == "/stop":
                     await send_stop_asset_menu(client, chat_id)
