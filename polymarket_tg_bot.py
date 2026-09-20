@@ -189,6 +189,7 @@ HELP_TEXT = (
     "/status — 實盤開關、策略、部位、餘額\n"
     "/live — 實盤真實下單開關（REAL ↔ DRY-RUN，按鈕確認後切換並重啟）\n"
     "/strategy — 更換實盤策略（選實盤 → 選模擬盤的買領先方變體 → 確認；不動每注%與 REAL/DRY-RUN）\n"
+    "/stake — 改實盤每注 %（選實盤 → 選 5/10/15/20/25/30% → 確認；或 /stake <實盤編號> <數字>，0.5～30）\n"
     "/pnl — 實盤損益、平均每筆、最好／最差、今日統計\n"
     "/trades [n] — 最近 n 筆真單（預設 10）\n"
     "/sim — 模擬盤各組損益\n"
@@ -232,7 +233,8 @@ def live_toggle_keyboard(execution_enabled: bool, idx: int = 0) -> list[list[dic
         rows = [[{"text": "🔴 切換為 DRY-RUN（停止真實下單）", "callback_data": f"live:{idx}:dry"}]]
     else:
         rows = [[{"text": "🟢 開啟真實下單（REAL）", "callback_data": f"live:{idx}:real"}]]
-    rows.append([{"text": "🔁 更換策略", "callback_data": f"strat:{idx}"}])   # 2026-09-20
+    rows.append([{"text": "🔁 更換策略", "callback_data": f"strat:{idx}"},      # 2026-09-20
+                 {"text": "💰 每注 %", "callback_data": f"stake:{idx}"}])
     return rows
 
 
@@ -434,6 +436,86 @@ async def apply_strategy(idx: int, v: dict) -> tuple[str, bool]:
             + (f"；TG 選單名稱改為「{new_name}」，bot 重啟中" if renamed else "")), renamed
 
 
+# ── 2026-09-20 依使用者要求：TG 上改實盤每注 % ──────────────────────────────
+STAKE_PRESETS = (5, 10, 15, 20, 25, 30)
+STAKE_MIN, STAKE_MAX = 0.5, 30.0   # 與 polymarket_live_strategy.STAKE_PCT 的夾限一致
+
+
+def parse_stake_pct(text: str) -> float | None:
+    try:
+        v = float(text)
+    except (TypeError, ValueError):
+        return None
+    return v if STAKE_MIN <= v <= STAKE_MAX else None
+
+
+def _fmt_pct(v: float) -> str:
+    return f"{v:g}"
+
+
+def stake_instance_keyboard() -> list[list[dict]]:
+    rows = []
+    for idx, inst in enumerate(LIVE_INSTANCES):
+        cur = _read_env_value(inst["env"], "POLY_STAKE_PCT") or "?"
+        rows.append([{"text": f"💰 {inst['name']}（目前 {cur}%）", "callback_data": f"stake:{idx}"}])
+    return rows
+
+
+def stake_pct_keyboard(idx: int, current: str) -> list[list[dict]]:
+    row = [{"text": ("★ " if _fmt_pct(float(p)) == current else "") + f"{p}%", "callback_data": f"stake:{idx}:{p}"} for p in STAKE_PRESETS]
+    return [row[:3], row[3:], [{"text": "取消", "callback_data": "stake:cancel"}]]
+
+
+def stake_confirm_keyboard(idx: int, pct: float) -> list[list[dict]]:
+    return [[{"text": f"✅ 確認改為 {_fmt_pct(pct)}%（會重啟該實盤服務）", "callback_data": f"stake:{idx}:{_fmt_pct(pct)}:confirm"}],
+            [{"text": "取消", "callback_data": "stake:cancel"}]]
+
+
+async def send_stake_menu(client: httpx.AsyncClient, chat_id: int) -> None:
+    try:
+        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": "要改哪個實盤的每注 %？（也可直接輸入 /stake <實盤編號> <數字>）",
+                                                        "reply_markup": {"inline_keyboard": stake_instance_keyboard()}})
+    except Exception as exc:
+        log.warning(f"sendMessage(stake menu) failed: {exc}")
+
+
+async def send_stake_pct_menu(client: httpx.AsyncClient, chat_id: int, idx: int) -> None:
+    inst = LIVE_INSTANCES[idx]
+    cur = _read_env_value(inst["env"], "POLY_STAKE_PCT") or "?"
+    try:
+        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": f"{inst['name']} 目前每注 {cur}%，改為：",
+                                                        "reply_markup": {"inline_keyboard": stake_pct_keyboard(idx, cur)}})
+    except Exception as exc:
+        log.warning(f"sendMessage(stake pct menu) failed: {exc}")
+
+
+async def send_stake_confirm(client: httpx.AsyncClient, chat_id: int, idx: int, pct: float) -> None:
+    inst = LIVE_INSTANCES[idx]
+    cur = _read_env_value(inst["env"], "POLY_STAKE_PCT") or "?"
+    try:
+        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id,
+                                                        "text": f"確定把 {inst['name']} 每注 {cur}% → {_fmt_pct(pct)}%？（不動策略與 REAL/DRY-RUN；有持倉會被拒絕）",
+                                                        "reply_markup": {"inline_keyboard": stake_confirm_keyboard(idx, pct)}})
+    except Exception as exc:
+        log.warning(f"sendMessage(stake confirm) failed: {exc}")
+
+
+async def apply_stake(idx: int, pct: float) -> str:
+    inst = LIVE_INSTANCES[idx]
+    if _live_position_open(inst["state"]):
+        return f"⏸ {inst['name']}目前有持倉或待結算，先不改；等結算完再按一次。"
+    old = _read_env_value(inst["env"], "POLY_STAKE_PCT") or "?"
+    write_env_flag("POLY_STAKE_PCT", _fmt_pct(pct), inst["env"])
+    proc = await asyncio.create_subprocess_exec(
+        "sudo", "-n", "systemctl", "restart", *inst["services"],
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await asyncio.wait_for(proc.communicate(), 90)
+    armed = _read_env_value(inst["env"], "POLY_STRATEGY_ARMED").lower() == "true"
+    if proc.returncode != 0:
+        return f"⚠️ {inst['name']} 的 env 已改為每注 {_fmt_pct(pct)}%，但重啟失敗（{proc.returncode}）：{(out or b'').decode(errors='replace')[:300]}"
+    return f"💰 {inst['name']} 每注 {old}% → {_fmt_pct(pct)}%，服務已重啟，模式 {'REAL' if armed else 'DRY-RUN'}（未變）"
+
+
 async def _restart_self_later() -> None:
     await asyncio.sleep(1.0)
     proc = await asyncio.create_subprocess_exec("sudo", "-n", "systemctl", "restart", "gravia-tg.service")
@@ -618,6 +700,23 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                                 except Exception as exc:
                                     await tg_send(client, chat_id, f"⚠️ 更換失敗：{exc}")
                         continue
+                    if data_str.startswith("stake:"):
+                        parts_cb = data_str.split(":")          # stake:<idx> | stake:<idx>:<pct> | stake:<idx>:<pct>:confirm | stake:cancel
+                        if data_str == "stake:cancel":
+                            await tg_send(client, chat_id, "已取消。")
+                        elif len(parts_cb) == 2 and parts_cb[1].isdigit() and int(parts_cb[1]) < len(LIVE_INSTANCES):
+                            await send_stake_pct_menu(client, chat_id, int(parts_cb[1]))
+                        elif len(parts_cb) >= 3 and parts_cb[1].isdigit() and int(parts_cb[1]) < len(LIVE_INSTANCES) and parse_stake_pct(parts_cb[2]) is not None:
+                            idx, pct = int(parts_cb[1]), parse_stake_pct(parts_cb[2])
+                            if len(parts_cb) == 3:
+                                await send_stake_confirm(client, chat_id, idx, pct)
+                            elif parts_cb[3] == "confirm":
+                                log.info(f"[TG] user {uid} setting live#{idx} stake to {pct}%")
+                                try:
+                                    await tg_send(client, chat_id, await apply_stake(idx, pct))
+                                except Exception as exc:
+                                    await tg_send(client, chat_id, f"⚠️ 修改失敗：{exc}")
+                        continue
                     if data_str.startswith("scan:"):
                         market = data_str.split(":", 1)[1]
                         label = next((l for l, k in SCAN_MARKETS if k == market), market)
@@ -638,6 +737,15 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                     continue
                 if parts and parts[0].split("@")[0].lower() == "/strategy":
                     await send_strategy_menu(client, chat_id)
+                    continue
+                if parts and parts[0].split("@")[0].lower() == "/stake":
+                    # /stake → 選單；/stake <實盤編號 1~N> <數字> → 直接到確認
+                    if len(parts) == 3 and parts[1].isdigit() and 1 <= int(parts[1]) <= len(LIVE_INSTANCES) and parse_stake_pct(parts[2]) is not None:
+                        await send_stake_confirm(client, chat_id, int(parts[1]) - 1, parse_stake_pct(parts[2]))
+                    elif len(parts) == 3:
+                        await tg_send(client, chat_id, f"格式：/stake <實盤編號 1～{len(LIVE_INSTANCES)}> <每注 %，{STAKE_MIN:g}～{STAKE_MAX:g}>")
+                    else:
+                        await send_stake_menu(client, chat_id)
                     continue
                 if parts and parts[0].split("@")[0].lower() == "/scan":
                     # 2026-09-16 依使用者要求：移除 /scan [小時]，一律出市場選單

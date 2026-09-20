@@ -132,6 +132,20 @@ class TelegramBotTests(unittest.TestCase):
             self.assertIn("TG_LIVE_INSTANCES=實盤①X|", open(main_env, encoding="utf-8").read())
         self.assertEqual(bot.live_toggle_keyboard(True, 1)[-1][0]["callback_data"], "strat:1")
 
+    def test_stake_helpers(self):
+        # 2026-09-20 /stake：範圍 0.5～30、鍵盤 callback、/live 選單多「每注 %」
+        self.assertEqual(bot.parse_stake_pct("10"), 10.0)
+        self.assertEqual(bot.parse_stake_pct("12.5"), 12.5)
+        self.assertIsNone(bot.parse_stake_pct("31"))
+        self.assertIsNone(bot.parse_stake_pct("0"))
+        self.assertIsNone(bot.parse_stake_pct("abc"))
+        kb = bot.stake_pct_keyboard(2, "30")
+        self.assertEqual(kb[0][0]["callback_data"], "stake:2:5")
+        self.assertEqual(kb[1][2]["text"], "★ 30%")
+        self.assertEqual(kb[-1][0]["callback_data"], "stake:cancel")
+        self.assertEqual(bot.stake_confirm_keyboard(1, 12.5)[0][0]["callback_data"], "stake:1:12.5:confirm")
+        self.assertEqual(bot.live_toggle_keyboard(False, 0)[-1][1]["callback_data"], "stake:0")
+
     def test_live_toggle_env_writer_and_keyboards(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
