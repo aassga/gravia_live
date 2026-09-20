@@ -5309,6 +5309,7 @@ def build_ab_leaderboard() -> list:
             "directionStopLossPrice": v.get("directionStopLossPrice"),
             "lateDirectionMinMarketPrice": v.get("lateDirectionMinMarketPrice"),
             "favoriteWindowSeconds": v.get("favoriteWindowSeconds"),
+            "favoriteMinRemaining": v.get("favoriteMinRemaining"),
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
