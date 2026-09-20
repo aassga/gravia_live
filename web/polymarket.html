@@ -496,17 +496,18 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     const rows=variants.slice().sort((a,b)=>b.totalPnl-a.totalPnl);
     const best=rows.length?rows[0].id:null;
     $('ab-table').innerHTML=`
-      <div style="display:grid;grid-template-columns:130px 90px 70px 60px 60px 60px 1fr;gap:8px;padding:2px 0;color:#444;font-size:9.5px;">
-        <span>組別</span><span>損益</span><span title="累計損益÷累計投入本金">ROI</span><span>交易數</span><span>勝率</span><span>部位</span><span>資產組合</span>
+      <div style="display:grid;grid-template-columns:130px 90px 70px 70px 60px 60px 60px 1fr;gap:8px;padding:2px 0;color:#444;font-size:9.5px;">
+        <span>組別</span><span>損益</span><span title="累計損益÷累計投入本金">ROI</span><span title="累計損益÷交易數">平均/筆</span><span>交易數</span><span>勝率</span><span>部位</span><span>資產組合</span>
       </div>
       ${rows.map(v=>{
         const win=v.totalPnl>0, lose=v.totalPnl<0;
         const color=win?'#00ff9d':(lose?'#ff3a5c':'#888');
         const isBest=v.id===best && v.totalTrades>0;
-        return `<div style="display:grid;grid-template-columns:130px 90px 70px 60px 60px 60px 1fr;gap:8px;padding:4px 0;align-items:center;border-top:1px solid #ffffff0c;${isBest?'background:#00ff9d0d;':''}">
+        return `<div style="display:grid;grid-template-columns:130px 90px 70px 70px 60px 60px 60px 1fr;gap:8px;padding:4px 0;align-items:center;border-top:1px solid #ffffff0c;${isBest?'background:#00ff9d0d;':''}">
           <span style="color:${isBest?'#00ff9d':'#ccc'};">${isBest?'★ ':''}${v.label}</span>
           <span style="color:${color};font-weight:700;">${fmtMoney(v.totalPnl)}</span>
           <span style="color:${color};" title="ROI＝累計損益÷累計投入本金">${fmtRoi(v.roi)}</span>
+          <span style="color:${color};" title="平均每筆損益">${v.avgPnl!=null?fmtMoney(v.avgPnl):'—'}</span>
           <span style="color:#888;">${v.totalTrades}</span>
           <span style="color:#888;">${v.winRate!=null?Math.round(v.winRate)+'%':'—'}</span>
           <span style="color:${v.hasPosition?'#ffd700':'#444'};">${v.hasPosition?'進場中':'空手'}</span>
@@ -576,6 +577,7 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
         <div style="display:flex;gap:8px;flex-wrap:nowrap;overflow:hidden;font-size:9px;color:#888;margin-bottom:3px;white-space:nowrap;">
           <span>交易 ${v.totalTrades}</span>
           <span>勝率 ${v.winRate!=null?Math.round(v.winRate)+'%':'—'}</span>
+          <span style="color:${pnlColor};" title="平均每筆損益">平均 ${v.avgPnl!=null?fmtMoney(v.avgPnl):'—'}/筆</span>
           <span style="color:${pnlColor};" title="ROI＝累計損益÷累計投入本金（投入 $${(v.totalStaked||0).toFixed(0)}）；每筆＝ROI÷筆數">ROI ${fmtRoi(v.roi)}${v.roiPerTrade!=null?' · 每筆 '+fmtRoi(v.roiPerTrade,3):''}</span>
           <span title="啟用時間（台北）">啟用 ${v.enabledAt?new Date(v.enabledAt*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'—'}</span>
           <span class="yellow">結算中 ${v.pendingSettlements||0}</span>

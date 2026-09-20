@@ -5412,6 +5412,7 @@ def build_ab_leaderboard() -> list:
             # ROI（%）= 累計損益 ÷ 累計投入本金；roiPerTrade = ROI ÷ 筆數
             "roi":           (st["totalPnl"] / float(st["totalStaked"]) * 100.0) if float(st.get("totalStaked") or 0) > 0 else None,
             "roiPerTrade":   (st["totalPnl"] / float(st["totalStaked"]) * 100.0 / st["totalTrades"]) if float(st.get("totalStaked") or 0) > 0 and st["totalTrades"] else None,
+            "avgPnl":        (st["totalPnl"] / st["totalTrades"]) if st["totalTrades"] else None,   # 2026-09-20：平均每筆損益
             "wins":          st["wins"],
             "winRate":       win_rate,
             "cash":          cash,
