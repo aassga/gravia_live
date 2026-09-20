@@ -105,7 +105,7 @@
   </div>
 
   <div class="topbar">
-    <div class="brand">◆ POLYMARKET · 真實損益</div>
+    <div class="brand">◆ POLYMARKET · 真實損益 <span id="instance-label" style="margin-left:10px;padding:2px 8px;border:1px solid #ffb800;border-radius:3px;color:#ffb800;font-size:11px;letter-spacing:1px;">—</span></div>
     <div style="display:flex;gap:10px;align-items:center;">
       <span id="conn-badge" class="badge badge-off"><span class="badge-dot"></span> 連線中...</span>
       <span id="live-badge" class="badge badge-off">下單開關：—</span>
@@ -300,6 +300,7 @@ function onData(d){
 
   const cfg=d.strategyConfig||{};
   document.getElementById('strategy-name').textContent = cfg.label ? `策略：${cfg.label}` : '策略：—';
+  if(d.instanceLabel){ _instanceLabel = d.instanceLabel; document.getElementById('instance-label').textContent = d.instanceLabel; }
   applyCoinFavicon(cfg.assetId, cfg.label, !!d.strategyExecutionEnabled);
   // 2026-09-14 依使用者要求：只顯示目前實盤策略真的用到的設定，停用的路徑（兩腿鎖利／方向性／單邊進場）
   // 及其參數一律隱藏，避免像「鎖利合計上限 $0.98」這種對現行策略沒作用的數字造成誤會。
@@ -379,11 +380,12 @@ const COIN_STYLE = {
   doge:{sym:'Ð', bg:'#c2a633'}, bnb: {sym:'B', bg:'#f3ba2f'}, hype:{sym:'H', bg:'#00c9a7'}, zec: {sym:'Z', bg:'#ecb244'},
 };
 let _lastFavKey = null;
+let _instanceLabel = '';
 function applyCoinFavicon(assetId, label, real){
   const base = String(assetId||'').split('-')[0].replace('alt','') || 'btc';
   const st = COIN_STYLE[base] || {sym:'?', bg:'#555'};
   const tf = /15m/.test(String(assetId||'')) ? '15' : (/4h/.test(String(assetId||'')) ? '4h' : '');
-  const key = base + tf + (real ? 'R' : 'D');
+  const key = base + tf + (real ? 'R' : 'D') + '|' + _instanceLabel;
   if (key === _lastFavKey) return;
   _lastFavKey = key;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
@@ -396,7 +398,8 @@ function applyCoinFavicon(assetId, label, real){
   if (!link){ link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
   link.type = 'image/svg+xml';
   link.href = 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
-  document.title = `${base.toUpperCase()}${tf ? ' ' + tf + 'm' : ''} ${real ? 'REAL' : 'DRY'} · 實盤`;
+  const mark = (_instanceLabel.match(/[①②③④⑤⑥⑦⑧⑨]/) || [''])[0];
+  document.title = `${mark}${base.toUpperCase()}${tf ? ' ' + tf + 'm' : ''} ${real ? 'REAL' : 'DRY'} · ${_instanceLabel || '實盤'}`;
 }
 
 function connect(){

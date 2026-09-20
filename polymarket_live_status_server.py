@@ -37,6 +37,34 @@ SERVER_REGION = os.environ.get("SERVER_REGION", "未設定地區")
 BASELINE_FILE = os.environ.get("POLY_LIVE_BASELINE_FILE") or os.path.join(os.path.dirname(__file__), "polymarket_live_baseline.json")
 STRATEGY_STATE_FILE = os.environ.get("POLY_LIVE_STATE_FILE") or os.path.join(os.path.dirname(__file__), "polymarket_live_strategy_state.json")
 
+
+def _instance_label() -> str:
+    """2026-09-20 依使用者要求：頁面標出這是第幾號實盤。優先 POLY_LIVE_INSTANCE_LABEL；否則從主 .env 的
+    TG_LIVE_INSTANCES 找狀態檔相同的那一段取名稱；再不然依埠號推 ①②③…。"""
+    explicit = os.environ.get("POLY_LIVE_INSTANCE_LABEL", "").strip()
+    if explicit:
+        return explicit
+    raw = os.environ.get("TG_LIVE_INSTANCES", "").strip()
+    if not raw:
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("TG_LIVE_INSTANCES="):
+                        raw = line.split("=", 1)[1].strip(); break
+        except OSError:
+            pass
+    mine = os.path.abspath(STRATEGY_STATE_FILE)
+    for idx, chunk in enumerate(c for c in raw.split(";") if c.strip()):
+        parts = [p.strip() for p in chunk.split("|")]
+        if len(parts) >= 5 and os.path.abspath(parts[4]) == mine:
+            return parts[0]
+    circled = "①②③④⑤⑥⑦⑧⑨"
+    n = max(0, (PORT - 8767) // 2 + 1) if PORT >= 8767 else 1
+    return f"實盤{circled[n - 1] if 0 < n <= len(circled) else n}"
+
+
+INSTANCE_LABEL = _instance_label()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("polymarket_live_status")
 
@@ -209,6 +237,7 @@ def _fetch_state() -> dict:
         "serverRegion": SERVER_REGION,
         "clobPingMs": ping_ms,
         "funderAddress": live.FUNDER_ADDRESS,
+        "instanceLabel": INSTANCE_LABEL,   # 2026-09-20：頁面標示第幾號實盤
         "liveTradingEnabled": live.LIVE_TRADING and not bool(strategy_state.get("runtimeDryRun")),
         "strategyArmed": os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true",
         "strategyExecutionEnabled": (
