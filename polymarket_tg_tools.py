@@ -138,6 +138,9 @@ def mirror_report(db_path: str, state_path: str, vid: str, hours: float = 12.0, 
     since = time.time() - hours * 3600
     with open(state_path, "r", encoding="utf-8") as f:
         live = json.load(f)
+    reset_at = float(live.get("resetAt") or 0)
+    if reset_at > since:
+        since = reset_at   # 實盤頁面重製過：重製前的窗口實盤沒有紀錄，不能拿來比
     live_tr = {t["windowSlug"]: t for t in live.get("trades", []) if not t.get("dryRun", True) and (t.get("entryTime") or 0) >= since}
     live_dry = {t["windowSlug"] for t in live.get("trades", []) if t.get("dryRun", True) and (t.get("entryTime") or 0) >= since}
     pos = live.get("position")
@@ -173,7 +176,8 @@ def mirror_report(db_path: str, state_path: str, vid: str, hours: float = 12.0, 
         elif a:
             only_sim += 1; w = live_diag.get(s) or {}
             details.append(f"只模擬 {datetime.fromtimestamp(int(s.rsplit('-', 1)[-1]), TP).strftime('%m-%d %H:%M')} 實盤原因 {w.get('lastReason') or '無診斷'}{('/' + str(w.get('orderError'))) if w.get('orderError') else ''}")
-    lines = [f"🪞 {name} vs 模擬盤 {vid}（最近 {hours:.0f}h，{len(slugs)} 窗）：兩邊都進 {both} · 只實盤 {only_live} · 只模擬 {only_sim}"
+    span = f"自重製 {datetime.fromtimestamp(reset_at, TP).strftime('%m-%d %H:%M')} 起" if reset_at > time.time() - hours * 3600 else f"最近 {hours:.0f}h"
+    lines = [f"🪞 {name} vs 模擬盤 {vid}（{span}，{len(slugs)} 窗）：兩邊都進 {both} · 只實盤 {only_live} · 只模擬 {only_sim}"
              + (f" · DRY-RUN 跟到 {dry_match}（不計）" if dry_match else "")]
     if not live_tr and not sim_tr:
         lines.append("（這段期間沒有真實成交，DRY-RUN 不列入）")
