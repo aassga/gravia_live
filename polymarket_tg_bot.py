@@ -189,7 +189,7 @@ HELP_TEXT = (
     "/status — 實盤開關、策略、部位、餘額\n"
     "/live — 實盤真實下單開關（REAL ↔ DRY-RUN，按鈕確認後切換並重啟）\n"
     "/strategy — 更換實盤策略（選實盤 → 選模擬盤的買領先方變體 → 確認；不動每注%與 REAL/DRY-RUN）\n"
-    "/stake — 改實盤每注 %（選實盤 → 選 5/10/15/20/25/30% → 確認；或 /stake <實盤編號> <數字>，0.5～30）\n"
+    "/stake — 改實盤每注 %（選實盤 → 選 5～100% → 確認；或 /stake <實盤編號> <數字>，0.5～100）\n"
     "/stop — 改模擬盤買領先方變體的停損（選資產 → 選變體 → 選值 → 確認）；有實盤在用同一變體會一起改並重啟\n"
     "/loss — 分析某實盤最近的真實虧損原因（選實盤；或 /loss <實盤編號> [筆數]，預設 5 筆）\n"
     "/pnl — 實盤損益、平均每筆、最好／最差、今日統計\n"
@@ -439,8 +439,8 @@ async def apply_strategy(idx: int, v: dict) -> tuple[str, bool]:
 
 
 # ── 2026-09-20 依使用者要求：TG 上改實盤每注 % ──────────────────────────────
-STAKE_PRESETS = (5, 10, 15, 20, 25, 30)
-STAKE_MIN, STAKE_MAX = 0.5, 30.0   # 與 polymarket_live_strategy.STAKE_PCT 的夾限一致
+STAKE_PRESETS = (5, 10, 15, 20, 25, 30, 50, 75, 100)
+STAKE_MIN, STAKE_MAX = 0.5, 100.0   # 與 polymarket_live_strategy.STAKE_PCT 的夾限一致（2026-09-20 上限 30 → 100）
 
 
 def parse_stake_pct(text: str) -> float | None:
@@ -465,7 +465,7 @@ def stake_instance_keyboard() -> list[list[dict]]:
 
 def stake_pct_keyboard(idx: int, current: str) -> list[list[dict]]:
     row = [{"text": ("★ " if _fmt_pct(float(p)) == current else "") + f"{p}%", "callback_data": f"stake:{idx}:{p}"} for p in STAKE_PRESETS]
-    return [row[:3], row[3:], [{"text": "取消", "callback_data": "stake:cancel"}]]
+    return [row[:3], row[3:6], row[6:], [{"text": "取消", "callback_data": "stake:cancel"}]]
 
 
 def stake_confirm_keyboard(idx: int, pct: float) -> list[list[dict]]:
@@ -496,7 +496,8 @@ async def send_stake_confirm(client: httpx.AsyncClient, chat_id: int, idx: int, 
     cur = _read_env_value(inst["env"], "POLY_STAKE_PCT") or "?"
     try:
         await client.post(f"{API}/sendMessage", json={"chat_id": chat_id,
-                                                        "text": f"確定把 {inst['name']} 每注 {cur}% → {_fmt_pct(pct)}%？（不動策略與 REAL/DRY-RUN；有持倉會被拒絕）",
+                                                        "text": f"確定把 {inst['name']} 每注 {cur}% → {_fmt_pct(pct)}%？（不動策略與 REAL/DRY-RUN；有持倉會被拒絕）"
+                                                                + (f"\n⚠️ 超過 30%：一次翻面就是總資產的 {_fmt_pct(pct)}%；多盤同時持倉時後面的盤會因現金不足縮注或跳過。" if pct > 30 else ""),
                                                         "reply_markup": {"inline_keyboard": stake_confirm_keyboard(idx, pct)}})
     except Exception as exc:
         log.warning(f"sendMessage(stake confirm) failed: {exc}")

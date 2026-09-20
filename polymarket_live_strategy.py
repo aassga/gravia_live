@@ -52,7 +52,7 @@ PEER_STATE_FILES = [p.strip() for p in os.environ.get("POLY_LIVE_PEER_STATE_FILE
 # 每注比例的基準：cash（現金，原本行為）或 equity（現金＋所有實盤在場部位成本＝總資產；算法 B）。
 SIZING_MODE = os.environ.get("POLY_LIVE_SIZING_MODE", "cash").strip().lower()
 
-STAKE_PCT = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
+STAKE_PCT = max(0.5, min(100.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))   # 2026-09-20 依使用者要求：上限 30 → 100
 STRATEGY_ARMED = os.environ.get("POLY_STRATEGY_ARMED", "false").strip().lower() == "true"
 # Validation mode is a hard safety interlock: it can never submit real orders.
 REAL_EXECUTION_ENABLED = live.LIVE_TRADING and STRATEGY_ARMED and not live.VALIDATE_ORDER_PATH
