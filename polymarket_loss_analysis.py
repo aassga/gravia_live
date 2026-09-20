@@ -46,14 +46,24 @@ def _window_quotes(db: sqlite3.Connection, asset_id: str, slug: str) -> list[dic
     return [dict(zip(keys, r)) for r in rows]
 
 
-def _sim_same_window(db: sqlite3.Connection, variant_id: str, slug: str) -> dict | None:
+def _sim_same_window(db: sqlite3.Connection, variant_id: str, slug: str, asset_id: str | None = None, side: str | None = None) -> dict | None:
+    """主模擬盤同變體同窗口的成交；舊成交沒記 variantId 時（variant_id 為空）退而找同資產、同方向的任一買領先方變體。"""
     try:
-        row = db.execute(
-            "SELECT trade_json FROM sim_trades WHERE variant_id=? AND json_extract(trade_json,'$.windowSlug')=? ORDER BY exit_time DESC LIMIT 1",
-            (variant_id, slug)).fetchone()
+        if variant_id:
+            row = db.execute(
+                "SELECT trade_json FROM sim_trades WHERE variant_id=? AND json_extract(trade_json,'$.windowSlug')=? ORDER BY exit_time DESC LIMIT 1",
+                (variant_id, slug)).fetchone()
+            return json.loads(row[0]) if row else None
+        if asset_id:
+            for (tj,) in db.execute(
+                    "SELECT trade_json FROM sim_trades WHERE variant_id LIKE ? AND json_extract(trade_json,'$.windowSlug')=? ORDER BY exit_time DESC",
+                    (f"{asset_id}-%", slug)):
+                t = json.loads(tj)
+                if side is None or t.get("side") == side:
+                    return dict(t, _anyVariant=True)
     except sqlite3.Error:
         return None
-    return json.loads(row[0]) if row else None
+    return None
 
 
 def analyze_trade(trade: dict, quotes: list[dict], sim_trade: dict | None) -> dict:
@@ -64,7 +74,7 @@ def analyze_trade(trade: dict, quotes: list[dict], sim_trade: dict | None) -> di
     other_ask_key = "down_ask" if side == "Up" else "up_ask"
     out: dict = {"trade": trade, "openSpot": None, "leadPct": None, "leadUsd": None, "otherAsk": None, "fair": None,
                  "flipAfterSec": None, "flipRemaining": None, "minBid": None, "endSpot": None, "simEntered": sim_trade is not None,
-                 "simPnl": (sim_trade or {}).get("pnl")}
+                 "simPnl": (sim_trade or {}).get("pnl"), "simAnyVariant": bool((sim_trade or {}).get("_anyVariant"))}
     with_spot = [q for q in quotes if q.get("spot") is not None]
     if with_spot:
         out["openSpot"] = with_spot[0]["spot"]
@@ -128,6 +138,8 @@ def format_analysis(name: str, items: list[dict], wins: list[dict]) -> str:
         if after_bits:
             lines.append("   進場後：" + " · ".join(after_bits))
         sim_txt = f"有進（{float(a['simPnl']):+.1f}）" if a["simEntered"] and a["simPnl"] is not None else ("有進" if a["simEntered"] else "沒進")
+        if a.get("simAnyVariant"):
+            sim_txt += "（同資產變體）"
         lines.append(f"   模擬盤同窗：{sim_txt} · 判定：{a['kind']}")
     kinds: dict[str, int] = {}
     for a in items:
@@ -155,8 +167,12 @@ def analyze_losses(state_path: str, asset_id: str, variant_id: str, db_path: str
     wins = [t for t in real if float(t.get("pnlEstimate") or 0) > 0 and float(t.get("exitTime") or 0) >= since]
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        items = [analyze_trade(t, _window_quotes(db, asset_from_slug(t["windowSlug"], asset_id), t["windowSlug"]),
-                               _sim_same_window(db, str(t.get("variantId") or variant_id), t["windowSlug"])) for t in losses]
+        items = []
+        for t in losses:
+            aid = asset_from_slug(t["windowSlug"], asset_id)
+            # 成交有記 variantId 就精準對；沒有（舊紀錄）就退而找同資產、同方向的任一買領先方變體
+            sim_t = _sim_same_window(db, str(t.get("variantId") or ""), t["windowSlug"], aid, t.get("side"))
+            items.append(analyze_trade(t, _window_quotes(db, aid, t["windowSlug"]), sim_t))
     finally:
         db.close()
     return format_analysis(name, items, wins)
