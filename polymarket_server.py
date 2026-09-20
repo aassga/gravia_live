@@ -102,7 +102,7 @@ SIM_DEFAULT_BALANCE   = 100.0  # 起始虛擬總資產預設值（美元），�
 SIM_MIN_BALANCE       = 1.0
 SIM_DEFAULT_STAKE_PCT = 15.0   # 每組完整兩腿預設佔目前資產組合 15%（僅紙上模擬）
 SIM_MIN_STAKE_PCT     = 0.5
-SIM_MAX_STAKE_PCT     = 25.0
+SIM_MAX_STAKE_PCT     = 100.0   # 2026-09-20 依使用者要求：25 → 100
 
 # 成交與風控模型。紙上交易一律假設為 taker：用賣盤/買盤深度模擬成交，
 # 並扣除 Crypto 市場費率。若日後要測 maker，必須另外建立排隊順位模型，不能假設掛單必成交。
@@ -134,7 +134,7 @@ ROTATION_FUTURE_HEDGE_FEE_RESERVE = SIM_TAKER_FEE_RATE * 0.25
 # 實盤鏡像模擬組：直接讀取與 polymarket_live_strategy.py 相同的環境變數，讓模擬盤
 # 有一張獨立卡片只累積「目前實盤有效策略」的結果，不和 main／晚進場方向性混在一起。
 LIVE_MIRROR_ASSET_ID            = os.environ.get("POLY_LIVE_ASSET_ID", "btc")
-LIVE_MIRROR_STAKE_PCT           = max(0.5, min(30.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))
+LIVE_MIRROR_STAKE_PCT           = max(0.5, min(100.0, float(os.environ.get("POLY_STAKE_PCT", "15.0"))))   # 2026-09-20 上限 30 → 100
 LIVE_MIRROR_MAX_PAIR_BUDGET_USD = max(1.0, float(os.environ.get("POLY_MAX_PAIR_BUDGET_USD", "25.0")))
 LIVE_MIRROR_MIN_CASH_RESERVE_USD = max(0.0, float(os.environ.get("POLY_MIN_CASH_RESERVE_USD", "5.0")))
 LIVE_MIRROR_LOCK_MAX_SUM        = max(0.01, min(0.99, float(os.environ.get("POLY_LIVE_LOCK_MAX_SUM", "0.95"))))
