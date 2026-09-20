@@ -768,6 +768,8 @@ def _auto_variant_from_spec(spec: dict) -> dict | None:
         "noStop": bool(spec.get("noStop")),
         # 2026-09-20：進場時現貨領先幅度門檻（%），None = 不看
         "favoriteMinLeadPct": (float(spec["favoriteMinLeadPct"]) if spec.get("favoriteMinLeadPct") is not None else None),
+        # 2026-09-20：訂單簿一致性（兩邊 ask 合計上限），None = 不檢查（0.92～0.95 家族另由啟動後迴圈補 1.03）
+        "favoriteMaxPairAskSum": (float(spec["favoriteMaxPairAskSum"]) if spec.get("favoriteMaxPairAskSum") is not None else None),
         "addedAt": spec.get("addedAt"), "stats": spec.get("stats"),
     }
 
@@ -902,7 +904,8 @@ FAVORITE_092_095_MAX_PAIR_ASK_SUM = 1.03
 for _v in AB_VARIANTS:
     if (_v.get("lateFavorite") and abs(float(_v.get("favoriteMinPrice", 0)) - 0.92) < 1e-9
             and abs(float(_v.get("favoriteMaxPrice", 0)) - 0.95) < 1e-9):
-        _v.setdefault("favoriteMaxPairAskSum", FAVORITE_092_095_MAX_PAIR_ASK_SUM)
+        if _v.get("favoriteMaxPairAskSum") is None:
+            _v["favoriteMaxPairAskSum"] = FAVORITE_092_095_MAX_PAIR_ASK_SUM
 del _v
 # 2026-09-14 依使用者要求從模擬盤移除 btc-main（0.40/0.95）、btc-loose（0.45/0.98）、
 # btc-binance-late-direction（Binance T-10s）、btc-two-sided-maker（被動雙邊掛單，212 筆 -$62）、

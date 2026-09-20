@@ -199,7 +199,11 @@ class PolymarketSimulationTests(unittest.TestCase):
         # 2026-09-19 ETH 15m 11:44：Down ask 0.94 但 Up ask 0.22（合計 1.16）→ 薄單假領先，不進；另一邊 0.07（合計 1.01）才進。
         vid = "btc-last30-90-092-095"
         self.assertEqual(sim.AB_VARIANT_BY_ID[vid]["favoriteMaxPairAskSum"], 1.03)
-        self.assertNotIn("favoriteMaxPairAskSum", sim.AB_VARIANT_BY_ID["btc-auto-45-60s-098-099"] if "btc-auto-45-60s-098-099" in sim.AB_VARIANT_BY_ID else {})
+        self.assertIsNone((sim.AB_VARIANT_BY_ID.get("btc-auto-45-60s-098-099") or {}).get("favoriteMaxPairAskSum"))
+        # 自動變體規格帶 favoriteMaxPairAskSum 會傳入；0.92～0.95 家族沒設時補 1.03
+        spec = {"id": "t-092-095", "assetId": "btc", "favoriteMinPrice": 0.92, "favoriteMaxPrice": 0.95}
+        self.assertIsNone(sim._auto_variant_from_spec(spec)["favoriteMaxPairAskSum"])
+        self.assertEqual(sim._auto_variant_from_spec(dict(spec, favoriteMaxPairAskSum=1.05))["favoriteMaxPairAskSum"], 1.05)
         slug = "btc-updown-5m-inconsistent"
         sim.start_window_diagnostics("btc", slug, 123_000.0)
         up, down = self._favorite_books(up_ask=0.22, down_ask=0.94)
