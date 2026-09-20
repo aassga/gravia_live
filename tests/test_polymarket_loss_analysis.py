@@ -44,7 +44,7 @@ class LossAnalysisTests(unittest.TestCase):
             # 領先 +0.05（0.05%），對邊 0.03，T-30 翻面 → 真實反轉（進場後行情反向）；模擬盤同窗有進
             self._db(dbp, "btc", slug, _quotes(ws, side_flip_at=30), {"windowSlug": slug, "pnl": -80.0, "exitTime": ws + 400})
             trade = {"windowSlug": slug, "side": "Up", "shares": 30.0, "entryPrice": 0.98, "pnlEstimate": -29.4, "outcome": "Down",
-                     "tradeType": "directional", "dryRun": False, "entryTime": ws + 240, "exitTime": ws + 400}
+                     "tradeType": "directional", "dryRun": False, "entryTime": ws + 240, "exitTime": ws + 400, "variantId": "v1"}
             win = dict(trade, pnlEstimate=0.3, outcome="Up", exitTime=ws + 401)
             json.dump({"trades": [win, trade]}, open(st, "w", encoding="utf-8"))
             text = loss.analyze_losses(st, "btc", "v1", dbp, 5, "實盤①")
@@ -62,6 +62,21 @@ class LossAnalysisTests(unittest.TestCase):
             a = loss.analyze_trade(dict(trade, tradeType="favorite_stop_loss", outcome="Up"), [], {"pnl": 1})
             self.assertIn("假停損", a["kind"])
             self.assertEqual(loss.analyze_losses(st, "btc", "v1", dbp, 0, "X").startswith("X："), True) if False else None
+
+    def test_sim_lookup_falls_back_to_same_asset_variant_for_old_trades(self):
+        ws = 1_700_000_000; slug = f"btc-updown-5m-{ws}"
+        with tempfile.TemporaryDirectory() as d:
+            dbp = os.path.join(d, "sim.sqlite3")
+            self._db(dbp, "btc", slug, [], None)
+            db = sqlite3.connect(dbp)
+            db.execute("INSERT INTO sim_trades (run_id, variant_id, exit_time, trade_json) VALUES (1,?,?,?)", ("btc-auto-x", ws + 400, json.dumps({"windowSlug": slug, "side": "Up", "pnl": -9.0})))
+            db.commit(); db.close()
+            db = sqlite3.connect(dbp)
+            self.assertIsNone(loss._sim_same_window(db, "v1", slug, "btc", "Up"))                     # 指定變體不存在 → None
+            t = loss._sim_same_window(db, "", slug, "btc", "Up")                                         # 沒 variantId → 同資產同方向
+            self.assertEqual((t["pnl"], t["_anyVariant"]), (-9.0, True))
+            self.assertIsNone(loss._sim_same_window(db, "", slug, "btc", "Down"))
+            db.close()
 
     def test_asset_from_slug(self):
         self.assertEqual(loss.asset_from_slug("eth-updown-5m-1789875600", "btc"), "eth-alt")
