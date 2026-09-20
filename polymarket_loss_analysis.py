@@ -21,6 +21,19 @@ THIN_BOOK_OTHER_ASK = 0.12     # 對邊 ask 超過這個值（兩邊 ask 合計 
 THIN_LEAD_PCT = 0.02           # 進場時現貨領先幅度低於 0.02% 視為「領先薄」
 
 
+# 窗口 slug 前綴 → 模擬盤資產 id（實盤可能在虧損後已換策略，所以資產一律從成交的 slug 推回，不用目前 env）
+_SLUG_ASSET = {"btc-updown-5m-": "btc", "btc-updown-15m-": "btc-15m", "eth-updown-5m-": "eth-alt", "eth-updown-15m-": "eth-15m",
+               "xrp-updown-5m-": "xrp", "xrp-updown-15m-": "xrp-15m", "sol-updown-5m-": "sol", "sol-updown-15m-": "sol-15m",
+               "doge-updown-5m-": "doge", "bnb-updown-5m-": "bnb"}
+
+
+def asset_from_slug(slug: str, default: str) -> str:
+    for prefix, aid in _SLUG_ASSET.items():
+        if str(slug).startswith(prefix):
+            return aid
+    return default
+
+
 def _ts(t: float | None) -> str:
     return datetime.fromtimestamp(float(t), TP).strftime("%m-%d %H:%M") if t else "—"
 
@@ -142,7 +155,8 @@ def analyze_losses(state_path: str, asset_id: str, variant_id: str, db_path: str
     wins = [t for t in real if float(t.get("pnlEstimate") or 0) > 0 and float(t.get("exitTime") or 0) >= since]
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-        items = [analyze_trade(t, _window_quotes(db, asset_id, t["windowSlug"]), _sim_same_window(db, variant_id, t["windowSlug"])) for t in losses]
+        items = [analyze_trade(t, _window_quotes(db, asset_from_slug(t["windowSlug"], asset_id), t["windowSlug"]),
+                               _sim_same_window(db, str(t.get("variantId") or variant_id), t["windowSlug"])) for t in losses]
     finally:
         db.close()
     return format_analysis(name, items, wins)

@@ -605,6 +605,7 @@ def _record_trade(pos: dict, pnl: float, outcome: str, trade_type: str) -> None:
         "dryRun": pos.get("dryRun", True),
         "entryTime": pos.get("entryTime"),
         "exitTime": time.time(),
+        "variantId": LIVE_VARIANT_ID,   # 2026-09-20：/loss 分析要對回模擬盤同變體（實盤事後可能換策略）
     }
     live_state["trades"].insert(0, trade)
     live_state["trades"] = live_state["trades"][:100]

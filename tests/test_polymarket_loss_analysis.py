@@ -63,6 +63,11 @@ class LossAnalysisTests(unittest.TestCase):
             self.assertIn("假停損", a["kind"])
             self.assertEqual(loss.analyze_losses(st, "btc", "v1", dbp, 0, "X").startswith("X："), True) if False else None
 
+    def test_asset_from_slug(self):
+        self.assertEqual(loss.asset_from_slug("eth-updown-5m-1789875600", "btc"), "eth-alt")
+        self.assertEqual(loss.asset_from_slug("btc-updown-15m-1", "btc"), "btc-15m")
+        self.assertEqual(loss.asset_from_slug("weird", "btc"), "btc")
+
     def test_no_losses_message(self):
         with tempfile.TemporaryDirectory() as d:
             st = os.path.join(d, "state.json"); dbp = os.path.join(d, "sim.sqlite3")
