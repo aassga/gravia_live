@@ -58,3 +58,4 @@ polymarket_live5_state.json
 polymarket_live5_state.json.tmp
 polymarket_live5_baseline.json
 polymarket_sim_live5.sqlite3*
+sim_variant_overrides.json

@@ -722,6 +722,21 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertAlmostEqual(payload["roi"], st["totalPnl"] / stake * 100.0, places=6)
         self.assertAlmostEqual(payload["roiPerTrade"], payload["roi"] / st["totalTrades"], places=6)
 
+    def test_variant_stop_overrides_apply_and_relabel(self):
+        # 2026-09-20 TG /stop：覆寫檔套用到 lateFavorite 變體的停損與標籤；非買領先方／未知 id 忽略
+        v = sim.AB_VARIANT_BY_ID["btc-last30-90-092-095"]
+        orig_stop, orig_label = v.get("favoriteStopLossPrice"), v["label"]
+        try:
+            changed = sim.apply_variant_overrides({"btc-last30-90-092-095": {"favoriteStopLossPrice": 0.7}, "nope": {"favoriteStopLossPrice": 0.5},
+                                                   "btc-open-momentum": {"favoriteStopLossPrice": 0.5}})
+            self.assertEqual(changed, ["btc-last30-90-092-095"])
+            self.assertEqual(v["favoriteStopLossPrice"], 0.7); self.assertFalse(v["noStop"]); self.assertIn("停損 0.70", v["label"])
+            self.assertEqual(sim.apply_variant_overrides({"btc-last30-90-092-095": {"favoriteStopLossPrice": None}}), ["btc-last30-90-092-095"])
+            self.assertIsNone(v["favoriteStopLossPrice"]); self.assertTrue(v["noStop"]); self.assertIn("不停損", v["label"])
+            self.assertEqual(sim.apply_variant_overrides({"btc-last30-90-092-095": {"favoriteStopLossPrice": None}}), [])   # 沒變就不回報
+        finally:
+            v["favoriteStopLossPrice"], v["label"] = orig_stop, orig_label; v["noStop"] = orig_stop is None
+
     def test_state_survives_restart(self):
         sim.ab_states["btc-main"]["totalPnl"] = 12.34
         sim.save_sim_state()

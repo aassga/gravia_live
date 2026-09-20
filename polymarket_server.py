@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -324,6 +325,10 @@ SIM_AUTO_VARIANTS_FILE = os.environ.get(
     "POLY_SIM_AUTO_VARIANTS_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_auto_variants.json"))
 SIM_DISABLED_VARIANTS_FILE = os.environ.get(
     "POLY_SIM_DISABLED_VARIANTS_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_disabled_variants.json"))
+# 2026-09-20 依使用者要求：TG /stop 可改模擬盤變體的停損；寫進這個檔（{變體id: {"favoriteStopLossPrice": 0.6|null}}），
+# 啟動時套用、之後每 5 秒偵測檔案變動熱更新（不用重啟主進程）。不進版控。
+SIM_VARIANT_OVERRIDES_FILE = os.environ.get(
+    "POLY_SIM_VARIANT_OVERRIDES_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_variant_overrides.json"))
 
 
 def _load_json_file(path: str, default):
@@ -934,6 +939,61 @@ if _SIM_ONLY_VARIANT_IDS:
     if not AB_VARIANTS:
         raise RuntimeError(f"POLY_SIM_ONLY_VARIANTS 沒有選到任何已知變體：{sorted(_SIM_ONLY_VARIANT_IDS)}")
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
+
+
+def _relabel_stop(label: str, stop: float | None) -> str:
+    """把標籤裡的「停損 X.XX」或「不停損」換成新值。"""
+    new_txt = f"停損 {stop:.2f}" if stop is not None else "不停損"
+    out = re.sub(r"停損 \d\.\d\d", new_txt, label)
+    if out == label:
+        out = label.replace("不停損", new_txt)
+    return out
+
+
+def apply_variant_overrides(overrides: dict) -> list[str]:
+    """套用 TG 寫的變體覆寫（目前只支援 favoriteStopLossPrice）；回傳有變動的變體 id。"""
+    changed = []
+    for vid, o in (overrides or {}).items():
+        v = AB_VARIANT_BY_ID.get(vid)
+        if not v or not isinstance(o, dict) or "favoriteStopLossPrice" not in o or not v.get("lateFavorite"):
+            continue
+        raw = o.get("favoriteStopLossPrice")
+        stop = float(raw) if raw not in (None, "", 0, "0") else None
+        if v.get("favoriteStopLossPrice") == stop and bool(v.get("noStop")) == (stop is None):
+            continue
+        v["favoriteStopLossPrice"] = stop
+        v["noStop"] = stop is None
+        v["label"] = _relabel_stop(v["label"], stop)
+        changed.append(vid)
+        log.info(f"[SIM:{vid}] 停損覆寫 → {'不停損' if stop is None else f'{stop:.2f}'}：{v['label']}")
+    return changed
+
+
+_variant_overrides_mtime = {"v": None}
+
+
+def load_variant_overrides(force: bool = False) -> list[str]:
+    """讀 SIM_VARIANT_OVERRIDES_FILE（mtime 沒變就跳過）並套用。"""
+    try:
+        mtime = os.path.getmtime(SIM_VARIANT_OVERRIDES_FILE)
+    except OSError:
+        return []
+    if not force and _variant_overrides_mtime["v"] == mtime:
+        return []
+    _variant_overrides_mtime["v"] = mtime
+    return apply_variant_overrides(_load_json_file(SIM_VARIANT_OVERRIDES_FILE, {}) or {})
+
+
+load_variant_overrides(force=True)
+
+
+async def variant_overrides_watch_loop() -> None:
+    while True:
+        try:
+            load_variant_overrides()
+        except Exception as exc:
+            log.warning(f"[SIM] 變體覆寫檔讀取失敗：{exc}")
+        await asyncio.sleep(5.0)
 MARKET_MAKER_VARIANTS = [v for v in AB_VARIANTS if v.get("marketMakerOnly")]
 
 def _new_market_state() -> dict:
@@ -5479,7 +5539,7 @@ async def main():
         log.info("  ⚠ --with-live 已啟用：會在這個進程裡跑真實下單邏輯（仍受 .env 雙開關控制）")
     log.info("=" * 50)
 
-    tasks = [data_fetcher(), broadcast_loop(), market_ws_loop(), binance_ws_loop(), wallet_follow_loop()]
+    tasks = [data_fetcher(), broadcast_loop(), market_ws_loop(), binance_ws_loop(), wallet_follow_loop(), variant_overrides_watch_loop()]
     if any(asset.get("binanceSymbol") == "BTCUSDT" for asset in ASSETS):
         tasks.append(chainlink_twap_loop())
     if WITH_LIVE:

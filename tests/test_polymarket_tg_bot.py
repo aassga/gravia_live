@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 
@@ -145,6 +146,28 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(kb[-1][0]["callback_data"], "stake:cancel")
         self.assertEqual(bot.stake_confirm_keyboard(1, 12.5)[0][0]["callback_data"], "stake:1:12.5:confirm")
         self.assertEqual(bot.live_toggle_keyboard(False, 0)[-1][1]["callback_data"], "stake:0")
+
+    def test_stop_helpers(self):
+        # 2026-09-20 /stop：值解析、分組、覆寫檔寫入、鍵盤 callback
+        import tempfile
+        self.assertEqual(bot.parse_stop_price("0"), 0.0)
+        self.assertEqual(bot.parse_stop_price("0.60"), 0.6)
+        self.assertIsNone(bot.parse_stop_price("1.2")); self.assertIsNone(bot.parse_stop_price("x"))
+        sim = {"assetList": [{"id": "btc", "label": "BTC"}],
+               "abVariants": [{"id": "a", "assetId": "btc", "label": "A（0.98～0.99、不停損）", "lateFavorite": True, "favoriteStopLossPrice": None, "totalPnl": 1, "totalTrades": 2},
+                              {"id": "b", "assetId": "btc", "label": "B（停損 0.60）", "lateFavorite": True, "favoriteStopLossPrice": 0.6, "totalPnl": 5, "totalTrades": 3},
+                              {"id": "c", "assetId": "btc", "label": "C", "openMomentum": True, "totalPnl": 9}]}
+        groups = bot.stop_variants(sim)
+        self.assertEqual([v["id"] for v in groups["btc"]], ["b", "a"])
+        kb = bot.stop_value_keyboard("btc", 0, 0.6)
+        self.assertEqual(kb[0][0]["text"], "不停損"); self.assertEqual(kb[0][3]["text"], "★ 0.60")
+        self.assertEqual(kb[0][3]["callback_data"], "stop:s:btc:0:0.60")
+        self.assertEqual(bot.stop_confirm_keyboard("btc", 0, "0")[0][0]["callback_data"], "stop:c:btc:0:0")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "ov.json")
+            bot.write_variant_override("a", 0.6, path); data = bot.write_variant_override("b", 0.0, path)
+            self.assertEqual(data, {"a": {"favoriteStopLossPrice": 0.6}, "b": {"favoriteStopLossPrice": None}})
+            self.assertEqual(json.load(open(path, encoding="utf-8"))["b"]["favoriteStopLossPrice"], None)
 
     def test_live_toggle_env_writer_and_keyboards(self):
         import tempfile
