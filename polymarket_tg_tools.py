@@ -139,9 +139,10 @@ def mirror_report(db_path: str, state_path: str, vid: str, hours: float = 12.0, 
     with open(state_path, "r", encoding="utf-8") as f:
         live = json.load(f)
     live_tr = {t["windowSlug"]: t for t in live.get("trades", []) if not t.get("dryRun", True) and (t.get("entryTime") or 0) >= since}
+    live_dry = {t["windowSlug"] for t in live.get("trades", []) if t.get("dryRun", True) and (t.get("entryTime") or 0) >= since}
     pos = live.get("position")
-    if pos and not pos.get("dryRun", True):
-        live_tr[pos["windowSlug"]] = pos
+    if pos and (pos.get("entryTime") or 0) >= since:
+        (live_tr if not pos.get("dryRun", True) else live_dry).__setitem__(pos["windowSlug"], pos) if not pos.get("dryRun", True) else live_dry.add(pos["windowSlug"])
     live_diag = {w.get("windowSlug"): w for w in live.get("windowDiagnostics", []) if (w.get("firstSeenAt") or 0) >= since}
     db = _ro(db_path)
     try:
@@ -158,9 +159,12 @@ def mirror_report(db_path: str, state_path: str, vid: str, hours: float = 12.0, 
     finally:
         db.close()
     slugs = sorted(set(sim_tr) | set(live_tr) | set(sim_diag) | set(live_diag))
-    both = only_live = only_sim = 0; details = []
+    both = only_live = only_sim = dry_match = 0; details = []
     for s in slugs:
         a, b = s in sim_tr, s in live_tr
+        if a and s in live_dry:
+            dry_match += 1   # 實盤當時是 DRY-RUN、也有跟到 → 不算不一致
+            continue
         if a and b:
             both += 1
         elif b:
@@ -169,7 +173,8 @@ def mirror_report(db_path: str, state_path: str, vid: str, hours: float = 12.0, 
         elif a:
             only_sim += 1; w = live_diag.get(s) or {}
             details.append(f"只模擬 {datetime.fromtimestamp(int(s.rsplit('-', 1)[-1]), TP).strftime('%m-%d %H:%M')} 實盤原因 {w.get('lastReason') or '無診斷'}{('/' + str(w.get('orderError'))) if w.get('orderError') else ''}")
-    lines = [f"🪞 {name} vs 模擬盤 {vid}（最近 {hours:.0f}h，{len(slugs)} 窗）：兩邊都進 {both} · 只實盤 {only_live} · 只模擬 {only_sim}"]
+    lines = [f"🪞 {name} vs 模擬盤 {vid}（最近 {hours:.0f}h，{len(slugs)} 窗）：兩邊都進 {both} · 只實盤 {only_live} · 只模擬 {only_sim}"
+             + (f" · DRY-RUN 跟到 {dry_match}（不計）" if dry_match else "")]
     if not live_tr and not sim_tr:
         lines.append("（這段期間沒有真實成交，DRY-RUN 不列入）")
     lines += details[:8]
