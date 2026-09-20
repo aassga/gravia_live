@@ -171,6 +171,20 @@ class TelegramBotTests(unittest.TestCase):
             self.assertEqual(data, {"a": {"favoriteStopLossPrice": 0.6}, "b": {"favoriteStopLossPrice": None}})
             self.assertEqual(json.load(open(path, encoding="utf-8"))["b"]["favoriteStopLossPrice"], None)
 
+    def test_new_real_loss_and_stake_alert(self):
+        # 2026-09-20 推播：新的真實虧損單、餘額不足 5 股
+        t_loss = {"windowSlug": "w2", "exitTime": 2, "dryRun": False, "pnlEstimate": -9.0}
+        t_win = {"windowSlug": "w1", "exitTime": 1, "dryRun": False, "pnlEstimate": 0.2}
+        prev = {"strategyState": {"trades": [t_win]}}; cur = {"strategyState": {"trades": [t_loss, t_win]}}
+        self.assertEqual(bot.new_real_loss(prev, cur), t_loss)
+        self.assertIsNone(bot.new_real_loss(cur, cur))                                   # 同一筆不重複
+        self.assertIsNone(bot.new_real_loss(prev, {"strategyState": {"trades": [dict(t_loss, dryRun=True)]}}))
+        self.assertIsNone(bot.new_real_loss(None, cur))
+        snap = {"balanceUsdc": 23.56, "strategyExecutionEnabled": True, "strategyState": {"position": None}}
+        self.assertIsNone(bot.stake_alert_text(snap, 22, "實盤①"))
+        self.assertIn("只買得到 4 股", bot.stake_alert_text(snap, 20, "實盤①"))
+        self.assertIsNone(bot.stake_alert_text(dict(snap, strategyExecutionEnabled=False), 20, "實盤①"))   # DRY-RUN 不吵
+
     def test_live_toggle_env_writer_and_keyboards(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
