@@ -766,6 +766,8 @@ def _auto_variant_from_spec(spec: dict) -> dict | None:
         "favoriteTakeProfitPrice": None, "favoriteStableSeconds": 0.0,
         # 2026-09-17：noStop=true 的自動變體維持「不停損」（跟市場掃描的規則一致），不套用預設停損。
         "noStop": bool(spec.get("noStop")),
+        # 2026-09-20：進場時現貨領先幅度門檻（%），None = 不看
+        "favoriteMinLeadPct": (float(spec["favoriteMinLeadPct"]) if spec.get("favoriteMinLeadPct") is not None else None),
         "addedAt": spec.get("addedAt"), "stats": spec.get("stats"),
     }
 
@@ -3108,6 +3110,19 @@ def _try_late_favorite_entry(
             selectedSide=side, selectedAsk=ask, pairAskSum=round(up_ask + down_ask, 4), favoriteMaxPairAskSum=max_pair_sum, **common,
         )
         return
+    min_lead = variant.get("favoriteMinLeadPct")
+    if min_lead is not None:
+        # 2026-09-20 依使用者要求：進場時 Binance 現貨相對本窗口開盤價的領先幅度要 >= min_lead%（買 Up 看正向、買 Down 看反向），
+        # 濾掉「只領先 $8 市場就喊 0.98」那種過度自信的窗口（09-19 16:54 -87）。開盤價／現貨缺資料就不進。
+        ms = markets_state.get(variant["assetId"]) or {}
+        opening, current = ms.get("windowOpenSpotPrice"), ms.get("spotPrice")
+        if not opening or not current:
+            record_window_diagnostic(variant_id, slug, "favorite_lead_unknown", selectedSide=side, **common)
+            return
+        lead_pct = (1 if side == "Up" else -1) * (float(current) - float(opening)) / float(opening) * 100
+        if lead_pct < float(min_lead):
+            record_window_diagnostic(variant_id, slug, "favorite_lead_below_minimum", selectedSide=side, leadPct=round(lead_pct, 4), favoriteMinLeadPct=min_lead, **common)
+            return
     if flip_lookback > 0:
         other = "Down" if side == "Up" else "Up"
         seen = (st.get("favoriteLeaderSeen") or {}).get(other)
@@ -5370,6 +5385,7 @@ def build_ab_leaderboard() -> list:
             "lateDirectionMinMarketPrice": v.get("lateDirectionMinMarketPrice"),
             "favoriteWindowSeconds": v.get("favoriteWindowSeconds"),
             "favoriteMinRemaining": v.get("favoriteMinRemaining"),
+            "favoriteMinLeadPct": v.get("favoriteMinLeadPct"),
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),

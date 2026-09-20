@@ -210,6 +210,28 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim._try_late_favorite_entry(vid, slug, up2, down2, 47.0)
         self.assertEqual(sim.ab_states[vid]["position"]["side"], "Down")
 
+    def test_late_favorite_min_lead_pct_filter(self):
+        # 2026-09-20：favoriteMinLeadPct — 現貨相對開盤領先不足就不進；缺開盤價也不進；足夠才進
+        vid = "btc-late-favorite"
+        v = sim.AB_VARIANT_BY_ID[vid]
+        v["favoriteMinLeadPct"] = 0.01
+        try:
+            ms = sim.markets_state["btc"]
+            up, down = self._favorite_books()          # Up ask 0.96 → 買 Up
+            ms["windowOpenSpotPrice"], ms["spotPrice"] = None, 100.0
+            sim.simulate_trading(vid, "btc-window", up, down, 40.0, None)
+            self.assertIsNone(sim.ab_states[vid]["position"])
+            self.assertEqual(sim._window_diagnostic(vid, "btc-window")["reasonCounts"].get("favorite_lead_unknown"), 1)
+            ms["windowOpenSpotPrice"], ms["spotPrice"] = 100.0, 100.005    # +0.005% < 0.01%
+            sim.simulate_trading(vid, "btc-window", up, down, 40.0, None)
+            self.assertIsNone(sim.ab_states[vid]["position"])
+            self.assertEqual(sim._window_diagnostic(vid, "btc-window")["reasonCounts"].get("favorite_lead_below_minimum"), 1)
+            ms["spotPrice"] = 100.02                                        # +0.02% → 進
+            sim.simulate_trading(vid, "btc-window", up, down, 40.0, None)
+            self.assertEqual(sim.ab_states[vid]["position"]["side"], "Up")
+        finally:
+            v.pop("favoriteMinLeadPct", None)
+
     def test_late_favorite_stop_loss_sells_when_leader_flips(self):
         # 停損機制驗證（btc-late-favorite 預設已改為不停損，這裡暫時給 0.85）：
         # 買 Down 0.96 後翻面，Down 買盤掉到 0.80 → 賣掉；掉到 0.88 → 不賣
