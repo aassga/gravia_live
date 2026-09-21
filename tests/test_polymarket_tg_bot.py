@@ -170,7 +170,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(bot.parse_stop_usd("2"), 2.0); self.assertEqual(bot.parse_stop_usd("0"), 0.0); self.assertIsNone(bot.parse_stop_usd("x"))
         kb = bot.stop_value_keyboard("btc", 0, 0.6, 2)
         flat = [b for row in kb[2:-1] for b in row]
-        self.assertEqual(flat[0]["text"], "不設金額"); self.assertEqual(len(flat), 17)
+        self.assertEqual(flat[0]["text"], "不設金額"); self.assertEqual(len(flat), 26); self.assertEqual(flat[-1]["text"], "$100")
         star = next(b for b in flat if b["text"].startswith("★ ")); self.assertEqual((star["text"], star["callback_data"]), ("★ $2", "stop:m:btc:0:2"))
         self.assertEqual(kb[-1][0]["callback_data"], "stop:cancel")
         self.assertEqual(bot.stop_confirm_keyboard("btc", 0, "5", "usd")[0][0]["callback_data"], "stop:k:btc:0:5")
