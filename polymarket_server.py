@@ -871,13 +871,14 @@ if any(a["id"] == "xrp" for a in ASSETS):
             })
     del _w, _lbl, _maxp
 
-# 2026-09-21 依使用者要求：ETH 5m 買領先方的對手盤——最後 60 秒買便宜邊（ask <= 0.10）、抱到結算。純觀察。
+# 2026-09-21 依使用者要求：ETH 5m 買領先方的對手盤——最後 60 秒買便宜邊、抱到結算。純觀察。
+# 同日改區間 ≤0.10 → 0.10～0.40：0.01 是市場已定局的純樂透（5,000 股 -53），掃描裡賺錢的便宜邊買的是還有懸念的價位。
 if any(a["id"] == "eth-alt" for a in ASSETS) and not any(v["id"] == "eth-alt-late-underdog-010" for v in AB_VARIANTS):
     AB_VARIANTS.append({
         "id": "eth-alt-late-underdog-010", "assetId": "eth-alt",
-        "label": "ETH 最後 60 秒買便宜邊（ask ≤0.10、抱到結算）",
+        "label": "ETH 最後 60 秒買便宜邊（ask 0.10～0.40、抱到結算）",
         "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "lateUnderdog": True, "simOnly": True,
-        "underdogWindowSeconds": 60.0, "underdogMinRemaining": 5.0, "underdogMinPrice": 0.01, "underdogMaxPrice": 0.10,
+        "underdogWindowSeconds": 60.0, "underdogMinRemaining": 5.0, "underdogMinPrice": 0.10, "underdogMaxPrice": 0.40,
     })
 
 # 2026-09-16 依使用者要求：模擬盤所有買領先方變體一律停損（原本「不停損」的也改；0.85 → 同日改 0.60），
