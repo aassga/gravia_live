@@ -838,9 +838,26 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
             plan, dry_run, reason = close.await_args.args
             self.assertEqual(reason, "favorite_stop_loss")
             self.assertEqual(plan["side"], "Down")
-            # 觸發用保守可賣價（<= 0.60），送出的限價再多讓 EMERGENCY_UNWIND_EXTRA_TICKS 格 tick
-            self.assertLessEqual(plan["_triggerPrice"], 0.60)
-            self.assertAlmostEqual(plan["limitPrice"], plan["_triggerPrice"] - 0.01 * strategy.EMERGENCY_UNWIND_EXTRA_TICKS, places=6)
+            # 2026-09-22：觸發看最佳 bid（0.50 <= 0.60），送出的限價 = 保守可賣價再多讓 EMERGENCY_UNWIND_EXTRA_TICKS 格 tick
+            self.assertEqual(plan["_triggerPrice"], 0.50)
+            self.assertEqual(plan["_stopReason"], "favorite_stop_loss")
+            self.assertLessEqual(plan["limitPrice"], plan["_triggerPrice"] - 0.01 * strategy.EMERGENCY_UNWIND_EXTRA_TICKS + 1e-9)
+
+    async def test_live_stop_trigger_uses_best_bid_not_depth_and_supports_usd_stop(self):
+        # 薄買盤：最佳 bid 0.95 只有 3 股、下一檔 0.80——舊邏輯整筆砸下去判斷價 <= 0.88 會誤觸發，新邏輯看最佳 bid 不觸發
+        pos = {"windowSlug": "btc-window", "side": "Up", "tokenId": "up-token", "shares": 20.0, "entryPrice": 0.98,
+               "entryNotional": 19.6, "entryFee": 0.02, "stakeUsd": 19.62, "hedged": False, "dryRun": True}
+        thin = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.97, "size": 500}],
+                                    "bids": [{"price": 0.95, "size": 3}, {"price": 0.80, "size": 500}]})
+        other = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.06, "size": 500}], "bids": [{"price": 0.04, "size": 500}]})
+        with patch.object(strategy, "LATE_FAVORITE_STOP_LOSS_PRICE", 0.88), patch.object(strategy, "LATE_FAVORITE_STOP_LOSS_USD", None):
+            self.assertIsNone(strategy._late_favorite_stop_plan(pos, thin, other))
+        # 金額停損：最佳 bid 0.95 時帳面虧損 ≈ (0.98-0.95)*20 + 費 ≈ 0.6+ → 設 $0.5 觸發、設 $2 不觸發
+        with patch.object(strategy, "LATE_FAVORITE_STOP_LOSS_PRICE", None), patch.object(strategy, "LATE_FAVORITE_STOP_LOSS_USD", 0.5):
+            plan = strategy._late_favorite_stop_plan(pos, thin, other)
+            self.assertIsNotNone(plan); self.assertEqual(plan["_stopReason"], "favorite_stop_loss_usd")
+        with patch.object(strategy, "LATE_FAVORITE_STOP_LOSS_PRICE", None), patch.object(strategy, "LATE_FAVORITE_STOP_LOSS_USD", 2.0):
+            self.assertIsNone(strategy._late_favorite_stop_plan(pos, thin, other))
 
     def test_dry_run_trades_are_listed_but_not_counted_in_totals(self):
         pos = {"windowSlug": "btc-window", "side": "Up", "shares": 5.0, "entryPrice": 0.96, "stakeUsd": 4.8,

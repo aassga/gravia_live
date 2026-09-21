@@ -269,6 +269,7 @@ def _fetch_state() -> dict:
             "lateFavoriteMinPrice": strategy.LATE_FAVORITE_MIN_PRICE,
             "lateFavoriteMaxPrice": strategy.LATE_FAVORITE_MAX_PRICE,
             "lateFavoriteStopLossPrice": strategy.LATE_FAVORITE_STOP_LOSS_PRICE,
+            "lateFavoriteStopLossUsd": strategy.LATE_FAVORITE_STOP_LOSS_USD,
             "lateFavoriteTakeProfitPrice": strategy.LATE_FAVORITE_TAKE_PROFIT_PRICE,
             "lateFavoriteStableSeconds": strategy.LATE_FAVORITE_STABLE_SECONDS,
             "lateFavoriteFlipLookbackSeconds": strategy.LATE_FAVORITE_FLIP_LOOKBACK_SECONDS,

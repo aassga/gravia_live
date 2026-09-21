@@ -974,22 +974,39 @@ def _relabel_stop(label: str, stop: float | None) -> str:
     return out
 
 
+def _relabel_stop_usd(label: str, usd: float | None) -> str:
+    """金額停損：標籤尾端「・虧損≥$X 停損」加上或拿掉。"""
+    base = re.sub(r"・虧損≥\$[\d.]+ 停損$", "", label)
+    return f"{base}・虧損≥${usd:g} 停損" if usd is not None else base
+
+
 def apply_variant_overrides(overrides: dict) -> list[str]:
-    """套用 TG 寫的變體覆寫（目前只支援 favoriteStopLossPrice）；回傳有變動的變體 id。"""
+    """套用 TG 寫的變體覆寫（favoriteStopLossPrice／favoriteStopLossUsd）；回傳有變動的變體 id。"""
     changed = []
     for vid, o in (overrides or {}).items():
         v = AB_VARIANT_BY_ID.get(vid)
-        if not v or not isinstance(o, dict) or "favoriteStopLossPrice" not in o or not any(v.get(f) for f in SINGLE_LEG_FLAGS):
+        if not v or not isinstance(o, dict) or not any(v.get(f) for f in SINGLE_LEG_FLAGS):
             continue
-        raw = o.get("favoriteStopLossPrice")
-        stop = float(raw) if raw not in (None, "", 0, "0") else None
-        if v.get("favoriteStopLossPrice") == stop and bool(v.get("noStop")) == (stop is None):
-            continue
-        v["favoriteStopLossPrice"] = stop
-        v["noStop"] = stop is None
-        v["label"] = _relabel_stop(v["label"], stop)
-        changed.append(vid)
-        log.info(f"[SIM:{vid}] 停損覆寫 → {'不停損' if stop is None else f'{stop:.2f}'}：{v['label']}")
+        touched = False
+        if "favoriteStopLossPrice" in o:
+            raw = o.get("favoriteStopLossPrice")
+            stop = float(raw) if raw not in (None, "", 0, "0") else None
+            if not (v.get("favoriteStopLossPrice") == stop and bool(v.get("noStop")) == (stop is None)):
+                v["favoriteStopLossPrice"] = stop
+                v["noStop"] = stop is None
+                v["label"] = _relabel_stop(v["label"], stop)
+                touched = True
+                log.info(f"[SIM:{vid}] 停損覆寫 → {'不停損' if stop is None else f'{stop:.2f}'}：{v['label']}")
+        if "favoriteStopLossUsd" in o:
+            raw = o.get("favoriteStopLossUsd")
+            usd = float(raw) if raw not in (None, "", 0, "0") else None
+            if v.get("favoriteStopLossUsd") != usd:
+                v["favoriteStopLossUsd"] = usd
+                v["label"] = _relabel_stop_usd(v["label"], usd)
+                touched = True
+                log.info(f"[SIM:{vid}] 金額停損覆寫 → {'不設' if usd is None else f'${usd:g}'}：{v['label']}")
+        if touched:
+            changed.append(vid)
     return changed
 
 
@@ -3523,25 +3540,49 @@ def _try_late_favorite_take_profit(variant_id: str, slug: str, up_book: dict, do
     return True
 
 
+def _stop_trigger(pos: dict, held_book: dict, stop_price, stop_usd) -> tuple[str | None, float | None, float | None]:
+    """2026-09-22 依使用者要求：停損觸發改看「最佳 bid」而不是整筆砸進去的最差成交價——
+    XRP／BTC 5m 買盤薄，50 股一砸就走到 0.88 以下，明明市場還在 0.95 卻被判定翻面（09-21 一天 33 次）。
+    價格停損：best_bid <= stop_price；金額停損：以 best_bid 估的帳面虧損 >= stop_usd。
+    回傳 (原因, best_bid, 帳面損益)。"""
+    bids = held_book.get("bids") or []
+    best_bid = max(float(b["price"]) for b in bids) if bids else None
+    if best_bid is None:
+        return None, None, None
+    shares = float(pos["shares"])
+    mark_pnl = best_bid * shares - taker_fee(shares, best_bid) - _position_paid_cost(pos)
+    if stop_usd is not None and mark_pnl <= -float(stop_usd) + 1e-9:
+        return "favorite_stop_loss_usd", best_bid, mark_pnl
+    if stop_price is not None and best_bid <= float(stop_price) + 1e-9:
+        return "favorite_stop_loss", best_bid, mark_pnl
+    return None, best_bid, mark_pnl
+
+
 def _try_late_favorite_stop_loss(variant_id: str, slug: str, up_book: dict, down_book: dict) -> None:
-    """領先方翻面：持有腿的保守可賣價 <= favoriteStopLossPrice 就整筆賣掉（每個 tick 檢查）。"""
+    """領先方翻面：持有腿最佳 bid <= favoriteStopLossPrice，或帳面虧損 >= favoriteStopLossUsd，就整筆賣掉（每個 tick 檢查）；
+    成交仍照買盤深度走。"""
     variant = AB_VARIANT_BY_ID[variant_id]
     stop_price = variant.get("favoriteStopLossPrice")
-    if stop_price is None:
+    stop_usd = variant.get("favoriteStopLossUsd")
+    if stop_price is None and stop_usd is None:
         return
     st = ab_states[variant_id]
     pos = st["position"]
     held_book = up_book if pos["side"] == "Up" else down_book
     if not _simulation_direction_book_is_fresh(variant["assetId"], pos["side"], held_book):
         return
+    reason, best_bid, mark_pnl = _stop_trigger(pos, held_book, stop_price, stop_usd)
+    if reason is None:
+        return
     fill = simulate_sell_fill(held_book, float(pos["shares"]))
-    if not fill or fill["decisionPrice"] > float(stop_price):
+    if not fill:
         return
     record_window_diagnostic(
-        variant_id, slug, "favorite_stop_loss",
-        selectedSide=pos["side"], exitDecisionPrice=fill["decisionPrice"], favoriteStopLossPrice=stop_price,
+        variant_id, slug, reason,
+        selectedSide=pos["side"], bestBid=best_bid, markPnl=round(mark_pnl, 4), exitDecisionPrice=fill["decisionPrice"],
+        favoriteStopLossPrice=stop_price, favoriteStopLossUsd=stop_usd,
     )
-    _close_directional_position(variant_id, fill, "favorite_stop_loss")
+    _close_directional_position(variant_id, fill, reason)
     save_sim_state()
 
 
@@ -5476,6 +5517,7 @@ def build_ab_leaderboard() -> list:
             "favoriteMinPrice": v.get("favoriteMinPrice"),
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
+            "favoriteStopLossUsd": v.get("favoriteStopLossUsd"),
             "favoriteTakeProfitPrice": v.get("favoriteTakeProfitPrice"),
             "favoriteStableSeconds": v.get("favoriteStableSeconds"),
             "favoriteFlipLookbackSeconds": v.get("favoriteFlipLookbackSeconds"),

@@ -166,10 +166,17 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(kb[0][0]["text"], "不停損"); self.assertEqual(kb[0][3]["text"], "★ 0.60")
         self.assertEqual(kb[0][3]["callback_data"], "stop:s:btc:0:0.60")
         self.assertEqual(bot.stop_confirm_keyboard("btc", 0, "0")[0][0]["callback_data"], "stop:c:btc:0:0")
+        # 2026-09-22 金額停損
+        self.assertEqual(bot.parse_stop_usd("2"), 2.0); self.assertEqual(bot.parse_stop_usd("0"), 0.0); self.assertIsNone(bot.parse_stop_usd("x"))
+        kb = bot.stop_value_keyboard("btc", 0, 0.6, 2)
+        self.assertEqual(kb[2][0]["text"], "不設金額"); self.assertEqual(kb[3][0]["text"], "★ $2"); self.assertEqual(kb[3][0]["callback_data"], "stop:m:btc:0:2")
+        self.assertEqual(bot.stop_confirm_keyboard("btc", 0, "5", "usd")[0][0]["callback_data"], "stop:k:btc:0:5")
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "ov.json")
             bot.write_variant_override("a", 0.6, path); data = bot.write_variant_override("b", 0.0, path)
             self.assertEqual(data, {"a": {"favoriteStopLossPrice": 0.6}, "b": {"favoriteStopLossPrice": None}})
+            data = bot.write_variant_override("a", 2.0, path, key="favoriteStopLossUsd")
+            self.assertEqual(data["a"], {"favoriteStopLossPrice": 0.6, "favoriteStopLossUsd": 2.0})
             self.assertEqual(json.load(open(path, encoding="utf-8"))["b"]["favoriteStopLossPrice"], None)
 
     def test_new_real_loss_and_stake_alert(self):

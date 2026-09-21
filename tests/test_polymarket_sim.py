@@ -375,6 +375,26 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNotNone(sim.ab_states[vid]["position"])
         sim.AB_VARIANT_BY_ID[vid]["directionStopLossPrice"] = None
 
+    def test_sim_stop_trigger_uses_best_bid_and_usd_stop(self):
+        # 2026-09-22：觸發看最佳 bid（薄買盤不誤觸發）；金額停損看帳面虧損
+        pos = {"side": "Up", "shares": 50.0, "entryPrice": 0.98, "entryNotional": 49.0, "entryFee": 0.05, "hedged": False}
+        thin = {"bids": [{"price": 0.95, "size": 3}, {"price": 0.80, "size": 500}]}
+        self.assertEqual(sim._stop_trigger(pos, thin, 0.88, None)[0], None)                    # best bid 0.95 > 0.88 → 不觸發
+        self.assertEqual(sim._stop_trigger(pos, {"bids": [{"price": 0.87, "size": 500}]}, 0.88, None)[0], "favorite_stop_loss")
+        reason, bid, mark = sim._stop_trigger(pos, thin, None, 1.0)                          # 帳面 ≈ (0.95-0.98)*50 - 費 ≈ -1.6 → 觸發
+        self.assertEqual(reason, "favorite_stop_loss_usd"); self.assertLess(mark, -1.0)
+        self.assertEqual(sim._stop_trigger(pos, thin, None, 5.0)[0], None)
+        self.assertEqual(sim._stop_trigger(pos, {"bids": []}, 0.88, 1.0)[0], None)         # 沒有買盤：不判定
+        # 覆寫檔支援 favoriteStopLossUsd，標籤尾端加「・虧損≥$X 停損」
+        v = sim.AB_VARIANT_BY_ID["btc-last30-90-092-095"]; orig = dict(v)
+        try:
+            self.assertEqual(sim.apply_variant_overrides({"btc-last30-90-092-095": {"favoriteStopLossUsd": 2}}), ["btc-last30-90-092-095"])
+            self.assertEqual(v["favoriteStopLossUsd"], 2.0); self.assertTrue(v["label"].endswith("・虧損≥$2 停損"))
+            sim.apply_variant_overrides({"btc-last30-90-092-095": {"favoriteStopLossUsd": None}})
+            self.assertIsNone(v["favoriteStopLossUsd"]); self.assertFalse(v["label"].endswith("停損") and "虧損≥" in v["label"])
+        finally:
+            v.clear(); v.update(orig)
+
     def test_late_favorite_take_profit_sells_when_bid_reaches_099(self):
         # 買 Up 0.96 後 bid 到 0.99 → 獲利了結，不等結算
         self._set_chainlink_signal(opening=100.0, current=100.3)

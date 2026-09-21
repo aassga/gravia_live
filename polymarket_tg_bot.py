@@ -190,7 +190,7 @@ HELP_TEXT = (
     "/live — 實盤真實下單開關（REAL ↔ DRY-RUN，按鈕確認後切換並重啟）\n"
     "/strategy — 更換實盤策略（選實盤 → 選模擬盤的買領先方變體 → 確認；不動每注%與 REAL/DRY-RUN）\n"
     "/stake — 改實盤每注 %（選實盤 → 選 5～100% → 確認；或 /stake <實盤編號> <數字>，0.5～100）\n"
-    "/stop — 改模擬盤變體的停損（買領先方／跟單／便宜邊等單腿策略；選資產 → 選變體 → 選值 → 確認）；有實盤在用同一變體會一起改並重啟\n"
+    "/stop — 改模擬盤變體的停損：價格停損（最佳 bid 跌到 X）或金額停損（帳面虧損達 $X）；選資產 → 選變體 → 選值 → 確認；有實盤在用同一變體會一起改並重啟\n"
     "/loss — 分析某實盤最近的真實虧損原因（選實盤；或 /loss <實盤編號> [筆數]，預設 5 筆）\n"
     "/roi — 模擬盤 ROI 排行（各資產前 5、≥10 筆；含打平勝率、1 輸＝幾贏）\n"
     "/tune — 某模擬盤變體的停損回放（各檔位假停損／淨損益）\n"
@@ -529,6 +529,7 @@ async def apply_stake(idx: int, pct: float) -> str:
 # POLY_LIVE_FAVORITE_STOP_LOSS_PRICE 並重啟其服務（有持倉先不重啟，等結算後再按一次）。
 SIM_VARIANT_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_variant_overrides.json")
 STOP_PRESETS = ("0", "0.40", "0.50", "0.60", "0.70", "0.80", "0.90")
+STOP_USD_PRESETS = ("0", "0.5", "1", "2", "5", "10")   # 2026-09-22：金額停損（帳面虧損 >= $X 即賣出），0 = 不設
 _STOP_CANDIDATES: dict[str, list[dict]] = {}   # asset_id -> variants
 
 
@@ -560,7 +561,22 @@ def stop_variants(sim: dict) -> dict[str, list[dict]]:
     return out
 
 
-def write_variant_override(vid: str, stop: float, path: str = SIM_VARIANT_OVERRIDES_FILE) -> dict:
+def parse_stop_usd(text: str) -> float | None:
+    t = str(text).strip().lower()
+    if t in ("0", "none", "off", "不設"):
+        return 0.0
+    try:
+        v = float(t)
+    except ValueError:
+        return None
+    return v if 0.1 <= v <= 1000 else None
+
+
+def _usd_txt(usd) -> str:
+    return f"虧損≥${float(usd):g} 停損" if usd else "不設金額停損"
+
+
+def write_variant_override(vid: str, stop: float, path: str = SIM_VARIANT_OVERRIDES_FILE, key: str = "favoriteStopLossPrice") -> dict:
     data = {}
     if os.path.exists(path):
         try:
@@ -568,7 +584,7 @@ def write_variant_override(vid: str, stop: float, path: str = SIM_VARIANT_OVERRI
                 data = json.load(f) or {}
         except Exception:
             data = {}
-    data.setdefault(vid, {})["favoriteStopLossPrice"] = (float(stop) if stop else None)
+    data.setdefault(vid, {})[key] = (float(stop) if stop else None)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -596,13 +612,18 @@ def stop_variant_keyboard(aid: str, rows: list[dict]) -> list[list[dict]]:
     return kb
 
 
-def stop_value_keyboard(aid: str, n: int, current) -> list[list[dict]]:
+def stop_value_keyboard(aid: str, n: int, current, current_usd=None) -> list[list[dict]]:
     cur = f"{float(current):.2f}" if current else "0"
     btns = [{"text": ("★ " if p == cur else "") + ("不停損" if p == "0" else p), "callback_data": f"stop:s:{aid}:{n}:{p}"} for p in STOP_PRESETS]
-    return [btns[:4], btns[4:], [{"text": "取消", "callback_data": "stop:cancel"}]]
+    cur_usd = f"{float(current_usd):g}" if current_usd else "0"
+    usd = [{"text": ("★ " if u == cur_usd else "") + ("不設金額" if u == "0" else f"${u}"), "callback_data": f"stop:m:{aid}:{n}:{u}"} for u in STOP_USD_PRESETS]
+    return [btns[:4], btns[4:], usd[:3], usd[3:], [{"text": "取消", "callback_data": "stop:cancel"}]]
 
 
-def stop_confirm_keyboard(aid: str, n: int, p: str) -> list[list[dict]]:
+def stop_confirm_keyboard(aid: str, n: int, p: str, kind: str = "price") -> list[list[dict]]:
+    if kind == "usd":
+        return [[{"text": f"✅ 確認改為 {_usd_txt(float(p))}", "callback_data": f"stop:k:{aid}:{n}:{p}"}],
+                [{"text": "取消", "callback_data": "stop:cancel"}]]
     return [[{"text": f"✅ 確認改為 {_stop_txt(float(p))}", "callback_data": f"stop:c:{aid}:{n}:{p}"}],
             [{"text": "取消", "callback_data": "stop:cancel"}]]
 
@@ -638,22 +659,31 @@ async def send_stop_variant_menu(client: httpx.AsyncClient, chat_id: int, aid: s
 async def send_stop_value_menu(client: httpx.AsyncClient, chat_id: int, aid: str, n: int) -> None:
     v = _STOP_CANDIDATES[aid][n]
     using = [LIVE_INSTANCES[i]["name"] for i in live_instances_using(str(v.get("id")))]
-    text = f"{v.get('label')}\n目前：{_stop_txt(v.get('favoriteStopLossPrice'))}" + (f"\n使用中的實盤：{'、'.join(using)}（會一起改並重啟）" if using else "") + "\n改為："
+    text = (f"{v.get('label')}\n目前：{_stop_txt(v.get('favoriteStopLossPrice'))} · {_usd_txt(v.get('favoriteStopLossUsd'))}"
+            + (f"\n使用中的實盤：{'、'.join(using)}（會一起改並重啟）" if using else "")
+            + "\n改為（上兩列＝價格停損：最佳 bid 跌到該價就賣；下兩列＝金額停損：帳面虧損達 $X 就賣）：")
     try:
         await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": text,
-                                                        "reply_markup": {"inline_keyboard": stop_value_keyboard(aid, n, v.get("favoriteStopLossPrice"))}})
+                                                        "reply_markup": {"inline_keyboard": stop_value_keyboard(aid, n, v.get("favoriteStopLossPrice"), v.get("favoriteStopLossUsd"))}})
     except Exception as exc:
         log.warning(f"sendMessage(stop value menu) failed: {exc}")
 
 
-async def apply_stop(v: dict, stop: float) -> str:
-    """模擬盤：寫覆寫檔（主進程熱更新）。實盤：使用同一變體的每一盤改 env 並重啟（有持倉的先不重啟）。"""
+async def apply_stop(v: dict, stop: float, kind: str = "price") -> str:
+    """模擬盤：寫覆寫檔（主進程熱更新）。實盤：使用同一變體的每一盤改 env 並重啟（有持倉的先不重啟）。
+    kind='price' 改 favoriteStopLossPrice／POLY_LIVE_FAVORITE_STOP_LOSS_PRICE；kind='usd' 改 favoriteStopLossUsd／POLY_LIVE_FAVORITE_STOP_LOSS_USD。"""
     vid = str(v.get("id"))
-    write_variant_override(vid, stop)
-    lines = [f"🛑 {v.get('label')}：{_stop_txt(v.get('favoriteStopLossPrice'))} → {_stop_txt(stop)}", "模擬盤：已寫入覆寫檔，主進程 5 秒內套用"]
+    if kind == "usd":
+        write_variant_override(vid, stop, key="favoriteStopLossUsd")
+        lines = [f"🛑 {v.get('label')}：{_usd_txt(v.get('favoriteStopLossUsd'))} → {_usd_txt(stop)}", "模擬盤：已寫入覆寫檔，主進程 5 秒內套用"]
+        env_key, env_val, new_txt = "POLY_LIVE_FAVORITE_STOP_LOSS_USD", (f"{float(stop):g}" if stop else "0"), _usd_txt(stop)
+    else:
+        write_variant_override(vid, stop)
+        lines = [f"🛑 {v.get('label')}：{_stop_txt(v.get('favoriteStopLossPrice'))} → {_stop_txt(stop)}", "模擬盤：已寫入覆寫檔，主進程 5 秒內套用"]
+        env_key, env_val, new_txt = "POLY_LIVE_FAVORITE_STOP_LOSS_PRICE", (f"{float(stop):.2f}" if stop else "0"), _stop_txt(stop)
     for idx in live_instances_using(vid):
         inst = LIVE_INSTANCES[idx]
-        write_env_flag("POLY_LIVE_FAVORITE_STOP_LOSS_PRICE", f"{float(stop):.2f}" if stop else "0", inst["env"])
+        write_env_flag(env_key, env_val, inst["env"])
         if _live_position_open(inst["state"]):
             lines.append(f"⏸ {inst['name']}：env 已改，但目前有持倉／待結算，未重啟；結算後再按一次或用 /live 重啟")
             continue
@@ -664,7 +694,7 @@ async def apply_stop(v: dict, stop: float) -> str:
         if proc.returncode != 0:
             lines.append(f"⚠️ {inst['name']}：env 已改，但重啟失敗（{proc.returncode}）：{(out or b'').decode(errors='replace')[:200]}")
         else:
-            lines.append(f"🔁 {inst['name']}：已改為 {_stop_txt(stop)}，服務已重啟")
+            lines.append(f"🔁 {inst['name']}：已改為 {new_txt}，服務已重啟")
     return "\n".join(lines)
 
 
@@ -1122,6 +1152,18 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                                 await send_stop_variant_menu(client, chat_id, parts_cb[2])
                             elif parts_cb[1] == "v" and len(parts_cb) == 4 and parts_cb[3].isdigit() and int(parts_cb[3]) < len(_STOP_CANDIDATES.get(parts_cb[2]) or []):
                                 await send_stop_value_menu(client, chat_id, parts_cb[2], int(parts_cb[3]))
+                            elif parts_cb[1] in ("m", "k") and len(parts_cb) == 5 and parts_cb[3].isdigit() and int(parts_cb[3]) < len(_STOP_CANDIDATES.get(parts_cb[2]) or []) and parse_stop_usd(parts_cb[4]) is not None:
+                                aid, n, p = parts_cb[2], int(parts_cb[3]), parts_cb[4]
+                                v = _STOP_CANDIDATES[aid][n]; usd = parse_stop_usd(p)
+                                if parts_cb[1] == "m":
+                                    using = [LIVE_INSTANCES[i]["name"] for i in live_instances_using(str(v.get("id")))]
+                                    await client.post(f"{API}/sendMessage", json={
+                                        "chat_id": chat_id,
+                                        "text": f"確定把 {v.get('label')} 改為 {_usd_txt(usd)}？" + (f"\n實盤 {'、'.join(using)} 會一起改並重啟（有持倉會先不重啟）" if using else ""),
+                                        "reply_markup": {"inline_keyboard": stop_confirm_keyboard(aid, n, p, "usd")}})
+                                else:
+                                    log.info(f"[TG] user {uid} setting usd stop of {v.get('id')} to {p}")
+                                    await tg_send(client, chat_id, await apply_stop(v, usd, "usd"))
                             elif parts_cb[1] in ("s", "c") and len(parts_cb) == 5 and parts_cb[3].isdigit() and int(parts_cb[3]) < len(_STOP_CANDIDATES.get(parts_cb[2]) or []) and parse_stop_price(parts_cb[4]) is not None:
                                 aid, n, p = parts_cb[2], int(parts_cb[3]), parts_cb[4]
                                 v = _STOP_CANDIDATES[aid][n]

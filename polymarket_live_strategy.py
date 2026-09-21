@@ -169,6 +169,9 @@ LATE_FAVORITE_STOP_LOSS_PRICE = (
 )
 # 2026-09-17：方向性單腿停損（歷史混合 0.60）。POLY_LIVE_DIRECTION_STOP_LOSS_PRICE 可覆寫，0 = 關閉。
 # 只在進場價 > 停損價時啟用。
+# 2026-09-22 依使用者要求：金額停損——持有腿最佳 bid 估的帳面虧損 >= 這個美元數就 FOK 賣出；空／0 = 關閉。
+_fav_stop_usd_raw = os.environ.get("POLY_LIVE_FAVORITE_STOP_LOSS_USD", "").strip()
+LATE_FAVORITE_STOP_LOSS_USD = float(_fav_stop_usd_raw) if _fav_stop_usd_raw and float(_fav_stop_usd_raw) > 0 else None
 _dir_stop_raw = os.environ.get("POLY_LIVE_DIRECTION_STOP_LOSS_PRICE", "").strip()
 LATE_DIRECTION_STOP_LOSS_PRICE = (
     (float(_dir_stop_raw) if float(_dir_stop_raw) > 0 else None)
@@ -3435,29 +3438,38 @@ async def _close_late_favorite_take_profit(exit_plan: dict, dry_run: bool, slug:
 def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict, stop_price: float | None = None) -> dict | None:
     """持有腿保守可賣價 <= 停損價就回傳賣出計畫（預設用 LATE_FAVORITE_STOP_LOSS_PRICE；
     方向性單腿傳 LATE_DIRECTION_STOP_LOSS_PRICE）。"""
+    stop_usd = None
     if stop_price is None:
         stop_price = LATE_FAVORITE_STOP_LOSS_PRICE
-    if stop_price is None:
+        stop_usd = LATE_FAVORITE_STOP_LOSS_USD
+    if stop_price is None and stop_usd is None:
         return None
     held_book = up_book if pos["side"] == "Up" else down_book
     if not _live_direction_book_is_fresh(pos["side"], held_book):
         return None
     if not pos.get("dryRun", True) and not live.order_tokens_and_fees_are_warm([_token_id(pos["side"])]):
         return None
-    exit_plan = _sell_plan(pos["side"], held_book, float(pos["shares"]))
-    if not exit_plan or exit_plan["limitPrice"] > float(stop_price):
+    # 2026-09-22：觸發改看最佳 bid（市場真的翻了才算），不再用整筆砸下去的最差成交價（薄買盤會誤觸發）
+    reason, best_bid, mark_pnl = sim._stop_trigger(pos, held_book, stop_price, stop_usd)
+    if reason is None:
         return None
+    exit_plan = _sell_plan(pos["side"], held_book, float(pos["shares"]))
+    if not exit_plan:
+        return None
+    stop_price = float(stop_price) if stop_price is not None else float(best_bid)
     # 2026-09-14 依使用者要求「停損單改積極」：觸發判斷仍用保守可賣價，但送出的 FOK 限價
     # 改用緊急平倉那套（再多讓 EMERGENCY_UNWIND_EXTRA_TICKS 格 tick），避免翻面時第一張
     # 停損因價格跳動沒成交、第二張才賣在更低（09-13 11:14 那筆 0.83 沒成交、最後賣 0.34）。
     aggressive = _aggressive_sell_plan(pos["side"], held_book, float(pos["shares"]))
     if aggressive:
         aggressive = dict(aggressive)
-        aggressive["_triggerPrice"] = exit_plan["limitPrice"]
+        aggressive["_triggerPrice"] = best_bid
         aggressive["_stopPrice"] = float(stop_price)
+        aggressive["_stopReason"] = reason
         return aggressive
     exit_plan = dict(exit_plan)
     exit_plan["_stopPrice"] = float(stop_price)
+    exit_plan["_stopReason"] = reason
     return exit_plan
 
 
@@ -3576,7 +3588,9 @@ def _log_startup_banner(mode: str) -> None:
             "兩腿鎖利／晚進場方向性／單邊進場全部停用"
         )
         if LATE_FAVORITE_STOP_LOSS_PRICE is not None:
-            log.warning(f"  領先方翻面停損：持有腿可賣價 <= ${float(LATE_FAVORITE_STOP_LOSS_PRICE):.2f} 時 FOK 賣出")
+            log.warning(f"  領先方翻面停損：持有腿最佳 bid <= ${float(LATE_FAVORITE_STOP_LOSS_PRICE):.2f} 時 FOK 賣出")
+        if LATE_FAVORITE_STOP_LOSS_USD is not None:
+            log.warning(f"  金額停損：帳面虧損 >= ${LATE_FAVORITE_STOP_LOSS_USD:g} 時 FOK 賣出")
         else:
             log.info("  領先方翻面停損未啟用")
         if LATE_FAVORITE_TAKE_PROFIT_PRICE is not None:
