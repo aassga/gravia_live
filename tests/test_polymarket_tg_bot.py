@@ -158,9 +158,10 @@ class TelegramBotTests(unittest.TestCase):
         sim = {"assetList": [{"id": "btc", "label": "BTC"}],
                "abVariants": [{"id": "a", "assetId": "btc", "label": "A（0.98～0.99、不停損）", "lateFavorite": True, "favoriteStopLossPrice": None, "totalPnl": 1, "totalTrades": 2},
                               {"id": "b", "assetId": "btc", "label": "B（停損 0.60）", "lateFavorite": True, "favoriteStopLossPrice": 0.6, "totalPnl": 5, "totalTrades": 3},
-                              {"id": "c", "assetId": "btc", "label": "C", "openMomentum": True, "totalPnl": 9}]}
+                              {"id": "c", "assetId": "btc", "label": "C", "openMomentum": True, "totalPnl": 9},
+                              {"id": "d", "assetId": "btc", "label": "D", "twoSidedMaker": True, "totalPnl": 99}]}
         groups = bot.stop_variants(sim)
-        self.assertEqual([v["id"] for v in groups["btc"]], ["b", "a"])
+        self.assertEqual([v["id"] for v in groups["btc"]], ["c", "b", "a"])   # 單腿策略都列（含 openMomentum）；兩腿做市不列
         kb = bot.stop_value_keyboard("btc", 0, 0.6)
         self.assertEqual(kb[0][0]["text"], "不停損"); self.assertEqual(kb[0][3]["text"], "★ 0.60")
         self.assertEqual(kb[0][3]["callback_data"], "stop:s:btc:0:0.60")

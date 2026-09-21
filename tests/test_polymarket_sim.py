@@ -777,12 +777,22 @@ class PolymarketSimulationTests(unittest.TestCase):
         orig_stop, orig_label = v.get("favoriteStopLossPrice"), v["label"]
         try:
             changed = sim.apply_variant_overrides({"btc-last30-90-092-095": {"favoriteStopLossPrice": 0.7}, "nope": {"favoriteStopLossPrice": 0.5},
-                                                   "btc-open-momentum": {"favoriteStopLossPrice": 0.5}})
-            self.assertEqual(changed, ["btc-last30-90-092-095"])
+                                                   "btc-two-sided-maker": {"favoriteStopLossPrice": 0.5}})
+            self.assertEqual(changed, ["btc-last30-90-092-095"])   # 兩腿做市變體不套
             self.assertEqual(v["favoriteStopLossPrice"], 0.7); self.assertFalse(v["noStop"]); self.assertIn("停損 0.70", v["label"])
             self.assertEqual(sim.apply_variant_overrides({"btc-last30-90-092-095": {"favoriteStopLossPrice": None}}), ["btc-last30-90-092-095"])
             self.assertIsNone(v["favoriteStopLossPrice"]); self.assertTrue(v["noStop"]); self.assertIn("不停損", v["label"])
             self.assertEqual(sim.apply_variant_overrides({"btc-last30-90-092-095": {"favoriteStopLossPrice": None}}), [])   # 沒變就不回報
+            # 2026-09-21：跟單／便宜邊等沒寫停損的標籤 → 尾端加「・停損 X」，設回不停損就拿掉
+            self.assertEqual(sim._relabel_stop("BTC 跟單錢包 0x17b3ba（中段）", 0.6), "BTC 跟單錢包 0x17b3ba（中段）・停損 0.60")
+            self.assertEqual(sim._relabel_stop("BTC 跟單錢包 0x17b3ba（中段）・停損 0.60", None), "BTC 跟單錢包 0x17b3ba（中段）")
+            fv = sim.AB_VARIANT_BY_ID.get("btc-follow-0x17b3ba")
+            if fv:
+                try:
+                    self.assertEqual(sim.apply_variant_overrides({"btc-follow-0x17b3ba": {"favoriteStopLossPrice": 0.5}}), ["btc-follow-0x17b3ba"])
+                    self.assertEqual(fv["favoriteStopLossPrice"], 0.5)
+                finally:
+                    sim.apply_variant_overrides({"btc-follow-0x17b3ba": {"favoriteStopLossPrice": None}})
         finally:
             v["favoriteStopLossPrice"], v["label"] = orig_stop, orig_label; v["noStop"] = orig_stop is None
 

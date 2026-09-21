@@ -955,12 +955,21 @@ if _SIM_ONLY_VARIANT_IDS:
 AB_VARIANT_BY_ID = {v["id"]: v for v in AB_VARIANTS}
 
 
+SINGLE_LEG_FLAGS = ("lateFavorite", "openMomentum", "openReversal", "followWallets", "lateUnderdog")
+
+
 def _relabel_stop(label: str, stop: float | None) -> str:
-    """把標籤裡的「停損 X.XX」或「不停損」換成新值。"""
+    """把標籤裡的「停損 X.XX」或「不停損」換成新值；標籤沒寫停損的（跟單／便宜邊等）就在尾端加「・停損 X」或拿掉。"""
     new_txt = f"停損 {stop:.2f}" if stop is not None else "不停損"
+    if re.search(r"・停損 \d\.\d\d$", label):
+        # 尾端附加式（跟單／便宜邊等原本沒寫停損的標籤）：換值或拿掉
+        base = re.sub(r"・停損 \d\.\d\d$", "", label)
+        return f"{base}・停損 {stop:.2f}" if stop is not None else base
     out = re.sub(r"停損 \d\.\d\d", new_txt, label)
-    if out == label:
+    if out == label and "不停損" in label:
         out = label.replace("不停損", new_txt)
+    if out == label and stop is not None:
+        out = f"{label}・停損 {stop:.2f}"
     return out
 
 
@@ -969,7 +978,7 @@ def apply_variant_overrides(overrides: dict) -> list[str]:
     changed = []
     for vid, o in (overrides or {}).items():
         v = AB_VARIANT_BY_ID.get(vid)
-        if not v or not isinstance(o, dict) or "favoriteStopLossPrice" not in o or not v.get("lateFavorite"):
+        if not v or not isinstance(o, dict) or "favoriteStopLossPrice" not in o or not any(v.get(f) for f in SINGLE_LEG_FLAGS):
             continue
         raw = o.get("favoriteStopLossPrice")
         stop = float(raw) if raw not in (None, "", 0, "0") else None
@@ -4282,9 +4291,13 @@ def _simulate_trading_impl(
         return
 
     if variant.get("lateUnderdog"):
-        # 最後 N 秒買便宜邊：每窗口一次、抱到結算、不停損。
-        if pos is None and remaining_seconds is not None:
-            _try_late_underdog_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        # 最後 N 秒買便宜邊：每窗口一次、抱到結算；2026-09-21 起可由 TG /stop 設停損（favoriteStopLossPrice）。
+        if pos is None:
+            if remaining_seconds is not None:
+                _try_late_underdog_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        elif pos.get("windowSlug") == slug and not pos.get("hedged"):
+            if not _try_late_favorite_take_profit(variant_id, slug, up_book, down_book):
+                _try_late_favorite_stop_loss(variant_id, slug, up_book, down_book)
         return
 
     if variant.get("openMomentum"):
@@ -4300,14 +4313,22 @@ def _simulate_trading_impl(
         return
 
     if variant.get("openReversal"):
-        if pos is None and remaining_seconds is not None:
-            _try_open_reversal_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        if pos is None:
+            if remaining_seconds is not None:
+                _try_open_reversal_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        elif pos.get("windowSlug") == slug and not pos.get("hedged"):
+            if not _try_late_favorite_take_profit(variant_id, slug, up_book, down_book):
+                _try_late_favorite_stop_loss(variant_id, slug, up_book, down_book)
         return
 
     if variant.get("followWallets"):
-        # 跟單：看到跟單對象買就跟著買同一邊、抱到結算，不補腿、不停損。
-        if pos is None and remaining_seconds is not None:
-            _try_wallet_follow_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        # 跟單：看到跟單對象買就跟著買同一邊、抱到結算，不補腿；2026-09-21 起可由 TG /stop 設停損。
+        if pos is None:
+            if remaining_seconds is not None:
+                _try_wallet_follow_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        elif pos.get("windowSlug") == slug and not pos.get("hedged"):
+            if not _try_late_favorite_take_profit(variant_id, slug, up_book, down_book):
+                _try_late_favorite_stop_loss(variant_id, slug, up_book, down_book)
         return
 
     if variant.get("lateFavorite"):

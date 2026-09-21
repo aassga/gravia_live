@@ -190,7 +190,7 @@ HELP_TEXT = (
     "/live — 實盤真實下單開關（REAL ↔ DRY-RUN，按鈕確認後切換並重啟）\n"
     "/strategy — 更換實盤策略（選實盤 → 選模擬盤的買領先方變體 → 確認；不動每注%與 REAL/DRY-RUN）\n"
     "/stake — 改實盤每注 %（選實盤 → 選 5～100% → 確認；或 /stake <實盤編號> <數字>，0.5～100）\n"
-    "/stop — 改模擬盤買領先方變體的停損（選資產 → 選變體 → 選值 → 確認）；有實盤在用同一變體會一起改並重啟\n"
+    "/stop — 改模擬盤變體的停損（買領先方／跟單／便宜邊等單腿策略；選資產 → 選變體 → 選值 → 確認）；有實盤在用同一變體會一起改並重啟\n"
     "/loss — 分析某實盤最近的真實虧損原因（選實盤；或 /loss <實盤編號> [筆數]，預設 5 筆）\n"
     "/roi — 模擬盤 ROI 排行（各資產前 5、≥10 筆；含打平勝率、1 輸＝幾贏）\n"
     "/tune — 某模擬盤變體的停損回放（各檔位假停損／淨損益）\n"
@@ -552,7 +552,8 @@ def stop_variants(sim: dict) -> dict[str, list[dict]]:
     """主模擬盤裡的買領先方變體，依資產分組（含 simOnly；停損欄位就是它的現值）。"""
     out: dict[str, list[dict]] = {}
     for v in sim.get("abVariants") or []:
-        if v.get("lateFavorite"):
+        # 2026-09-21 依使用者要求：所有單腿方向性策略（買領先方／開盤動能／開盤反向／跟單／買便宜邊）都可設停損
+        if any(v.get(f) for f in ("lateFavorite", "openMomentum", "openReversal", "followWallets", "lateUnderdog")):
             out.setdefault(str(v.get("assetId")), []).append(v)
     for rows in out.values():
         rows.sort(key=lambda v: -float(v.get("totalPnl") or 0))
