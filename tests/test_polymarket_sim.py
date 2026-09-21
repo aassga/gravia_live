@@ -468,6 +468,29 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual((c2["followWallets"], c2["followMaxPrice"]), (["0xa8278bd8002eddb9b26deb70d8331c23da45f959"], 0.95))
         self.assertIn("0x17b3babf88a6ed72458f3675ccdf2ade7ee2ff40", sim._follow_wallets_for_asset("btc"))
 
+    def test_late_underdog_buys_cheap_side_in_last_minute(self):
+        # 2026-09-21：最後 60 秒某邊 ask <= 0.10 → 買那一邊；太貴不進；每窗口一次
+        # 測試資產清單沒有 eth-alt：用同樣的旗標臨時掛一組 btc 變體驗證進場邏輯
+        vid = "btc-late-underdog-test"
+        v = {"id": vid, "assetId": "btc", "label": "t", "entryMaxPrice": None, "lockMaxSum": sim.SIM_LOCK_MAX_SUM, "lateUnderdog": True, "simOnly": True,
+             "underdogWindowSeconds": 60.0, "underdogMinRemaining": 5.0, "underdogMinPrice": 0.01, "underdogMaxPrice": 0.10}
+        sim.AB_VARIANTS.append(v); sim.AB_VARIANT_BY_ID[vid] = v; sim.ab_states[vid] = sim._new_variant_state()
+        try:
+            up, down = self._favorite_books(up_ask=0.96, down_ask=0.05)
+            sim.simulate_trading(vid, "btc-window", up, down, 120.0, None)      # 還沒到最後 60 秒
+            self.assertIsNone(sim.ab_states[vid]["position"])
+            sim.simulate_trading(vid, "btc-window", up, down, 40.0, None)       # Down ask 0.05 → 買 Down
+            pos = sim.ab_states[vid]["position"]
+            self.assertEqual(pos["side"], "Down"); self.assertEqual(pos.get("signalSource"), "late_underdog")
+            sim.ab_states[vid]["position"] = None
+            sim.simulate_trading(vid, "btc-window", up, down, 30.0, None)       # 同窗口不再進
+            self.assertIsNone(sim.ab_states[vid]["position"])
+            up2, down2 = self._favorite_books(up_ask=0.80, down_ask=0.21)      # 便宜邊 0.21 > 0.10 → 不進
+            sim.simulate_trading(vid, "btc-window-2", up2, down2, 40.0, None)
+            self.assertIsNone(sim.ab_states[vid]["position"])
+        finally:
+            sim.AB_VARIANTS.remove(v); sim.AB_VARIANT_BY_ID.pop(vid, None); sim.ab_states.pop(vid, None)
+
     def test_open_momentum_buys_direction_of_previous_minute_within_first_seconds(self):
         vid = "btc-open-momentum"
         ms = sim.markets_state["btc"]

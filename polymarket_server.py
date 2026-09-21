@@ -871,6 +871,15 @@ if any(a["id"] == "xrp" for a in ASSETS):
             })
     del _w, _lbl, _maxp
 
+# 2026-09-21 依使用者要求：ETH 5m 買領先方的對手盤——最後 60 秒買便宜邊（ask <= 0.10）、抱到結算。純觀察。
+if any(a["id"] == "eth-alt" for a in ASSETS) and not any(v["id"] == "eth-alt-late-underdog-010" for v in AB_VARIANTS):
+    AB_VARIANTS.append({
+        "id": "eth-alt-late-underdog-010", "assetId": "eth-alt",
+        "label": "ETH 最後 60 秒買便宜邊（ask ≤0.10、抱到結算）",
+        "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "lateUnderdog": True, "simOnly": True,
+        "underdogWindowSeconds": 60.0, "underdogMinRemaining": 5.0, "underdogMinPrice": 0.01, "underdogMaxPrice": 0.10,
+    })
+
 # 2026-09-16 依使用者要求：模擬盤所有買領先方變體一律停損（原本「不停損」的也改；0.85 → 同日改 0.60），
 # 含自動駕駛加進來的；標籤同步改寫。open-reversal 等非買領先方變體沒有停損機制，不動。
 SIM_FAVORITE_STOP_LOSS_DEFAULT = 0.60   # 2026-09-16 使用者要求 0.85 → 0.60
@@ -3264,6 +3273,51 @@ def _try_open_momentum_entry(
     log.info(f"[SIM:{variant_id}] 開盤動能 {side} 前一分鐘 {move_pct:+.3f}% ask=${ask:.2f} VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f}")
 
 
+def _try_late_underdog_entry(
+    variant_id: str, slug: str, up_book: dict, down_book: dict, remaining_seconds: float
+) -> None:
+    """2026-09-21 依使用者要求（ETH 5m 掃描：最後 60 秒買便宜邊全市場第二賺）：最後 underdogWindowSeconds 秒內，
+    某邊 ask <= underdogMaxPrice（且 >= underdogMinPrice）就買那一邊、抱到結算；每窗口一次、不停損。買領先方的對手盤。"""
+    variant = AB_VARIANT_BY_ID[variant_id]
+    st = ab_states[variant_id]
+    if st.get("underdogWindowSlug") == slug:
+        return
+    window_seconds = float(variant.get("underdogWindowSeconds", 60.0))
+    min_remaining = float(variant.get("underdogMinRemaining", 5.0))
+    if remaining_seconds > window_seconds or remaining_seconds < min_remaining:
+        record_window_diagnostic(variant_id, slug, "outside_entry_window", remainingSeconds=remaining_seconds)
+        return
+    max_price = float(variant.get("underdogMaxPrice", 0.10))
+    min_price = float(variant.get("underdogMinPrice", 0.01))
+    up_asks, down_asks = up_book.get("asks") or [], down_book.get("asks") or []
+    up_ask = float(up_asks[0]["price"]) if up_asks else None
+    down_ask = float(down_asks[0]["price"]) if down_asks else None
+    common = {"remainingSeconds": remaining_seconds, "upAsk": up_ask, "downAsk": down_ask}
+    cands = [(a, side, book) for a, side, book in ((up_ask, "Up", up_book), (down_ask, "Down", down_book)) if a is not None and min_price <= a <= max_price]
+    if not cands:
+        record_window_diagnostic(variant_id, slug, "underdog_no_cheap_side", underdogMaxPrice=max_price, **common)
+        return
+    ask, side, book = min(cands, key=lambda c: c[0])
+    if not _simulation_direction_book_is_fresh(variant["assetId"], side, book):
+        record_window_diagnostic(variant_id, slug, "selected_book_not_fresh", selectedSide=side, **common)
+        return
+    shares, budget = _target_order_size(variant_id)
+    if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_budget", targetShares=shares, budgetUsd=budget, **common)
+        return
+    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    fill = simulate_buy_fill(book, shares) if shares >= float(book.get("minOrderSize", 1) or 1) else None
+    if not fill or fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD:
+        record_window_diagnostic(variant_id, slug, "insufficient_ask_depth", targetShares=shares, selectedSide=side, **common)
+        return
+    enter_position(variant_id, slug, side, fill, budget, None, None)
+    st["position"]["signalSource"] = "late_underdog"
+    st["underdogWindowSlug"] = slug
+    record_window_diagnostic(variant_id, slug, "underdog_entered", selectedSide=side, selectedAsk=ask, decisionPrice=fill["decisionPrice"], **common)
+    save_sim_state()
+    log.info(f"[SIM:{variant_id}] 最後 {remaining_seconds:.0f}s 買便宜邊 {side} ask=${ask:.2f} VWAP=${fill['vwap']:.4f} 股數={fill['shares']:.2f}")
+
+
 def _record_prev_window_leader(ms: dict, new_slug: str) -> None:
     """換窗口時用上一窗最後看到的中價判斷誰贏（>= OPEN_REVERSAL_LEADER_MIN_PRICE 才算明確），
     不等 Gamma 正式結算（要好幾分鐘，開盤反向 15～60 秒內就要用）。"""
@@ -4227,6 +4281,12 @@ def _simulate_trading_impl(
         _try_inventory_rotation(variant_id, slug, up_book, down_book, remaining_seconds, fair)
         return
 
+    if variant.get("lateUnderdog"):
+        # 最後 N 秒買便宜邊：每窗口一次、抱到結算、不停損。
+        if pos is None and remaining_seconds is not None:
+            _try_late_underdog_entry(variant_id, slug, up_book, down_book, remaining_seconds)
+        return
+
     if variant.get("openMomentum"):
         # 開盤動能方向性：只在開盤後幾秒進一次，之後抱到結算，不補腿。
         # 2026-09-19「早段方向性＋主動出場」變體另設 favoriteTakeProfitPrice／favoriteStopLossPrice：
@@ -4736,7 +4796,7 @@ def _variant_books_are_coherent(asset_id: str, variant: dict, up_book: dict, dow
     # _simulation_direction_book_is_fresh 驗證；不再要求兩腿都新鮮。原本套兩腿檢查時，最後一分鐘
     # 落後那邊（0.02）常幾秒沒更新 → 整個窗口被「兩腿報價過舊／並非都來自 WS 快照」跳過，模擬盤
     # 因此漏掉實盤有進的窗口（09-19 02:24、04:49 兩個翻面窗口都是），數字系統性比實盤漂亮。
-    if variant.get("lateFavorite") or variant.get("followWallets") or variant.get("openReversal") or variant.get("openMomentum"):
+    if variant.get("lateFavorite") or variant.get("followWallets") or variant.get("openReversal") or variant.get("openMomentum") or variant.get("lateUnderdog"):
         return True
     max_skew = SIM_BOOK_MAX_SKEW_SECONDS
     log_key = asset_id
@@ -5374,6 +5434,7 @@ def build_ab_leaderboard() -> list:
             "dumpThenHedge": bool(v.get("dumpThenHedge")),
             "lateFavorite":  bool(v.get("lateFavorite")),
             "openMomentum":  bool(v.get("openMomentum")),
+            "lateUnderdog":  bool(v.get("lateUnderdog")),
             "openReversal":  bool(v.get("openReversal")),
             "followWallets": v.get("followWallets"),
             "followMaxPrice": v.get("followMaxPrice"),
