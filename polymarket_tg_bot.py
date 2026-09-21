@@ -529,7 +529,7 @@ async def apply_stake(idx: int, pct: float) -> str:
 # POLY_LIVE_FAVORITE_STOP_LOSS_PRICE 並重啟其服務（有持倉先不重啟，等結算後再按一次）。
 SIM_VARIANT_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_variant_overrides.json")
 STOP_PRESETS = ("0", "0.40", "0.50", "0.60", "0.70", "0.80", "0.90")
-STOP_USD_PRESETS = ("0", "0.5", "1", "2", "5", "10")   # 2026-09-22：金額停損（帳面虧損 >= $X 即賣出），0 = 不設
+STOP_USD_PRESETS = ("0", "0.5", "1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5", "5.5", "6", "7", "8", "9", "10")   # 2026-09-22：金額停損（帳面虧損 >= $X 即賣出），0 = 不設
 _STOP_CANDIDATES: dict[str, list[dict]] = {}   # asset_id -> variants
 
 
@@ -617,7 +617,9 @@ def stop_value_keyboard(aid: str, n: int, current, current_usd=None) -> list[lis
     btns = [{"text": ("★ " if p == cur else "") + ("不停損" if p == "0" else p), "callback_data": f"stop:s:{aid}:{n}:{p}"} for p in STOP_PRESETS]
     cur_usd = f"{float(current_usd):g}" if current_usd else "0"
     usd = [{"text": ("★ " if u == cur_usd else "") + ("不設金額" if u == "0" else f"${u}"), "callback_data": f"stop:m:{aid}:{n}:{u}"} for u in STOP_USD_PRESETS]
-    return [btns[:4], btns[4:], usd[:3], usd[3:], [{"text": "取消", "callback_data": "stop:cancel"}]]
+    rows = [btns[:4], btns[4:]] + [usd[i:i + 5] for i in range(0, len(usd), 5)]
+    rows.append([{"text": "取消", "callback_data": "stop:cancel"}])
+    return rows
 
 
 def stop_confirm_keyboard(aid: str, n: int, p: str, kind: str = "price") -> list[list[dict]]:

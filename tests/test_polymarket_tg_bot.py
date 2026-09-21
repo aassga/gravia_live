@@ -169,7 +169,10 @@ class TelegramBotTests(unittest.TestCase):
         # 2026-09-22 金額停損
         self.assertEqual(bot.parse_stop_usd("2"), 2.0); self.assertEqual(bot.parse_stop_usd("0"), 0.0); self.assertIsNone(bot.parse_stop_usd("x"))
         kb = bot.stop_value_keyboard("btc", 0, 0.6, 2)
-        self.assertEqual(kb[2][0]["text"], "不設金額"); self.assertEqual(kb[3][0]["text"], "★ $2"); self.assertEqual(kb[3][0]["callback_data"], "stop:m:btc:0:2")
+        flat = [b for row in kb[2:-1] for b in row]
+        self.assertEqual(flat[0]["text"], "不設金額"); self.assertEqual(len(flat), 17)
+        star = next(b for b in flat if b["text"].startswith("★ ")); self.assertEqual((star["text"], star["callback_data"]), ("★ $2", "stop:m:btc:0:2"))
+        self.assertEqual(kb[-1][0]["callback_data"], "stop:cancel")
         self.assertEqual(bot.stop_confirm_keyboard("btc", 0, "5", "usd")[0][0]["callback_data"], "stop:k:btc:0:5")
         # 直接打字：/stop 1 $2 → 金額；/stop 3 0.88 → 價格；/stop 1 0 → 不設價格停損；/stop 1 $0 → 不設金額
         self.assertEqual(bot.parse_stop_args(["/stop", "1", "$2"]), ("1", "usd", 2.0))
