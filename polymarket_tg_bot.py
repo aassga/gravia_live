@@ -190,7 +190,7 @@ HELP_TEXT = (
     "/live — 實盤真實下單開關（REAL ↔ DRY-RUN，按鈕確認後切換並重啟）\n"
     "/strategy — 更換實盤策略（選實盤 → 選模擬盤的買領先方變體 → 確認；不動每注%與 REAL/DRY-RUN）\n"
     "/stake — 改實盤每注 %（選實盤 → 選 5～100% → 確認；或 /stake <實盤編號> <數字>，0.5～100）\n"
-    "/stop — 改模擬盤變體的停損：價格停損（最佳 bid 跌到 X）或金額停損（帳面虧損達 $X）；選資產 → 選變體 → 選值 → 確認；有實盤在用同一變體會一起改並重啟\n"
+    "/stop — 改模擬盤變體的停損：價格停損（最佳 bid 跌到 X）或金額停損（帳面虧損達 $X）；選單操作，或直接打 /stop <實盤編號|變體id> <值>（例 /stop 1 $2、/stop 3 0.88、/stop 1 0）；有實盤在用同一變體會一起改並重啟\n"
     "/loss — 分析某實盤最近的真實虧損原因（選實盤；或 /loss <實盤編號> [筆數]，預設 5 筆）\n"
     "/roi — 模擬盤 ROI 排行（各資產前 5、≥10 筆；含打平勝率、1 輸＝幾贏）\n"
     "/tune — 某模擬盤變體的停損回放（各檔位假停損／淨損益）\n"
@@ -667,6 +667,45 @@ async def send_stop_value_menu(client: httpx.AsyncClient, chat_id: int, aid: str
                                                         "reply_markup": {"inline_keyboard": stop_value_keyboard(aid, n, v.get("favoriteStopLossPrice"), v.get("favoriteStopLossUsd"))}})
     except Exception as exc:
         log.warning(f"sendMessage(stop value menu) failed: {exc}")
+
+
+def parse_stop_args(parts: list[str]) -> tuple[str, str, float] | None:
+    """2026-09-22 依使用者要求：/stop 可直接打字。格式 /stop <實盤編號|變體id> <值>；值 '$3'／'3usd' = 金額停損，'0.88' = 價格停損，'0' = 不設。
+    回傳 (target, kind, value) 或 None。"""
+    if len(parts) != 3:
+        return None
+    target, raw = parts[1], parts[2].strip().lower()
+    if raw.startswith("$") or raw.endswith("usd") or raw.endswith("u"):
+        val = parse_stop_usd(raw.lstrip("$").rstrip("usd").rstrip("u") or "0")
+        return (target, "usd", val) if val is not None else None
+    val = parse_stop_price(raw)
+    return (target, "price", val) if val is not None else None
+
+
+async def resolve_stop_target(target: str) -> dict | None:
+    """實盤編號（1～N）→ 該實盤目前變體；否則當變體 id。從主模擬盤快照取完整變體資料。"""
+    vid = target
+    if target.isdigit() and 1 <= int(target) <= len(LIVE_INSTANCES):
+        vid = _read_env_value(LIVE_INSTANCES[int(target) - 1]["env"], "POLY_LIVE_VARIANT_ID")
+    try:
+        sim = await fetch_snapshot(SIM_WS)
+    except Exception:
+        return None
+    return next((v for v in (sim.get("abVariants") or []) if v.get("id") == vid), None)
+
+
+async def send_stop_direct_confirm(client: httpx.AsyncClient, chat_id: int, v: dict, kind: str, value: float) -> None:
+    _STOP_CANDIDATES["_direct"] = [v]
+    using = [LIVE_INSTANCES[i]["name"] for i in live_instances_using(str(v.get("id")))]
+    txt = _usd_txt(value) if kind == "usd" else _stop_txt(value)
+    p = f"{value:g}" if kind == "usd" else (f"{value:.2f}" if value else "0")
+    try:
+        await client.post(f"{API}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": f"確定把 {v.get('label')} 改為 {txt}？" + (f"\n實盤 {'、'.join(using)} 會一起改並重啟（有持倉會先不重啟）" if using else ""),
+            "reply_markup": {"inline_keyboard": stop_confirm_keyboard("_direct", 0, p, kind)}})
+    except Exception as exc:
+        log.warning(f"sendMessage(stop direct) failed: {exc}")
 
 
 async def apply_stop(v: dict, stop: float, kind: str = "price") -> str:
@@ -1288,7 +1327,18 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                         await send_loss_menu(client, chat_id)
                     continue
                 if parts and parts[0].split("@")[0].lower() == "/stop":
-                    await send_stop_asset_menu(client, chat_id)
+                    args = parse_stop_args(parts)
+                    if len(parts) >= 2 and args is None:
+                        await tg_send(client, chat_id, "格式：/stop <實盤編號 1～N 或 變體id> <值>；值 $3 = 帳面虧損達 $3 賣出，0.88 = 最佳 bid 跌到 0.88 賣出，0 = 不設。例：/stop 1 $2")
+                    elif args:
+                        target, kind, value = args
+                        v = await resolve_stop_target(target)
+                        if not v:
+                            await tg_send(client, chat_id, f"找不到變體「{target}」（可用實盤編號 1～{len(LIVE_INSTANCES)}，或模擬盤變體 id）。")
+                        else:
+                            await send_stop_direct_confirm(client, chat_id, v, kind, value)
+                    else:
+                        await send_stop_asset_menu(client, chat_id)
                     continue
                 if parts and parts[0].split("@")[0].lower() == "/stake":
                     # /stake → 選單；/stake <實盤編號 1~N> <數字> → 直接到確認

@@ -171,6 +171,13 @@ class TelegramBotTests(unittest.TestCase):
         kb = bot.stop_value_keyboard("btc", 0, 0.6, 2)
         self.assertEqual(kb[2][0]["text"], "不設金額"); self.assertEqual(kb[3][0]["text"], "★ $2"); self.assertEqual(kb[3][0]["callback_data"], "stop:m:btc:0:2")
         self.assertEqual(bot.stop_confirm_keyboard("btc", 0, "5", "usd")[0][0]["callback_data"], "stop:k:btc:0:5")
+        # 直接打字：/stop 1 $2 → 金額；/stop 3 0.88 → 價格；/stop 1 0 → 不設價格停損；/stop 1 $0 → 不設金額
+        self.assertEqual(bot.parse_stop_args(["/stop", "1", "$2"]), ("1", "usd", 2.0))
+        self.assertEqual(bot.parse_stop_args(["/stop", "3", "0.88"]), ("3", "price", 0.88))
+        self.assertEqual(bot.parse_stop_args(["/stop", "1", "0"]), ("1", "price", 0.0))
+        self.assertEqual(bot.parse_stop_args(["/stop", "1", "$0"]), ("1", "usd", 0.0))
+        self.assertEqual(bot.parse_stop_args(["/stop", "eth-15m-auto-60-90s-098-099", "3usd"]), ("eth-15m-auto-60-90s-098-099", "usd", 3.0))
+        self.assertIsNone(bot.parse_stop_args(["/stop", "1", "abc"])); self.assertIsNone(bot.parse_stop_args(["/stop"]))
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "ov.json")
             bot.write_variant_override("a", 0.6, path); data = bot.write_variant_override("b", 0.0, path)
