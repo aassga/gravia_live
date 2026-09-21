@@ -1230,8 +1230,9 @@ def _mirror_entry_plan(side: str, slug: str, cash: float) -> dict | None:
     plan = _cap_favorite_entry_plan(plan, book, ask, lambda r, **k: record_live_window_diagnostic(slug, r, **k))
     if not plan:
         return None
-    if plan["riskNotional"] + plan["fee"] > cash:
-        record_live_window_diagnostic(slug, "mirror_insufficient_cash", cashUsd=cash); return None
+    plan = _shrink_plan_to_cash(plan, book, cash, lambda r, **k: record_live_window_diagnostic(slug, r, **k), "mirror")
+    if not plan:
+        return None
     plan["_signalSource"] = "mirror_sim"; plan["_deltaPct"] = None
     plan["_signalObservedAt"] = int(time.time() * 1000); plan["_signalAgeSeconds"] = 0.0
     plan["_bookQuoteSource"] = book.get("quoteSource"); plan["_bookReceivedAtMonotonic"] = book.get("receivedAtMonotonic")
@@ -1293,6 +1294,32 @@ def _on_sim_entry(variant_id: str, slug: str, side: str, fill: dict, decision_lo
         return
     _ws_action_in_flight["v"] = True
     asyncio.get_running_loop().create_task(_run_mirror_entry(slug, side, decision_lock))
+
+
+def _shrink_plan_to_cash(plan: dict, book: dict, cash: float, diag, prefix: str = "mirror") -> dict | None:
+    """2026-09-21 依使用者要求：限價成本＋手續費超過現金時，不再整筆跳過，改把股數縮到現金買得起的最大整數股；
+    仍低於最小單量才放棄（每注 100% 時原本永遠差手續費那一點點而下不去）。"""
+    total = float(plan["riskNotional"]) + float(plan["fee"])
+    if total <= cash:
+        return plan
+    limit = float(plan["limitPrice"])
+    per_share = total / float(plan["shares"]) if float(plan["shares"]) else limit
+    shares = float(Decimal(str(cash / per_share)).to_integral_value(rounding=ROUND_DOWN)) if per_share > 0 else 0.0
+    min_size = float(book.get("minOrderSize", 1) or 1)
+    if shares < min_size or shares <= 0:
+        diag(f"{prefix}_insufficient_cash", cashUsd=cash, totalRiskCost=total, targetShares=plan["shares"])
+        return None
+    out = dict(plan)
+    out["shares"] = shares
+    out["riskNotional"] = shares * limit
+    out["fee"] = _fee_from_plan(out, shares, limit)
+    # 縮完再驗一次（手續費非線性時可能還差一點）
+    if out["riskNotional"] + out["fee"] > cash and shares - 1 >= min_size:
+        out["shares"] = shares - 1
+        out["riskNotional"] = out["shares"] * limit
+        out["fee"] = _fee_from_plan(out, out["shares"], limit)
+    diag(f"{prefix}_shrunk_to_cash", cashUsd=cash, targetShares=plan["shares"], shares=out["shares"])
+    return out
 
 
 def _cap_favorite_entry_plan(plan: dict, book: dict, ask: float, diag) -> dict | None:

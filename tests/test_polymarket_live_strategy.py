@@ -2018,6 +2018,19 @@ class LiveStrategyTests(unittest.IsolatedAsyncioTestCase):
         # 40 / 3 = 13.333...，因此應送 13 股，不可期待小數股。
         self.assertEqual(pos["shares"], float(int(depth * expected_fraction)))
 
+    def test_shrink_plan_to_cash(self):
+        # 2026-09-21：成本＋手續費 > 現金 → 縮到買得起的整數股；低於 5 股才放棄
+        book = {"tickSize": 0.01, "minOrderSize": 5, "asks": [{"price": 0.99, "size": 500}], "bids": [{"price": 0.98, "size": 500}]}
+        plan = {"side": "Up", "book": book, "shares": 20.0, "limitPrice": 0.99, "riskNotional": 19.8, "fee": 0.02}
+        diags = []
+        out = strategy._shrink_plan_to_cash(plan, book, 19.9, lambda r, **k: diags.append(r))
+        self.assertIs(out, plan); self.assertEqual(diags, [])                                    # 夠現金：原樣
+        out = strategy._shrink_plan_to_cash(plan, book, 19.0, lambda r, **k: diags.append(r))    # 100% 情境：差一點
+        self.assertEqual(out["shares"], 19.0); self.assertLessEqual(out["riskNotional"] + out["fee"], 19.0)
+        self.assertIn("mirror_shrunk_to_cash", diags)
+        out = strategy._shrink_plan_to_cash(plan, book, 4.0, lambda r, **k: diags.append(r))     # 買不到 5 股 → None
+        self.assertIsNone(out); self.assertIn("mirror_insufficient_cash", diags)
+
     def _set_market_for_preflight(self):
         strategy.sim.state["market"] = {
             "conditionId": "condition-1",
