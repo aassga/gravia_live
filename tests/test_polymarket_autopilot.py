@@ -47,10 +47,13 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual([c["id"] for c in chosen], ["a1", "a2", "d1"])
         self.assertEqual((ap.MAX_ADD_PER_RUN, ap.MAX_ADD_PER_MARKET), (None, None))
         # 2026-09-17 白名單：不在白名單的市場（doge-15m）不加
+        # 2026-09-23：白名單預設為空 = 不限市場；傳 markets 才限制
         cands2 = cands + [{"id": "e1", "market": "doge-15m", "stats": {"score": 99}}]
         chosen = ap.pick_new_variants(cands2, existing_ids=set(), disabled_ids=set())
+        self.assertIn("e1", [c["id"] for c in chosen])
+        chosen = ap.pick_new_variants(cands2, existing_ids=set(), disabled_ids=set(), markets={"btc"})
         self.assertNotIn("e1", [c["id"] for c in chosen])
-        self.assertEqual(ap.CANDIDATE_MARKETS, {"btc", "btc-15m", "eth"})   # 2026-09-17 移除 SOL/XRP
+        self.assertEqual(ap.CANDIDATE_MARKETS, set())                        # 2026-09-23：不限市場
         sims = [{"id": "x", "totalPnl": -350.0, "totalTrades": 9}, {"id": "y", "totalPnl": -349.9}, {"id": "z", "totalPnl": 12}]
         self.assertEqual([d["id"] for d in ap.pick_disable(sims, set())], ["x"])
         self.assertEqual(ap.pick_disable(sims, {"x"}), [])
@@ -87,8 +90,9 @@ class AutopilotTests(unittest.TestCase):
         result = {"hours": 24, "markets": {"eth": {"best": None}}, "added": [], "disabled": [], "restart": "none"}
         msgs = ap.render_telegram(result)
         self.assertTrue(any("實盤設定未動" in m for m in msgs))
-        self.assertFalse(ap.AUTO_ADD_ENABLED)                                  # 2026-09-17 預設不再自動新增
-        self.assertTrue(any("自動新增已關閉" in m for m in msgs))
+        self.assertTrue(ap.AUTO_ADD_ENABLED)                                   # 2026-09-23 依使用者要求：掃描後自動新增
+        self.assertEqual(ap.SCAN_HOURS, 72.0)                                  # 每 3 天一次、取 72h 樣本
+        self.assertFalse(any("自動新增已關閉" in m for m in msgs))            # 2026-09-23：自動新增已開啟
         self.assertTrue(all(len(m) <= 4000 for m in msgs))
 
 

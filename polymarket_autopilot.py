@@ -44,13 +44,16 @@ SIM_WS = os.environ.get("TG_SIM_STATUS_WS", "ws://127.0.0.1:8766")
 MAX_ADD_PER_RUN = None        # None = 不限
 MAX_ADD_PER_MARKET = None     # None = 不限
 DISABLE_LOSS_USD = 350.0
-SCAN_HOURS = 24.0
+SCAN_HOURS = 72.0   # 2026-09-23 依使用者要求：改為每 3 天掃描一次，樣本取 72 小時
 # 2026-09-17 依使用者要求：只在白名單市場找候選加進模擬盤（其餘系列照掃、只進報告），
 # 避免自動駕駛把模擬盤資產越加越多拖慢實盤（曾一夜長到 11 個資產、98 組）。POLY_AUTOPILOT_MARKETS 可覆寫。
-CANDIDATE_MARKETS = {m.strip() for m in os.environ.get("POLY_AUTOPILOT_MARKETS", "btc,btc-15m,eth").split(",") if m.strip()}
+# 2026-09-23 依使用者要求：自動添加不再限制市場（空字串 = 全部掃到的市場都可以加）
+CANDIDATE_MARKETS = {m.strip() for m in os.environ.get("POLY_AUTOPILOT_MARKETS", "").split(",") if m.strip()}
 # 2026-09-17 依使用者要求：不再自動把新變體加進模擬盤（掃描、報告、停用虧損 >= 350 照跑）。
 # 要重新開啟：.env 設 POLY_AUTOPILOT_AUTO_ADD=true。
-AUTO_ADD_ENABLED = os.environ.get("POLY_AUTOPILOT_AUTO_ADD", "false").strip().lower() == "true"
+# 2026-09-23 依使用者要求：掃描後直接把適合的規則加進模擬盤，不再詢問。
+AUTO_ADD_ENABLED = os.environ.get("POLY_AUTOPILOT_AUTO_ADD", "true").strip().lower() == "true"
+MAX_ADD_PER_MARKET_DEFAULT = int(os.environ.get("POLY_AUTOPILOT_MAX_ADD_PER_MARKET", "2"))
 
 
 def _load(path, default):
@@ -71,7 +74,7 @@ def _save(path, data) -> None:
 # ── 純邏輯（可測試） ────────────────────────────────────────────────────────
 
 def pick_new_variants(candidates: list[dict], existing_ids: set[str], disabled_ids: set[str],
-                      max_total: int | None = MAX_ADD_PER_RUN, max_per_market: int | None = MAX_ADD_PER_MARKET,
+                      max_total: int | None = MAX_ADD_PER_RUN, max_per_market: int | None = MAX_ADD_PER_MARKET_DEFAULT,
                       markets: set[str] | None = None) -> list[dict]:
     """從各市場候選（已依 score 排序、合併）挑要新增的：只收白名單市場、跳過已存在／已停用；上限為 None 表示不限。"""
     allowed = CANDIDATE_MARKETS if markets is None else markets

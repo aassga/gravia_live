@@ -1,0 +1,11 @@
+[Unit]
+Description=Gravia sim doctor: 每 3 天自動體檢模擬盤所有策略，調整停損／放寬條件／移除沒救的變體（不經過 TG）
+After=network-online.target gravia.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_sim_doctor.py
+TimeoutStartSec=1800

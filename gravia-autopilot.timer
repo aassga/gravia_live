@@ -1,10 +1,11 @@
 [Unit]
-Description=Run the Gravia sim autopilot every 6 hours (00/06/12/18 Asia/Taipei)
+Description=Run the Gravia sim autopilot every 3 days (scan all markets, auto-add promising rules)
 
 [Timer]
-OnCalendar=*-*-* 00,06,12,18:00:00 Asia/Taipei
+OnBootSec=15min
+OnUnitActiveSec=3d
 Persistent=true
-RandomizedDelaySec=120
+RandomizedDelaySec=300
 
 [Install]
 WantedBy=timers.target

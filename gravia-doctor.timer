@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Gravia sim doctor every 3 days
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=3d
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
