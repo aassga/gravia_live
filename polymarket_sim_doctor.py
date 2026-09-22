@@ -106,20 +106,45 @@ def bid_path(db: sqlite3.Connection, asset_id: str, slug: str, side: str, after_
 
 # ── 出場設定回放（精算） ──────────────────────────────────────────────────
 
-def replay_trade(trade: dict, path: list[tuple[float, float]], stop_price: float | None, stop_usd: float | None) -> float:
-    """在真實 bid 路徑上套用出場設定後的單筆損益；沒觸發就用實際結算損益。
-    觸發判斷看最佳 bid（跟線上邏輯一致），成交價保守估在 bid 下一檔。"""
-    if stop_price is None and stop_usd is None:
-        return float(trade["pnl"])
+def trade_cost(trade: dict) -> float:
     shares = float(trade["shares"])
-    cost = float(trade.get("stakeUsd") or 0) or (float(trade["entryPrice"]) * shares + float(trade.get("entryFee") or 0))
+    return float(trade.get("stakeUsd") or 0) or (float(trade["entryPrice"]) * shares + float(trade.get("entryFee") or 0))
+
+
+def hold_pnl(trade: dict, path: list[tuple[float, float]]) -> float | None:
+    """抱到結算的損益。實際就是抱到結算的單直接用紀錄；被停損掃出的單要從報價路徑末端還原
+    （最後 bid >= 0.9 = 那邊贏、<= 0.1 = 輸），還原不了就回 None（這筆不列入回放）。"""
+    if "stop" not in str(trade.get("exitReason") or "") and str(trade.get("outcome")) not in ("EarlyExit", "", "None", "None"):
+        return float(trade["pnl"])
+    if not path:
+        return None
+    last = path[-1][1]
+    shares = float(trade["shares"])
+    if last >= 0.9:
+        return shares - trade_cost(trade)
+    if last <= 0.1:
+        return -trade_cost(trade)
+    return None
+
+
+def replay_trade(trade: dict, path: list[tuple[float, float]], stop_price: float | None, stop_usd: float | None,
+                 baseline: float | None = None) -> float | None:
+    """在真實 bid 路徑上套用出場設定後的單筆損益；沒觸發就用「抱到結算」的損益（baseline）。
+    觸發判斷看最佳 bid（跟線上邏輯一致），成交價保守估在 bid 下一檔。"""
+    base = hold_pnl(trade, path) if baseline is None else baseline
+    if stop_price is None and stop_usd is None:
+        return base
+    if base is None:
+        return None
+    shares = float(trade["shares"])
+    cost = trade_cost(trade)
     for _ts, bid in path:
         mark = bid * shares - taker_fee(shares, bid) - cost
         hit = (stop_usd is not None and mark <= -stop_usd + 1e-9) or (stop_price is not None and bid <= stop_price + 1e-9)
         if hit:
             px = max(0.01, round(bid - TICK, 4))
             return px * shares - taker_fee(shares, px) - cost
-    return float(trade["pnl"])
+    return base
 
 
 def _stats(values: list[float]) -> tuple[float, float]:
@@ -137,26 +162,27 @@ def _stats(values: list[float]) -> tuple[float, float]:
 def best_exit_config(items: list[dict], current_price, current_usd) -> dict:
     """items: [{trade, path}]。回放所有設定，回傳最佳與目前設定的比較。
     只有新設定的每筆平均贏過目前設定 SE_MARGIN 個標準誤才建議更換。"""
-    med_cost = sorted(float(i["trade"].get("stakeUsd") or 0) for i in items)[len(items) // 2] or 1.0
+    usable = [dict(i, base=hold_pnl(i["trade"], i["path"])) for i in items]
+    usable = [i for i in usable if i["base"] is not None and i["path"]]
+    if not usable:
+        return {"current": None, "best": None, "margin": 0.0, "threshold": 0.0, "change": False, "usable": 0}
+    med_cost = sorted(trade_cost(i["trade"]) for i in usable)[len(usable) // 2] or 1.0
     candidates: list[tuple[float | None, float | None]] = [(None, None)]
     candidates += [(p, None) for p in STOP_PRICE_GRID]
     candidates += [(None, round(f * med_cost, 2)) for f in USD_STOP_FRACTIONS]
+    if (current_price, current_usd) not in candidates:
+        candidates.append((current_price, current_usd))
     scored = []
     for sp, su in candidates:
-        pnls = [replay_trade(i["trade"], i["path"], sp, su) for i in items]
+        pnls = [replay_trade(i["trade"], i["path"], sp, su, i["base"]) for i in usable]
         mean, se = _stats(pnls)
         scored.append({"stopPrice": sp, "stopUsd": su, "mean": mean, "se": se, "net": sum(pnls),
                        "wins": sum(1 for v in pnls if v > 0), "losses": sum(1 for v in pnls if v <= 0)})
-    cur = next((s for s in scored if s["stopPrice"] == current_price and s["stopUsd"] == current_usd), None)
-    if cur is None:
-        pnls = [replay_trade(i["trade"], i["path"], current_price, current_usd) for i in items]
-        mean, se = _stats(pnls)
-        cur = {"stopPrice": current_price, "stopUsd": current_usd, "mean": mean, "se": se, "net": sum(pnls),
-               "wins": sum(1 for v in pnls if v > 0), "losses": sum(1 for v in pnls if v <= 0)}
+    cur = next(s for s in scored if s["stopPrice"] == current_price and s["stopUsd"] == current_usd)
     best = max(scored, key=lambda s: s["mean"])
     margin = best["mean"] - cur["mean"]
     threshold = SE_MARGIN * math.sqrt(best["se"] ** 2 + cur["se"] ** 2)
-    return {"current": cur, "best": best, "margin": margin, "threshold": threshold,
+    return {"current": cur, "best": best, "margin": margin, "threshold": threshold, "usable": len(usable),
             "change": margin > threshold and (best["stopPrice"] != cur["stopPrice"] or best["stopUsd"] != cur["stopUsd"])}
 
 
@@ -317,7 +343,10 @@ def diagnose(variants: list[dict], db: sqlite3.Connection, rid: int) -> list[dic
             rec["action"] = "wait"; rec["detail"] = f"只有 {len(trades)} 筆，未達調參門檻 {MIN_TRADES_FOR_EXIT_TUNE}"
             out.append(rec); continue
         cmp = best_exit_config(items, v.get("favoriteStopLossPrice"), v.get("favoriteStopLossUsd"))
-        rec["exit"] = {k: cmp[k] for k in ("margin", "threshold", "change")}
+        if cmp["best"] is None or cmp["usable"] < MIN_TRADES_FOR_EXIT_TUNE:
+            rec["action"] = "wait"; rec["detail"] = f"可回放的成交只有 {cmp['usable']} 筆（缺報價路徑）"
+            out.append(rec); continue
+        rec["exit"] = {k: cmp[k] for k in ("margin", "threshold", "change", "usable")}
         rec["exit"]["current"] = cmp["current"]; rec["exit"]["best"] = cmp["best"]
         losses = len(trades) - int(rec["winRate"] * len(trades) / 100 + 0.5)
         if cmp["change"] and (cmp["best"]["stopPrice"] is not None or cmp["best"]["stopUsd"] is not None) and losses < MIN_LOSSES_FOR_STOP:
@@ -327,9 +356,10 @@ def diagnose(variants: list[dict], db: sqlite3.Connection, rid: int) -> list[dic
             b = cmp["best"]
             rec["detail"] = (f"停損 {cmp['current']['stopPrice']}／${cmp['current']['stopUsd']} → {b['stopPrice']}／${b['stopUsd']}："
                              f"每筆 {cmp['current']['mean']:+.3f} → {b['mean']:+.3f}（差 {cmp['margin']:+.3f} > 誤差 {cmp['threshold']:.3f}）")
-        elif len(trades) >= MIN_TRADES_FOR_KILL and cmp["best"]["mean"] <= 0:
+        elif len(trades) >= MIN_TRADES_FOR_KILL and cmp["best"]["mean"] + SE_MARGIN * cmp["best"]["se"] <= 0:
             rec["action"] = "kill"
-            rec["detail"] = f"{len(trades)} 筆，最佳設定每筆仍 {cmp['best']['mean']:+.3f}（負期望）"
+            rec["detail"] = (f"{len(trades)} 筆（可回放 {cmp['usable']}），最佳設定每筆仍 "
+                             f"{cmp['best']['mean']:+.3f}±{cmp['best']['se']:.3f}（負期望）")
         else:
             rec["detail"] = f"維持現狀（最佳設定僅多 {cmp['margin']:+.3f}，誤差 {cmp['threshold']:.3f}）"
         out.append(rec)
