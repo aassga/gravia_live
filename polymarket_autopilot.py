@@ -53,7 +53,9 @@ CANDIDATE_MARKETS = {m.strip() for m in os.environ.get("POLY_AUTOPILOT_MARKETS",
 # 要重新開啟：.env 設 POLY_AUTOPILOT_AUTO_ADD=true。
 # 2026-09-23 依使用者要求：掃描後直接把適合的規則加進模擬盤，不再詢問。
 AUTO_ADD_ENABLED = os.environ.get("POLY_AUTOPILOT_AUTO_ADD", "true").strip().lower() == "true"
-MAX_ADD_PER_MARKET_DEFAULT = int(os.environ.get("POLY_AUTOPILOT_MAX_ADD_PER_MARKET", "2"))
+# 2026-09-23 依使用者要求：不限幣種、不限數量——只要掃到、模擬盤還沒有的都加進去（設環境變數才限制）。
+_max_add_raw = os.environ.get("POLY_AUTOPILOT_MAX_ADD_PER_MARKET", "").strip()
+MAX_ADD_PER_MARKET_DEFAULT = int(_max_add_raw) if _max_add_raw.isdigit() else None
 
 
 def _load(path, default):

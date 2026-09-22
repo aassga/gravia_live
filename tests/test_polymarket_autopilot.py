@@ -54,6 +54,10 @@ class AutopilotTests(unittest.TestCase):
         chosen = ap.pick_new_variants(cands2, existing_ids=set(), disabled_ids=set(), markets={"btc"})
         self.assertNotIn("e1", [c["id"] for c in chosen])
         self.assertEqual(ap.CANDIDATE_MARKETS, set())                        # 2026-09-23：不限市場
+        self.assertIsNone(ap.MAX_ADD_PER_MARKET_DEFAULT)                     # 也不限每個市場加幾組
+        many = [{"id": f"m{i}", "market": "doge-15m", "stats": {"score": 100 - i}} for i in range(6)]
+        self.assertEqual(len(ap.pick_new_variants(many, set(), set())), 6)    # 全部都加
+        self.assertEqual(len(ap.pick_new_variants(many, {"m0", "m1"}, {"m2"})), 3)   # 已存在／已停用的跳過
         sims = [{"id": "x", "totalPnl": -350.0, "totalTrades": 9}, {"id": "y", "totalPnl": -349.9}, {"id": "z", "totalPnl": 12}]
         self.assertEqual([d["id"] for d in ap.pick_disable(sims, set())], ["x"])
         self.assertEqual(ap.pick_disable(sims, {"x"}), [])

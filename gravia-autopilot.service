@@ -10,5 +10,5 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/gravia_live
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/home/ubuntu/gravia_live/.env
-ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_autopilot.py --hours 24
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_autopilot.py --hours 72
 TimeoutStartSec=3600
