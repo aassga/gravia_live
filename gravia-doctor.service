@@ -9,3 +9,5 @@ WorkingDirectory=/home/ubuntu/gravia_live
 EnvironmentFile=/home/ubuntu/gravia_live/.env
 ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_sim_doctor.py
 TimeoutStartSec=1800
+MemoryMax=2G
+Nice=10

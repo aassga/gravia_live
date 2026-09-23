@@ -44,7 +44,10 @@ SIM_WS = os.environ.get("TG_SIM_STATUS_WS", "ws://127.0.0.1:8766")
 MAX_ADD_PER_RUN = None        # None = 不限
 MAX_ADD_PER_MARKET = None     # None = 不限
 DISABLE_LOSS_USD = 350.0
-SCAN_HOURS = 72.0   # 2026-09-23 依使用者要求：改為每 3 天掃描一次，樣本取 72 小時
+# 2026-09-23 依使用者要求：執行頻率改為每 3 天（systemd timer）。取樣仍用 24 小時——
+# 24h 掃 24 個系列已經要 15 分鐘、記憶體峰值 1GB，72h 會到 ~3GB 有拖垮模擬盤的風險，
+# 而 24h 樣本（3,000+ 窗口、30+ 候選）已足夠挑出值得測的規則。
+SCAN_HOURS = float(os.environ.get("POLY_AUTOPILOT_SCAN_HOURS", "24"))
 # 2026-09-17 依使用者要求：只在白名單市場找候選加進模擬盤（其餘系列照掃、只進報告），
 # 避免自動駕駛把模擬盤資產越加越多拖慢實盤（曾一夜長到 11 個資產、98 組）。POLY_AUTOPILOT_MARKETS 可覆寫。
 # 2026-09-23 依使用者要求：自動添加不再限制市場（空字串 = 全部掃到的市場都可以加）
