@@ -1028,10 +1028,30 @@ def load_variant_overrides(force: bool = False) -> list[str]:
 load_variant_overrides(force=True)
 
 
+# 2026-09-25 本機執行：沒有 systemd 可以重啟，改成「設定檔（變體清單／停用清單）變更時自己結束」，
+# 由 本機啟動.bat 的迴圈把進程拉起來。POLY_SIM_SELF_RESTART=false 可關閉（VPS 上用 systemctl 就不需要）。
+SIM_SELF_RESTART = os.environ.get("POLY_SIM_SELF_RESTART", "true" if os.name == "nt" else "false").strip().lower() == "true"
+
+
+def _config_mtimes() -> tuple:
+    out = []
+    for path in (SIM_AUTO_VARIANTS_FILE, SIM_DISABLED_VARIANTS_FILE):
+        try:
+            out.append(os.path.getmtime(path))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
 async def variant_overrides_watch_loop() -> None:
+    baseline = _config_mtimes()
     while True:
         try:
             load_variant_overrides()
+            if SIM_SELF_RESTART and _config_mtimes() != baseline:
+                log.warning("[SIM] 偵測到變體／停用清單變更，結束進程讓外層重新啟動以套用新設定")
+                save_sim_state()
+                os._exit(0)
         except Exception as exc:
             log.warning(f"[SIM] 變體覆寫檔讀取失敗：{exc}")
         await asyncio.sleep(5.0)

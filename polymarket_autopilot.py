@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -134,6 +135,10 @@ def live_has_position() -> bool:
 
 
 def restart_sim() -> bool:
+    # 2026-09-25：Windows／沒有 systemd 的環境不呼叫 systemctl——模擬盤會自己偵測設定檔變更並重啟。
+    if os.name == "nt" or not shutil.which("systemctl"):
+        log.info("非 systemd 環境：設定已寫入，模擬盤會在數秒內自行重新載入")
+        return True
     try:
         subprocess.run(["sudo", "-n", "systemctl", "restart", "gravia.service"], check=True, timeout=60)
         return True
