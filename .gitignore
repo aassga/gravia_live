@@ -59,3 +59,8 @@ polymarket_live5_state.json.tmp
 polymarket_live5_baseline.json
 polymarket_sim_live5.sqlite3*
 sim_variant_overrides.json
+
+# OneDrive 衝突副本與本機備份
+backup_local/
+*-MSI.*
+*-小熊餅乾.*
