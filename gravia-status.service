@@ -1,0 +1,21 @@
+[Unit]
+Description=Gravia Polymarket read-only live status #1 (port 8767)
+Wants=network-online.target
+After=network-online.target gravia.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+Environment=PYTHONUNBUFFERED=1
+# 只載入共用 .env（私鑰／地區）；第一組實盤用預設的狀態檔與 8767 埠，不需要 .env.live 覆寫。
+# 這支是唯讀的：只查真實帳戶餘額／持倉／成交，不下單、不動用資金（見檔頭說明）。
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_live_status_server.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
