@@ -223,7 +223,25 @@ def _resolve_entry_max_price() -> float | None:
 
 
 ENTRY_MAX_PRICE = _resolve_entry_max_price()
-SINGLE_LEG_ENTRY_ENABLED = ENTRY_MAX_PRICE is not None and not LATE_FAVORITE_ENABLED
+# 2026-09-29 依使用者要求：實盤①改用「中段動能方向性」。對齊模擬版 _try_open_momentum_entry，
+# 參數全部取自變體本身（不寫死），訊號來源是 Binance 最近 1 分鐘動能：klines[-1] 是還在形成中的
+# 那一根，它的 c 就是即時價格，所以 (last.c - prev.c)/prev.c 就是「最近 1 分鐘漲跌幅」。
+# 這組沒有停損、抱到結算，出場完全交給既有的結算流程。
+OPEN_MOMENTUM_ENABLED = bool(_LIVE_VARIANT.get("openMomentum"))
+_LIVE_ASSET_CFG = next((a for a in sim.ASSETS if a["id"] == LIVE_ASSET_ID), {})
+OPEN_MOMENTUM_WINDOW_SECONDS = float(_LIVE_ASSET_CFG.get("windowSeconds", sim.WINDOW_SECONDS))
+OPEN_MOMENTUM_MIN_ELAPSED = float(_LIVE_VARIANT.get("openMinElapsedSeconds") or 0.0)
+OPEN_MOMENTUM_MAX_ELAPSED = float(_LIVE_VARIANT.get("openMaxElapsedSeconds") or OPEN_MOMENTUM_WINDOW_SECONDS)
+# .env 可覆寫價格區間與動能門檻，不動模擬變體（跟 LATE_FAVORITE_* 同一套做法）。
+OPEN_MOMENTUM_MIN_PRICE = float(os.environ.get("POLY_LIVE_MOMENTUM_MIN_PRICE") or _LIVE_VARIANT.get("openMinPrice") or 0.0)
+OPEN_MOMENTUM_MAX_PRICE = float(os.environ.get("POLY_LIVE_MOMENTUM_MAX_PRICE") or _LIVE_VARIANT.get("openMaxPrice") or 1.0)
+OPEN_MOMENTUM_MIN_MOVE_PCT = float(
+    os.environ.get("POLY_LIVE_MOMENTUM_MIN_MOVE_PCT") or _LIVE_VARIANT.get("openMinMovePct") or 0.0
+)
+
+SINGLE_LEG_ENTRY_ENABLED = (ENTRY_MAX_PRICE is not None
+                           and not LATE_FAVORITE_ENABLED
+                           and not OPEN_MOMENTUM_ENABLED)   # 2026-09-29：動能路徑也要互斥
 # 2026-09-12：單邊進場的停損。單邊部位原本只有「補腿鎖利」或「買盤價高於模型價值」兩種出場，
 # 對邊一路漲上去時只能抱到歸零（18:15 那筆 Down 從 0.33 跌到 0.02、-$2.32）。這裡在 3 秒輪詢
 # 路徑加一條：持有腿的保守可賣價 <= 進場成交價 × (1 − 停損%) 就用 FOK 賣掉。0 = 關閉。
@@ -1469,6 +1487,115 @@ async def _try_late_favorite_entry(
         live_state["lateFavoriteWindowSlug"] = slug
         save_live_state()
     return result == "filled"
+
+
+def _open_momentum_plan(
+    up_book: dict, down_book: dict, remaining_seconds: float, cash: float, diagnostic_slug: str | None = None
+) -> dict | None:
+    """對齊模擬版 _try_open_momentum_entry：窗口中段（T+60～120s）用 Binance 最近 1 分鐘動能
+    決定押哪一邊，該邊 ask 落在 0.45～0.60 且 book 是新鮮 WS 快照 → 以預算 / 買價換算整數股數。
+    診斷 reason 沿用模擬版的字串，兩邊的「為什麼沒進場」可以直接對照。"""
+    def diag(reason, **details):
+        if diagnostic_slug:
+            record_live_window_diagnostic(diagnostic_slug, reason, remainingSeconds=remaining_seconds, **details)
+
+    elapsed = OPEN_MOMENTUM_WINDOW_SECONDS - remaining_seconds
+    if elapsed < OPEN_MOMENTUM_MIN_ELAPSED or elapsed > OPEN_MOMENTUM_MAX_ELAPSED:
+        diag("outside_entry_window", elapsedSeconds=elapsed,
+             openMinElapsedSeconds=OPEN_MOMENTUM_MIN_ELAPSED, openMaxElapsedSeconds=OPEN_MOMENTUM_MAX_ELAPSED)
+        return None
+
+    klines = (sim.markets_state[LIVE_ASSET_ID].get("klines") or [])
+    if len(klines) < 2:
+        diag("momentum_missing_klines")
+        return None
+    prev, last = klines[-2], klines[-1]
+    try:
+        move_pct = (float(last["c"]) - float(prev["c"])) / float(prev["c"]) * 100
+    except (KeyError, TypeError, ZeroDivisionError):
+        diag("momentum_missing_klines")
+        return None
+    if abs(move_pct) < OPEN_MOMENTUM_MIN_MOVE_PCT:
+        diag("momentum_below_minimum", momentumPct=move_pct, openMinMovePct=OPEN_MOMENTUM_MIN_MOVE_PCT)
+        return None
+
+    side, book = ("Up", up_book) if move_pct > 0 else ("Down", down_book)
+    asks = book.get("asks") or []
+    ask = float(asks[0]["price"]) if asks else None
+    if ask is None or ask > OPEN_MOMENTUM_MAX_PRICE:
+        diag("momentum_price_above_maximum", selectedSide=side, selectedAsk=ask,
+             momentumPct=move_pct, openMaxPrice=OPEN_MOMENTUM_MAX_PRICE)
+        return None
+    if ask < OPEN_MOMENTUM_MIN_PRICE:
+        # 太便宜代表市場已明顯反向，不追（跟模擬版同一個理由）
+        diag("momentum_price_below_minimum", selectedSide=side, selectedAsk=ask,
+             momentumPct=move_pct, openMinPrice=OPEN_MOMENTUM_MIN_PRICE)
+        return None
+    if not _live_direction_book_is_fresh(side, book):
+        diag("momentum_book_not_fresh", selectedSide=side,
+             dataGuardReason=sim._simulation_single_book_guard_reason(book))
+        return None
+
+    _, budget = _target_pair_order(cash)
+    if budget < sim.SIM_MIN_ORDER_NOTIONAL_USD:
+        diag("momentum_budget_too_small", budgetUsd=budget)
+        return None
+    shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    if shares < float(book.get("minOrderSize", 1) or 1):
+        diag("momentum_below_minimum_shares", targetShares=shares, minOrderSize=book.get("minOrderSize"))
+        return None
+    plan = _buy_plan(side, book, shares)
+    if not plan:
+        diag("momentum_insufficient_depth", selectedSide=side, targetShares=shares)
+        return None
+    plan = dict(plan)
+    plan["_movePct"] = move_pct
+    plan["_elapsedSeconds"] = elapsed
+    return plan
+
+
+async def _try_open_momentum_entry(
+    slug: str, up_book: dict, down_book: dict, remaining_seconds: float, cash: float, dry_run: bool
+) -> bool:
+    """3 秒輪詢路徑：窗口中段動能方向性（判斷＋送單）。每窗口最多一次；成交後抱到結算。"""
+    if live_state.get("openMomentumWindowSlug") == slug:
+        record_live_window_diagnostic(slug, "momentum_already_entered")
+        return False
+    plan = _open_momentum_plan(up_book, down_book, remaining_seconds, cash, diagnostic_slug=slug)
+    if not plan:
+        return False
+    log.info(
+        f"[LIVE] 中段動能 {plan['side']} T+{plan['_elapsedSeconds']:.0f}s 前一分鐘 {plan['_movePct']:+.3f}% "
+        f"limit=${plan['limitPrice']:.3f} shares={plan['shares']:.0f}"
+    )
+    result = await _enter_position(slug, plan, dry_run)
+    if result == "filled":
+        live_state["position"]["strategy"] = "open_momentum"
+        live_state["openMomentumWindowSlug"] = slug
+        save_live_state()
+    return result == "filled"
+
+
+async def _run_ws_open_momentum_entry(
+    slug: str, plan: dict, remaining_seconds: float, dry_run: bool, decision_lock: asyncio.Lock
+) -> None:
+    """WS 即時觸發的動能送單；判斷已在同步路徑完成，這裡只在鎖內再確認沒有部位就送單。"""
+    _ws_action_in_flight["v"] = False
+    async with decision_lock:
+        if live_state.get("position") is not None or live_state.get("openMomentumWindowSlug") == slug:
+            return
+        if not OPEN_MOMENTUM_ENABLED:
+            return
+        log.info(
+            f"[LIVE] 中段動能 {plan['side']} T+{plan['_elapsedSeconds']:.0f}s "
+            f"前一分鐘 {plan['_movePct']:+.3f}% limit=${plan['limitPrice']:.3f} "
+            f"shares={plan['shares']:.0f}（WS 即時觸發）"
+        )
+        result = await _enter_position(slug, plan, dry_run)
+        if result == "filled":
+            live_state["position"]["strategy"] = "open_momentum"
+            live_state["openMomentumWindowSlug"] = slug
+            save_live_state()
 
 
 def _open_positions_cost() -> float:
@@ -2871,6 +2998,9 @@ async def _evaluate_and_act_impl(
 
         if MIRROR_SIM:
             return   # 鏡像模式：進場只由模擬盤的進場事件觸發（_on_sim_entry）
+        if OPEN_MOMENTUM_ENABLED:
+            await _try_open_momentum_entry(slug, up_book, down_book, remaining_seconds, cash, dry_run)
+            return
         if LATE_FAVORITE_ENABLED:
             await _try_late_favorite_entry(slug, up_book, down_book, remaining_seconds, cash, dry_run)
             return
@@ -3130,6 +3260,28 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
             if plan:
                 _ws_action_in_flight["v"] = True
                 asyncio.get_running_loop().create_task(_run_ws_wallet_follow_entry(slug, plan, dry_run, decision_lock))
+            return
+        if OPEN_MOMENTUM_ENABLED:
+            # 動能區間 0.45～0.60 很寬，但 T+60～120s 這段的 ask 移動很快，同樣需要 WS 快速路徑；
+            # decision_lock 與 openMomentumWindowSlug 保證每窗口只進一次，兩條路不會搶同一個部位。
+            if live_state.get("openMomentumWindowSlug") == slug or remaining <= 0:
+                return
+            if _first_trade_guard_blocks_new_entry():
+                return
+            dry_run = not _real_execution_enabled()
+            if not dry_run and live_state.get("preflightSlug") != slug:
+                return
+            if not dry_run and not live.order_tokens_and_fees_are_warm([up_id, down_id]):
+                return
+            cash = _strategy_cash_sync(dry_run)
+            if cash is None:
+                return
+            plan = _open_momentum_plan(up_book, down_book, remaining, cash, diagnostic_slug=slug)
+            if plan:
+                _ws_action_in_flight["v"] = True
+                asyncio.get_running_loop().create_task(
+                    _run_ws_open_momentum_entry(slug, plan, remaining, dry_run, decision_lock)
+                )
             return
         if LATE_FAVORITE_ENABLED:
             # 2026-09-15 依使用者要求：買領先方也走 WS 快速路徑，對齊模擬盤「每個 tick 都評估」。

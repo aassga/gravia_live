@@ -837,7 +837,11 @@ def _mid_momentum_hold_variant(asset: dict) -> dict:
     return {
         "id": f"{asset['id']}-mid-momentum-hold", "assetId": asset["id"],
         "label": f"{asset['label']} 中段動能方向性（T+{60 * k:.0f}～{120 * k:.0f}s 最近 1 分鐘動能、0.45～0.60、抱到結算）",
-        "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "openMomentum": True, "simOnly": True,
+        "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "openMomentum": True,
+        # 2026-09-29 依使用者要求：只開放 DOGE 這一組給實盤①選用（其餘資產維持純模擬）。
+        # simOnly=False 是解除「禁止真實下單」那道閘（見 polymarket_live_strategy 的 import 檢查）；
+        # 這組沒有停損、抱到結算，實測最大回撤 68.7%，只在 DRY-RUN 下驗證行為。
+        "simOnly": asset["id"] != "doge",
         "openMinElapsedSeconds": 60.0 * k, "openMaxElapsedSeconds": 120.0 * k,
         "openMinPrice": 0.45, "openMaxPrice": 0.60, "openMinMovePct": 0.02,
     }

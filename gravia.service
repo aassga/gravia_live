@@ -1,0 +1,21 @@
+[Unit]
+Description=Gravia Polymarket sim + embedded live #1 (DRY-RUN unless LIVE_TRADING=true)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+# 2026-09-29 依使用者要求：實盤①嵌在模擬盤同一個行程（--with-live），不另開行程、
+# 不多一條 Polymarket 行情 WS 連線（目前正在處理 slow-consumer 被踢的問題，見 WS_MAX_QUEUE）。
+# 真實送單仍需 LIVE_TRADING=true 且 POLY_STRATEGY_ARMED=true 同時成立；兩者皆 false = DRY-RUN。
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_server.py --with-live
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
