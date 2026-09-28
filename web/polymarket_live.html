@@ -304,7 +304,10 @@ function onData(d){
   applyCoinFavicon(cfg.assetId, cfg.label, !!d.strategyExecutionEnabled);
   // 2026-09-14 依使用者要求：只顯示目前實盤策略真的用到的設定，停用的路徑（兩腿鎖利／方向性／單邊進場）
   // 及其參數一律隱藏，避免像「鎖利合計上限 $0.98」這種對現行策略沒作用的數字造成誤會。
-  const pairOn = cfg.directPairEnabled !== false;
+  // 2026-09-29：動能策略啟用時，兩腿鎖利路徑永遠走不到（動能分支先 return），
+  // 所以把它連同「鎖利合計上限」一起當成停用的路徑隱藏，沿用本段原本的原則。
+  const momOn = !!cfg.openMomentumEnabled;
+  const pairOn = cfg.directPairEnabled !== false && !momOn;
   const favOn = !!cfg.lateFavoriteEnabled;
   const dirOn = !!cfg.lateDirectionEnabled;
   const singleOn = !!cfg.singleLegEntryEnabled;
@@ -313,6 +316,11 @@ function onData(d){
   document.getElementById('strategy-config').textContent = typeof cfg.stakePct==='number'
     ? `每注佔資產 ${cfg.stakePct.toFixed(1)}%（複利）・ 單注上限 ${capText}${reserveText}`+
       (pairOn ? ` ・ 鎖利合計上限 $${Number(cfg.lockMaxSum||0).toFixed(2)}` : '')+
+      (momOn ? ` ・ 動能進場 T+${Number(cfg.openMomentumMinElapsed||0).toFixed(0)}～${Number(cfg.openMomentumMaxElapsed||0).toFixed(0)}s`+
+               ` ・ |最近 1 分鐘動能| ≥ ${Number(cfg.openMomentumMinMovePct||0)}%`+
+               ` ・ 買價 $${Number(cfg.openMomentumMinPrice||0).toFixed(2)}～$${Number(cfg.openMomentumMaxPrice||0).toFixed(2)}`+
+               (typeof cfg.openMomentumStopLossPrice==='number'
+                 ? ` ・ 停損 $${cfg.openMomentumStopLossPrice.toFixed(2)}` : ' ・ 不停損') : '')+
       (favOn ? ` ・ 領先方買價 $${Number(cfg.lateFavoriteMinPrice||0).toFixed(2)}～$${Number(cfg.lateFavoriteMaxPrice||0).toFixed(2)}`+
                (typeof cfg.lateFavoriteStopLossPrice==='number' ? ` ・ 停損 $${cfg.lateFavoriteStopLossPrice.toFixed(2)}` : ' ・ 不停損')+
                (typeof cfg.lateFavoriteTakeProfitPrice==='number' ? ` ・ 獲利了結 bid ≥ $${cfg.lateFavoriteTakeProfitPrice.toFixed(2)}` : '') : '')+

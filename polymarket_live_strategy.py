@@ -238,6 +238,14 @@ OPEN_MOMENTUM_MAX_PRICE = float(os.environ.get("POLY_LIVE_MOMENTUM_MAX_PRICE") o
 OPEN_MOMENTUM_MIN_MOVE_PCT = float(
     os.environ.get("POLY_LIVE_MOMENTUM_MIN_MOVE_PCT") or _LIVE_VARIANT.get("openMinMovePct") or 0.0
 )
+# 抱到結算，所以預設沒有停損（變體的 directionStopLossPrice 是 None）。
+# 但體檢調參（polymarket_sim_doctor）日後可能替這組設停損，所以這裡要能接得住，
+# 不能寫死「永不停損」——否則設定會被靜默忽略。0 或空字串 = 明確關閉。
+_mom_stop_raw = os.environ.get("POLY_LIVE_MOMENTUM_STOP_LOSS_PRICE", "").strip()
+OPEN_MOMENTUM_STOP_LOSS_PRICE = (
+    (float(_mom_stop_raw) if float(_mom_stop_raw) > 0 else None)
+    if _mom_stop_raw else _LIVE_VARIANT.get("directionStopLossPrice")
+)
 
 SINGLE_LEG_ENTRY_ENABLED = (ENTRY_MAX_PRICE is not None
                            and not LATE_FAVORITE_ENABLED
@@ -3081,6 +3089,20 @@ async def _evaluate_and_act_impl(
         return
     if pos.get("strategy") == "wallet_follow":
         return   # 跟單：抱到結算，不補腿、不停損
+    if pos.get("strategy") == "open_momentum":
+        # 2026-09-29：中段動能方向性＝抱到結算。少了這一段，部位會掉進下面的補鎖利與
+        # market_bid_above_model_value 提早出場，實測 20:11:01 進場後 0.8 秒就被掃出場
+        # （DRY-RUN 觀察到的真實行為），完全違背這條策略的設計。
+        # 只有在變體／環境變數明確設了停損時才停損。
+        if (OPEN_MOMENTUM_STOP_LOSS_PRICE is not None
+                and not pos.get("hedged")
+                and float(pos.get("entryPrice") or 0) > float(OPEN_MOMENTUM_STOP_LOSS_PRICE)):
+            exit_plan = _late_favorite_stop_plan(
+                pos, up_book, down_book, stop_price=float(OPEN_MOMENTUM_STOP_LOSS_PRICE))
+            if exit_plan:
+                await _close_late_favorite_stop(
+                    exit_plan, bool(pos.get("dryRun", True)), slug, reason="momentum_stop_loss")
+        return
     if pos.get("strategy") == "late_favorite":
         tp_plan = _late_favorite_take_profit_plan(pos, up_book, down_book)
         if tp_plan:
@@ -3636,7 +3658,8 @@ def _late_direction_stop_plan(pos: dict, up_book: dict, down_book: dict) -> dict
 
 async def _close_late_favorite_stop(exit_plan: dict, dry_run: bool, slug: str, reason: str = "favorite_stop_loss") -> None:
     stop_price = float(exit_plan.get("_stopPrice", LATE_FAVORITE_STOP_LOSS_PRICE or 0))
-    label = "方向性停損" if reason == "direction_stop_loss" else "領先方翻面停損"
+    label = {"direction_stop_loss": "方向性停損",
+             "momentum_stop_loss": "中段動能停損"}.get(reason, "領先方翻面停損")
     log.warning(
         f"[LIVE] {label} {exit_plan['side']} 可賣價=${exit_plan.get('_triggerPrice', exit_plan['limitPrice']):.3f} "
         f"<= 停損價=${stop_price:.2f}，送出限價=${exit_plan['limitPrice']:.3f}"

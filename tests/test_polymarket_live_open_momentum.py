@@ -7,6 +7,7 @@
 是既有共用元件，這裡用替身隔離，只驗證這個策略自己的判斷規則。
 """
 import inspect
+import os
 import unittest
 from unittest import mock
 
@@ -162,5 +163,74 @@ class SimOnlyGateTests(unittest.TestCase):
         self.assertEqual(v["openMinMovePct"], MIN_MOVE_PCT)
 
 
+class LiveDashboardWiringTests(unittest.TestCase):
+    """看板只顯示現行策略真的用到的設定（2026-09-29：移除單注上限／現金保留，隱藏鎖利上限）。"""
+
+    def _read(self, relpath):
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, relpath), encoding="utf-8") as f:
+            return f.read()
+
+    def test_status_server_reports_momentum_config(self):
+        src = self._read("polymarket_live_status_server.py")
+        for key in ("openMomentumEnabled", "openMomentumMinElapsed", "openMomentumMaxElapsed",
+                    "openMomentumMinPrice", "openMomentumMaxPrice", "openMomentumMinMovePct",
+                    "openMomentumStopLossPrice"):
+            self.assertIn(key, src, key)
+
+    def test_dashboard_hides_lock_sum_when_momentum_is_active(self):
+        page = self._read(os.path.join("web", "polymarket_live.html")) if False else self._read("web/polymarket_live.html")
+        self.assertIn("const momOn = !!cfg.openMomentumEnabled;", page)
+        self.assertIn("cfg.directPairEnabled !== false && !momOn", page)
+
+    def test_dashboard_shows_momentum_parameters(self):
+        page = self._read("web/polymarket_live.html")
+        self.assertIn("openMomentumMinMovePct", page)
+        self.assertIn("openMomentumStopLossPrice", page)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpenMomentumHoldsToSettlementTests(unittest.IsolatedAsyncioTestCase):
+    """2026-09-29 回歸：動能部位必須抱到結算。
+
+    DRY-RUN 實測（20:11:01 進場、0.8 秒後就被掃出場）發現部位會掉進既有的
+    market_bid_above_model_value 提早出場路徑。這個分支是看 pos["strategy"]，不是看
+    OPEN_MOMENTUM_ENABLED，所以就算測試環境的實盤資產是 btc 也測得到。
+    """
+
+    def _position(self, strategy_name):
+        return {
+            "side": "Up", "shares": 27.0, "windowSlug": "w1", "hedged": False,
+            "dryRun": True, "entryPrice": 0.55, "entryLimitPrice": 0.55,
+            "strategy": strategy_name,
+        }
+
+    async def _run(self, strategy_name):
+        fair = {"fairUp": 0.10, "fairDown": 0.90}        # 模型價值遠低於市場買價 → 會觸發提早出場
+        book = _book(0.56, bid=0.95)                     # 可賣價很高
+        with mock.patch.object(strategy, "live_state", {"position": self._position(strategy_name)}), \
+             mock.patch.object(strategy, "_close_position", new_callable=mock.AsyncMock) as close, \
+             mock.patch.object(strategy, "_hedge_position", new_callable=mock.AsyncMock) as hedge, \
+             mock.patch.object(strategy, "_buy_plan", return_value=None), \
+             mock.patch.object(strategy, "_sell_plan", return_value={
+                 "side": "Up", "shares": 27.0, "limitPrice": 0.95,
+                 "riskNotional": 27.0 * 0.95, "fee": 0.0}), \
+             mock.patch.object(strategy, "_strategy_cash", new_callable=mock.AsyncMock, return_value=100.0), \
+             mock.patch.object(strategy, "record_live_window_diagnostic", return_value={}), \
+             mock.patch.object(strategy.sim, "state", {"upBook": book, "downBook": _book(0.45)}):
+            await strategy._evaluate_and_act_impl("w1", mock.MagicMock(), 120.0, fair, True)
+        return close, hedge
+
+    async def test_momentum_position_is_not_closed_early(self):
+        close, hedge = await self._run("open_momentum")
+        close.assert_not_awaited()
+        hedge.assert_not_awaited()
+
+    async def test_control_an_unguarded_strategy_would_be_closed(self):
+        """對照組：沒有專屬分支的部位確實會被提早出場——證明上面那個測試真的有效。"""
+        close, _ = await self._run("some_other_strategy")
+        close.assert_awaited()

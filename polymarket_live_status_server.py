@@ -289,6 +289,15 @@ def _fetch_state() -> dict:
             "lateDirectionMaxPrice": strategy.LATE_DIRECTION_MAX_PRICE,
             "lateDirectionEnabled": strategy.ENABLE_LATE_DIRECTION,
             "directPairEnabled": strategy.DIRECT_PAIR_ENABLED,
+            # 2026-09-29：中段動能方向性（實盤①）。頁面用 openMomentumEnabled 決定要不要顯示
+            # 兩腿鎖利那組數字——動能路徑會在兩腿之前 return，鎖利合計上限對它完全沒作用。
+            "openMomentumEnabled": strategy.OPEN_MOMENTUM_ENABLED,
+            "openMomentumMinElapsed": strategy.OPEN_MOMENTUM_MIN_ELAPSED,
+            "openMomentumMaxElapsed": strategy.OPEN_MOMENTUM_MAX_ELAPSED,
+            "openMomentumMinPrice": strategy.OPEN_MOMENTUM_MIN_PRICE,
+            "openMomentumMaxPrice": strategy.OPEN_MOMENTUM_MAX_PRICE,
+            "openMomentumMinMovePct": strategy.OPEN_MOMENTUM_MIN_MOVE_PCT,
+            "openMomentumStopLossPrice": strategy.OPEN_MOMENTUM_STOP_LOSS_PRICE,
             "lateDirectionSignal": (
                 "Binance Futures 窗口漲跌（比較實驗）"
                 if strategy._LIVE_VARIANT.get("directionSignalSource") == "binance_window"
