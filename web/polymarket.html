@@ -207,8 +207,9 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
     <!-- ASSETS -->
     <div class="panel">
       <div class="lbl" style="margin-bottom:6px;">◦ 模擬資產</div>
-      <div class="lbl gray" style="margin-bottom:2px;">資產組合</div>
-      <div id="asset-portfolio" style="font-size:20px;font-weight:700;letter-spacing:-1px;margin-bottom:8px;">$100.00</div>
+      <div class="lbl gray" style="margin-bottom:2px;">資產組合（獲利最高的一組）</div>
+      <div id="asset-portfolio" style="font-size:20px;font-weight:700;letter-spacing:-1px;">$100.00</div>
+      <div id="asset-best" style="font-size:9px;color:#666;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">—</div>
       <div class="lbl gray" style="margin-bottom:2px;">現金</div>
       <div id="asset-cash" style="font-size:16px;font-weight:700;">$100.00</div>
       <div style="margin-top:8px;border-top:1px solid #1a1a1a;padding-top:6px;font-size:9px;color:#444;">
@@ -469,11 +470,16 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
   }
 
   function renderSummary(variants,cfg){
-    const mainRow=variants.find(v=>v.id===currentAsset+'-main')||variants[0];
+    // 2026-09-28 依使用者要求：資產組合顯示「獲利最高」的那一組（同分取交易數多的），而不是固定的 -main
+    const traded=variants.filter(v=>typeof v.totalPnl==='number'&&(v.totalTrades||0)>0);
+    const best=traded.length?traded.reduce((a,b)=>(b.totalPnl>a.totalPnl||(b.totalPnl===a.totalPnl&&(b.totalTrades||0)>(a.totalTrades||0)))?b:a):null;
+    const mainRow=best||variants.find(v=>v.id===currentAsset+'-main')||variants[0];
     if(mainRow){
       const pf=$('asset-portfolio');
       pf.textContent='$'+mainRow.portfolio.toFixed(2);
       pf.style.color=mainRow.portfolio>=(cfg.startBalance||0)?'#00ff9d':'#ff3a5c';
+      $('asset-best').textContent=mainRow.label?`★ ${mainRow.label}　${fmtMoney(mainRow.totalPnl||0)}／${mainRow.totalTrades||0} 筆`:'—';
+      $('asset-best').title=mainRow.label||'';
       $('asset-cash').textContent='$'+mainRow.cash.toFixed(2);
       if(typeof cfg.stakePct==='number'){
         const stakeUsd=Math.min(mainRow.cash,mainRow.portfolio*(cfg.stakePct/100));
