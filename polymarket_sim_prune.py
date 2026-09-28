@@ -9,7 +9,7 @@
     - sim_window_diagnostics：只有「為什麼沒進場」的分析會用，同樣保留 KEEP_DAYS 天。
     - 刪完若回收空間夠多才 VACUUM（重寫整個檔案，需要等量暫存空間，磁碟快滿時反而危險）。
 
-用法：python polymarket_sim_prune.py [--keep-days 7] [--dry-run]
+用法：python polymarket_sim_prune.py [--keep-days 5] [--dry-run]
 """
 from __future__ import annotations
 
