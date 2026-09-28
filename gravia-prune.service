@@ -1,0 +1,12 @@
+[Unit]
+Description=Gravia sim DB prune: 刪除保留天數以前的報價與窗口診斷（成交與狀態永遠保留）
+After=gravia.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_sim_prune.py
+TimeoutStartSec=1800
+Nice=10
