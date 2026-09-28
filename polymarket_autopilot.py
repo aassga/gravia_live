@@ -127,7 +127,7 @@ async def _sim_snapshot() -> dict:
 def live_has_position() -> bool:
     """任一實盤進程（polymarket_live*_state.json）有持倉或待結算就算有。"""
     import glob
-    for path in sorted(set(glob.glob(os.path.join(HERE, "polymarket_live*_state.json")) | {LIVE_STATE_FILE})):
+    for path in sorted(set(glob.glob(os.path.join(HERE, "polymarket_live*_state.json"))) | {LIVE_STATE_FILE}):
         st = _load(path, {}) or {}
         if st.get("position") or st.get("pendingSettlements"):
             return True

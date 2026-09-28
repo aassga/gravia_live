@@ -33,6 +33,10 @@ class AutopilotTests(unittest.TestCase):
         self.assertAlmostEqual(top["stats"]["totalPnl"], 120 * 10 * 0.07, places=4)   # 主要看總收益
         self.assertEqual(top["stats"]["score"], top["stats"]["totalPnl"])
 
+    def test_live_has_position_handles_missing_state_files(self):
+        # 2026-09-28：set(glob) | {file} 的括號放錯位置會 TypeError，整輪掃描在最後一步崩潰（什麼都沒加）
+        self.assertIn(ap.live_has_position(), (True, False))
+
     def test_pick_new_and_disable(self):
         cands = [
             {"id": "a1", "market": "eth", "stats": {"score": 5}},
