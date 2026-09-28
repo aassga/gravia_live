@@ -31,3 +31,27 @@ class WsBackpressureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KlinesLimitTests(unittest.TestCase):
+    """K 線根數不能低於實際用量，否則波動率／theo 會靜默失準。"""
+
+    def test_limit_covers_sigma_window(self):
+        # theo 的波動率用 klines[-30:]，所以至少要 30 根
+        self.assertGreaterEqual(ps.KLINES_LIMIT, 30)
+
+    def test_limit_covers_longest_window_lookback(self):
+        # theo 要找「窗口起始那一分鐘」那根；最長的窗口是 15 分鐘
+        longest = max(float(a.get("windowSeconds", ps.WINDOW_SECONDS)) for a in ps.ASSETS)
+        self.assertGreaterEqual(ps.KLINES_LIMIT * 60, longest)
+
+    def test_call_site_uses_the_constant(self):
+        src = inspect.getsource(ps._fetch_one_asset)
+        self.assertIn("KLINES_LIMIT", src)
+        self.assertNotIn('asset["binanceSymbol"], 60)', src)
+
+    def test_last_30_is_unchanged_by_the_smaller_request(self):
+        # 行為等價性：30 根的 [-30:] 與 60 根的 [-30:] 是同一批資料
+        sixty = [{"c": i} for i in range(60)]
+        thirty = sixty[-ps.KLINES_LIMIT:]
+        self.assertEqual(thirty[-30:], sixty[-30:])

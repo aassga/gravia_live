@@ -67,6 +67,14 @@ if __name__ == "__main__":
 HOST = "localhost"
 PORT = int(os.environ.get("POLY_SIM_PORT", "8766"))  # 可讓隔離的 ETH MM 服務使用 8768
 POLL_INTERVAL = 3       # 報價輪詢間隔（秒）－ Polymarket 沒有強制要求 WebSocket，輪詢就綽綽有餘
+# 2026-09-29：K 線只需要 30 根。用到最多根數的是 theo 的波動率（klines[-30:]），
+# 動能訊號只看最後 2 根，theo 找窗口起始那根最多回看 15 分鐘。原本抓 60 根有一半直接丟掉，
+# 而 30 根的 [-30:] 與 60 根的 [-30:] 是同一批資料，行為完全相同。
+# 8 個資產每 3 秒各抓一次，減半等於少掉約一半的 Binance REST JSON 解析量
+# （event loop 卡頓是 slow-consumer 被踢的原因，見 WS_MAX_QUEUE）。
+# 不改成「每 30 秒抓一次」：klines[-1] 是還在形成中的那根，它的 c 就是即時價，
+# 節流會讓 openMomentum 的進場訊號變舊，那是改變交易行為而不是減負載。
+KLINES_LIMIT = max(30, int(os.environ.get("POLY_KLINES_LIMIT", "30")))
 
 # 這個進程實際運行的地區標籤，純粹顯示用（例如 "TW-Home" / "AWS eu-west-1 Dublin"）。
 # 每台機器的 .env 各自設定自己的值，同一份程式碼不用改就能在前端分辨現在是本機還是
@@ -5412,7 +5420,7 @@ async def _fetch_one_asset(session: aiohttp.ClientSession, asset: dict) -> None:
         _get_midpoint_ws_or_rest(session, up_id, up_book),
         _get_midpoint_ws_or_rest(session, down_id, down_book),
         fetch_spot_price(session, asset["binanceSymbol"]),
-        fetch_klines(session, asset["binanceSymbol"], 60),
+        fetch_klines(session, asset["binanceSymbol"], KLINES_LIMIT),
         return_exceptions=True,
     )
     # Spot/klines/midpoint requests can take hundreds of milliseconds. A newer
