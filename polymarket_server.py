@@ -1775,7 +1775,7 @@ async def binance_ws_loop() -> None:
     backoff_idx = 0
     while True:
         try:
-            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10, max_queue=WS_MAX_QUEUE) as ws:
                 log.info(f"[Binance-WS] 已連線，訂閱 {len(symbols)} 個商品即時報價")
                 backoff_idx = 0
                 async for raw in ws:
@@ -4718,6 +4718,14 @@ WS_TICK_DISPATCH_INTERVAL_SECONDS = max(
     min(0.250, float(os.environ.get("POLY_WS_TICK_DISPATCH_INTERVAL_MS", "20")) / 1000.0),
 )
 WS_PERF_LOG_INTERVAL_SECONDS = 60.0
+# 2026-09-28：websockets 函式庫的 max_queue 預設只有 32 個 frame。行情 WS 實測穩定
+# 682 KB/s、Binance bookTicker 另外 252 KB/s，兩條都在同一個 event loop 上解 JSON；
+# 只要有任何一次卡頓（換窗口、GC、解 klines），32 格立刻塞滿，函式庫就停止讀 socket，
+# Polymarket 判定我們是 slow consumer 直接用 1013 踢掉 —— 實測每小時被踢 132 次，
+# 每次斷線後兩腿沒有完整快照，SIM-DATA-GUARD 每小時擋掉約 268 次進場。
+# 裸測驗證（同樣每 2 秒故意卡 300ms）：max_queue=32 會被踢、max_queue=4096 完全不會。
+# 4096 格約 1.2 MB 記憶體。落後時是「用稍舊的訂單簿判斷」，遠好過「被斷線完全沒資料」。
+WS_MAX_QUEUE = max(32, int(os.environ.get("POLY_WS_MAX_QUEUE", "4096")))
 
 _ws_books: dict = {}              # token_id -> {"bids": {price_str: size}, "asks": {price_str: size}}
 _ws_meta: dict = {}               # token_id -> {"tickSize":, "minOrderSize":}，第一次見到時查一次就沿用
@@ -5246,7 +5254,7 @@ async def market_ws_loop() -> None:
     backoff_idx = 0
     while True:
         try:
-            async with websockets.connect(MARKET_WS_URL, ping_interval=None) as ws:
+            async with websockets.connect(MARKET_WS_URL, ping_interval=None, max_queue=WS_MAX_QUEUE) as ws:
                 _ws_conn = ws
                 _ws_subscribed_tokens = set()
                 _ws_snapshot_tokens = set()
