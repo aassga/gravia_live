@@ -47,6 +47,9 @@ class PruneTests(unittest.TestCase):
             again = prune.prune(p, keep_days=7)                                                  # 再跑一次沒東西可刪
             self.assertEqual(again["quotesOld"], 0)
 
+    def test_default_keep_days_is_five(self):
+        self.assertEqual(prune.KEEP_DAYS, 5.0)          # 2026-09-28：本機與 VPS 一致
+
     def test_keep_days_zero_clears_all_quotes_but_keeps_trades(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "sim.sqlite3")

@@ -1,8 +1,9 @@
 """
 模擬盤資料庫清理（2026-09-28 依使用者要求，每天跑一次）。
 
-`sim_quotes` 每秒寫入，資產越多長越快（8 個資產約每天 400～600 MB），磁碟滿會讓模擬盤直接崩掉。
-這支只刪「保留天數以前」的報價與窗口診斷，成交紀錄（sim_trades）與變體狀態永遠保留：
+`sim_quotes` 每秒寫入（8 個資產實測約 19.5 萬筆／天、主檔 57 MB／天），WAL 還會額外膨脹到數百 MB，
+磁碟滿會讓模擬盤直接崩掉。這支只刪「保留天數以前」的報價與窗口診斷（預設 5 天），
+成交紀錄（sim_trades）與變體狀態永遠保留：
 
     - sim_quotes：只有體檢回放出場設定時會用到進場後的路徑，保留 KEEP_DAYS 天就夠。
     - sim_window_diagnostics：只有「為什麼沒進場」的分析會用，同樣保留 KEEP_DAYS 天。
@@ -24,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("POLY_SIM_DB_PATH", os.path.join(HERE, "polymarket_sim.sqlite3"))
-KEEP_DAYS = float(os.environ.get("POLY_SIM_PRUNE_KEEP_DAYS", "7"))
+KEEP_DAYS = float(os.environ.get("POLY_SIM_PRUNE_KEEP_DAYS", "5"))   # 2026-09-28 依使用者要求：本機與 VPS 一致保留 5 天
 VACUUM_MIN_FREE_MB = 400      # 預估可回收超過這個量才值得 VACUUM
 VACUUM_MIN_DISK_HEADROOM = 3  # 剩餘空間要有資料庫的幾倍才敢 VACUUM（它需要等量暫存）
 
