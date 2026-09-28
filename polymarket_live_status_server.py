@@ -135,6 +135,39 @@ def _backfill_win_loss(state: dict) -> None:
     state["winRatePct"] = (100.0 * int(state.get("winningTrades", 0)) / decided) if decided else None
 
 
+def _dry_run_stats(state: dict) -> dict:
+    """DRY-RUN 累計損益（2026-09-29 依使用者要求）。
+
+    真實的「總收益」是現金基礎（目前餘額 − 起始基準），DRY-RUN 沒有真實金流可以比，
+    所以改用已結算交易的 pnlEstimate 加總。刻意跟真實統計完全分開：_backfill_win_loss
+    那邊排除 DRY-RUN 是對的（2026-09-14 的決定），這裡不去動它。
+    只算已結算的（有 exitTime），還抱著的部位不計入——跟真實那邊「不含未平倉部位」一致。
+    """
+    trades = [t for t in (state.get("trades") or [])
+              if t.get("dryRun", False) and t.get("exitTime")]
+    if not trades:
+        return {"dryRunTradeCount": 0, "dryRunTotalPnl": None, "dryRunWinRatePct": None,
+                "dryRunRoiPct": None, "dryRunStakeTotal": None, "dryRunFirstAt": None,
+                "dryRunLastAt": None, "dryRunAvgPnl": None, "dryRunFeesTotal": None}
+    pnls = [float(t.get("pnlEstimate") or 0.0) for t in trades]
+    stakes = [float(t.get("stakeUsd") or 0.0) for t in trades]
+    fees = [float(t.get("feesEstimate") or 0.0) for t in trades]
+    times = [float(t.get("exitTime")) for t in trades]
+    total, staked = sum(pnls), sum(stakes)
+    decided = sum(1 for v in pnls if v != 0)
+    return {
+        "dryRunTradeCount": len(trades),
+        "dryRunTotalPnl": total,
+        "dryRunAvgPnl": total / len(trades),
+        "dryRunWinRatePct": (100.0 * sum(1 for v in pnls if v > 0) / decided) if decided else None,
+        "dryRunRoiPct": (100.0 * total / staked) if staked > 0 else None,
+        "dryRunStakeTotal": staked,
+        "dryRunFeesTotal": sum(fees),
+        "dryRunFirstAt": min(times),
+        "dryRunLastAt": max(times),
+    }
+
+
 def _compute_open_positions(trades: list, max_tokens: int = 10) -> list:
     """從最近成交紀錄反推「目前實際還持有」的部位，用真實鏈上餘額驗證——
     已經被兌換（redeem）掉的部位查出來會是 0，不會出現在這裡，
@@ -248,6 +281,7 @@ def _fetch_state() -> dict:
         "baselineBalance": baseline["baselineBalance"],
         "baselineSetAt": baseline["baselineSetAt"],
         "totalPnl": total_pnl,
+        **_dry_run_stats(strategy_state),   # 2026-09-29：DRY-RUN 累計，與真實統計分開
         "openOrders": orders,
         "openPositions": positions,
         "trades": trades,

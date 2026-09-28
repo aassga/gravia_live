@@ -126,6 +126,14 @@
     </div>
   </div>
 
+  <!-- 2026-09-29 依使用者要求：DRY-RUN 總收益。刻意跟上面兩個「真實」面板分開放，
+       避免把模擬送單的獲利誤讀成真實獲利；沒有 DRY-RUN 成交時整個面板隱藏。 -->
+  <div class="panel" id="dryrun-panel" style="display:none;">
+    <div class="panel-title">DRY-RUN 總收益（模擬送單，未動用真實資金）</div>
+    <div class="big-num" id="dryrun-pnl">$—</div>
+    <div class="sub-num" id="dryrun-note">—</div>
+  </div>
+
   <div class="panel">
     <div class="panel-title">帳戶地址（唯讀顯示）</div>
     <div class="addr" id="funder-addr">—</div>
@@ -291,6 +299,25 @@ function onData(d){
     const sign = d.totalPnl > 0 ? '+' : '';
     pnlEl.textContent = sign + '$' + d.totalPnl.toFixed(2);
     pnlEl.style.color = d.totalPnl > 0 ? '#3ddc84' : (d.totalPnl < 0 ? '#ff3a5c' : '#ffb020');
+  }
+  // DRY-RUN 總收益：已結算的模擬成交 pnlEstimate 加總（不含還抱著的部位）
+  const drPanel = document.getElementById('dryrun-panel');
+  if(typeof d.dryRunTotalPnl === 'number' && (d.dryRunTradeCount || 0) > 0){
+    drPanel.style.display = '';
+    const drEl = document.getElementById('dryrun-pnl');
+    const drSign = d.dryRunTotalPnl > 0 ? '+' : '';
+    drEl.textContent = drSign + '$' + d.dryRunTotalPnl.toFixed(2);
+    drEl.style.color = d.dryRunTotalPnl > 0 ? '#3ddc84' : (d.dryRunTotalPnl < 0 ? '#ff3a5c' : '#ffb020');
+    const bits = [`${d.dryRunTradeCount} 筆`];
+    if(typeof d.dryRunWinRatePct === 'number') bits.push(`勝率 ${d.dryRunWinRatePct.toFixed(1)}%`);
+    if(typeof d.dryRunAvgPnl === 'number') bits.push(`平均每筆 ${d.dryRunAvgPnl > 0 ? '+' : ''}$${d.dryRunAvgPnl.toFixed(2)}`);
+    if(typeof d.dryRunRoiPct === 'number') bits.push(`ROI ${d.dryRunRoiPct.toFixed(2)}%`);
+    if(typeof d.dryRunStakeTotal === 'number') bits.push(`累計下注 $${d.dryRunStakeTotal.toFixed(2)}`);
+    if(typeof d.dryRunFeesTotal === 'number') bits.push(`手續費 $${d.dryRunFeesTotal.toFixed(2)}`);
+    if(d.dryRunLastAt) bits.push(`最後 ${fmtTime(d.dryRunLastAt)}`);
+    document.getElementById('dryrun-note').textContent = bits.join(' ・ ');
+  } else {
+    drPanel.style.display = 'none';
   }
   if(typeof d.baselineBalance === 'number'){
     document.getElementById('baseline-note').textContent = `起始基準：$${d.baselineBalance.toFixed(2)}（${fmtTime(d.baselineSetAt)} 設定）`;
