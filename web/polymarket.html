@@ -212,6 +212,14 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       <div id="asset-best" style="font-size:9px;color:#666;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">—</div>
       <div class="lbl gray" style="margin-bottom:2px;">現金</div>
       <div id="asset-cash" style="font-size:16px;font-weight:700;">$100.00</div>
+      <!-- 2026-09-29：資產組合與「起始+已實現損益」對不起來的差額，就是未結算／未實現的部分。
+           單邊倉在結果未知前保守估值為 0（compute_cash_and_portfolio），所以差額通常是負的。
+           差額為 0 時整段隱藏，多數變體畫面不變。 -->
+      <div id="asset-unreal-row" style="display:none;margin-top:4px;">
+        <div class="lbl gray" style="margin-bottom:2px;">未結算／未實現</div>
+        <div id="asset-unreal" style="font-size:13px;font-weight:700;">$0.00</div>
+      </div>
+      <div id="asset-reconcile" style="display:none;margin-top:4px;font-size:8.5px;color:#555;line-height:1.35;"></div>
       <div style="margin-top:8px;border-top:1px solid #1a1a1a;padding-top:6px;font-size:9px;color:#444;">
         起始 $<span id="asset-start">100</span> · 下一注 ≈ $<span id="asset-stake-hint">3.00</span>（複利）
       </div>
@@ -481,6 +489,25 @@ body{background:#080808;color:#f0f0f0;font-family:'JetBrains Mono',monospace;fon
       $('asset-best').textContent=mainRow.label?`★ ${mainRow.label}　${fmtMoney(mainRow.totalPnl||0)}／${mainRow.totalTrades||0} 筆`:'—';
       $('asset-best').title=mainRow.label||'';
       $('asset-cash').textContent='$'+mainRow.cash.toFixed(2);
+      // 差額 = 資產組合 −（起始 + 已實現損益）：負數是未結算倉位被保守估值為 0，正數是持倉浮盈。
+      // 完全由現有欄位推導，不需要伺服器多送資料。
+      const startBal=typeof cfg.startBalance==='number'?cfg.startBalance:null;
+      const realized=typeof mainRow.totalPnl==='number'?mainRow.totalPnl:null;
+      const gap=(startBal!==null&&realized!==null)?mainRow.portfolio-(startBal+realized):null;
+      const unrealRow=$('asset-unreal-row'), reconcile=$('asset-reconcile');
+      if(gap!==null&&Math.abs(gap)>=0.005){
+        unrealRow.style.display='';
+        const cell=$('asset-unreal');
+        cell.textContent=fmtMoney(gap);
+        cell.style.color=gap>=0?'#00ff9d':'#ff8c42';
+        reconcile.style.display='';
+        reconcile.textContent=`起始 $${startBal.toFixed(2)} ${realized>=0?'+':'−'} 已實現 $${Math.abs(realized).toFixed(2)} `
+          +`${gap>=0?'+':'−'} 未結算 $${Math.abs(gap).toFixed(2)} = $${mainRow.portfolio.toFixed(2)}`;
+        reconcile.title=gap<0?'未結算倉位在結果未知前保守估值為 $0，不提前釋放本金':'持倉目前的變現價值高於成本（浮盈）';
+      }else{
+        unrealRow.style.display='none';
+        reconcile.style.display='none';
+      }
       if(typeof cfg.stakePct==='number'){
         const stakeUsd=Math.min(mainRow.cash,mainRow.portfolio*(cfg.stakePct/100));
         $('asset-stake-hint').textContent=stakeUsd.toFixed(2);
