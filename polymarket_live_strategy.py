@@ -3433,6 +3433,12 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
         return
     if pos.get("strategy") == "wallet_follow":
         return
+    if pos.get("strategy") == "open_momentum":
+        # 2026-09-29：中段動能＝抱到結算，不補腿。DRY-RUN 實測 20:31:42 進場、20:32:07 就被
+        # 這條路的補腿接走（「第二腿 Down limit=$0.400」）——輪詢路徑已經擋了，WS 路徑漏了。
+        # 停損（若變體有設）刻意留給 3 秒輪詢路徑，理由同本檔既有註解：WS 即時評估拿到的是
+        # 薄訂單簿瞬間價，用高頻率採樣閾值容易把雜訊當訊號。
+        return
     if pos.get("strategy") == "late_favorite":
         tp_plan = _late_favorite_take_profit_plan(pos, up_book, down_book)
         if tp_plan:
@@ -3709,11 +3715,22 @@ async def _run_ws_late_direction_stop(exit_plan: dict, dry_run: bool, slug: str,
         await _close_late_favorite_stop(latest, dry_run, slug, reason="direction_stop_loss")
 
 
+# 抱到結算的策略：進場後不補腿、不提早出場（補腿等於把方向性優勢換成極小的鎖利價差）。
+HOLD_TO_SETTLEMENT_STRATEGIES = frozenset({
+    "open_momentum", "wallet_follow", "late_favorite", "late_direction",
+})
+
+
 async def _run_ws_hedge(hedge: dict, dry_run: bool, slug: str, decision_lock: asyncio.Lock) -> None:
     _ws_action_in_flight["v"] = False
     async with decision_lock:
         pos = live_state.get("position")
         if not pos or pos.get("hedged") or pos.get("windowSlug") != slug:
+            return
+        # 2026-09-29：第二道防線。排程點已經依策略擋掉了，但這裡是唯一真的送出補腿單的地方，
+        # 之後任何新策略忘了在分派器加分支時，至少不會默默把方向性部位變成鎖利部位。
+        if pos.get("strategy") in HOLD_TO_SETTLEMENT_STRATEGIES:
+            log.info(f"[LIVE] {pos.get('strategy')} 抱到結算，略過 WS 補腿")
             return
         await _hedge_position(hedge, dry_run)
 

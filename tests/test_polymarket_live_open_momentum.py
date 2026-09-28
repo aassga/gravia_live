@@ -234,3 +234,50 @@ class OpenMomentumHoldsToSettlementTests(unittest.IsolatedAsyncioTestCase):
         """對照組：沒有專屬分支的部位確實會被提早出場——證明上面那個測試真的有效。"""
         close, _ = await self._run("some_other_strategy")
         close.assert_awaited()
+
+
+class WsPathHedgeGuardTests(unittest.IsolatedAsyncioTestCase):
+    """2026-09-29 回歸：WS 快速路徑也不能補腿。
+
+    第一次修正只擋了 3 秒輪詢路徑，DRY-RUN 實測 20:31:42 進場、20:32:07 就被 WS 路徑的
+    補腿接走（「第二腿 Down limit=$0.400」）。WS 路徑有自己的出場分派器，當時沒有
+    open_momentum 分支。
+    """
+
+    def _pos(self, strategy_name):
+        return {"side": "Up", "shares": 28.0, "windowSlug": "w1", "hedged": False,
+                "dryRun": True, "entryPrice": 0.55, "entryLimitPrice": 0.55,
+                "strategy": strategy_name}
+
+    async def _run_ws_hedge(self, strategy_name):
+        lock = __import__("asyncio").Lock()
+        with mock.patch.object(strategy, "live_state", {"position": self._pos(strategy_name)}), \
+             mock.patch.object(strategy, "_hedge_position", new_callable=mock.AsyncMock) as hedge:
+            await strategy._run_ws_hedge({"side": "Down", "shares": 28.0, "limitPrice": 0.40},
+                                         True, "w1", lock)
+        return hedge
+
+    async def test_momentum_is_never_hedged_by_the_ws_path(self):
+        hedge = await self._run_ws_hedge("open_momentum")
+        hedge.assert_not_awaited()
+
+    async def test_every_hold_to_settlement_strategy_is_protected(self):
+        for name in strategy.HOLD_TO_SETTLEMENT_STRATEGIES:
+            with self.subTest(strategy=name):
+                hedge = await self._run_ws_hedge(name)
+                hedge.assert_not_awaited()
+
+    async def test_control_a_pair_strategy_is_still_hedged(self):
+        """對照組：兩腿鎖利策略仍然要能補腿——證明守衛沒有擋錯。"""
+        hedge = await self._run_ws_hedge("direct_pair")
+        hedge.assert_awaited()
+
+
+class WsDispatcherWiringTests(unittest.TestCase):
+    def test_ws_dispatcher_has_a_momentum_branch(self):
+        src = inspect.getsource(strategy._on_ws_tick_sync_impl)
+        self.assertIn('pos.get("strategy") == "open_momentum"', src)
+
+    def test_poll_dispatcher_also_has_one(self):
+        src = inspect.getsource(strategy._evaluate_and_act_impl)
+        self.assertIn('pos.get("strategy") == "open_momentum"', src)
