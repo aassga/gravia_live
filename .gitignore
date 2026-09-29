@@ -64,3 +64,6 @@ sim_variant_overrides.json
 backup_local/
 *-MSI.*
 *-小熊餅乾.*
+
+# 2026-09-30：改名擱置的損壞 SQLite 殘檔（Windows 仍鎖著，無法刪除）
+*.stale-*
