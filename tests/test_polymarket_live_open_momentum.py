@@ -281,3 +281,94 @@ class WsDispatcherWiringTests(unittest.TestCase):
     def test_poll_dispatcher_also_has_one(self):
         src = inspect.getsource(strategy._evaluate_and_act_impl)
         self.assertIn('pos.get("strategy") == "open_momentum"', src)
+
+
+class MomentumSimParityTests(unittest.TestCase):
+    """2026-09-29「實盤務必與模擬盤保持一致」稽核後補的測試。
+
+    模擬盤的 openMomentum 分支出場是：
+        if not _try_late_favorite_take_profit(...): _try_late_favorite_stop_loss(...)
+    讀的是 favoriteTakeProfitPrice / favoriteStopLossPrice / favoriteStopLossUsd，
+    而且在呼叫時才讀（體檢調參每 5 秒熱載入覆寫）。
+    """
+
+    def _pos(self):
+        return {"side": "Up", "shares": 28.0, "windowSlug": "w1", "hedged": False,
+                "dryRun": True, "entryPrice": 0.55, "entryLimitPrice": 0.55,
+                "strategy": "open_momentum"}
+
+    def test_no_stop_configured_means_hold(self):
+        with mock.patch.object(strategy, "_LIVE_VARIANT", {}):
+            tp, sp = strategy._momentum_exit_plans(self._pos(), _book(0.55), _book(0.45))
+        self.assertIsNone(tp)
+        self.assertIsNone(sp)
+
+    def test_usd_stop_from_the_variant_is_honoured(self):
+        """體檢調參寫的是 favoriteStopLossUsd（sol／btc-15m 已經被設過 $2.53／$7.31）。"""
+        variant = {"favoriteStopLossUsd": 1.0}
+        pos = self._pos()
+        # best bid 0.20 → 帳面虧損遠大於 $1
+        with mock.patch.object(strategy, "_LIVE_VARIANT", variant), \
+             mock.patch.object(strategy, "_live_direction_book_is_fresh", return_value=True), \
+             mock.patch.object(strategy, "_sell_plan", return_value={
+                 "side": "Up", "shares": 28.0, "limitPrice": 0.20, "riskNotional": 5.6, "fee": 0.0}), \
+             mock.patch.object(strategy, "_aggressive_sell_plan", return_value=None):
+            tp, sp = strategy._momentum_exit_plans(pos, _book(0.55, bid=0.20), _book(0.45))
+        self.assertIsNone(tp)
+        self.assertIsNotNone(sp)
+
+    def test_variant_changes_take_effect_without_restart(self):
+        """同一個 dict 物件被就地改寫（apply_variant_overrides 的做法）後，下一次呼叫就要看到。"""
+        variant = {}
+        pos = self._pos()
+        with mock.patch.object(strategy, "_LIVE_VARIANT", variant), \
+             mock.patch.object(strategy, "_live_direction_book_is_fresh", return_value=True), \
+             mock.patch.object(strategy, "_sell_plan", return_value={
+                 "side": "Up", "shares": 28.0, "limitPrice": 0.20, "riskNotional": 5.6, "fee": 0.0}), \
+             mock.patch.object(strategy, "_aggressive_sell_plan", return_value=None):
+            self.assertIsNone(strategy._momentum_exit_plans(pos, _book(0.55, bid=0.20), _book(0.45))[1])
+            variant["favoriteStopLossUsd"] = 1.0          # 體檢調參就地改寫
+            self.assertIsNotNone(strategy._momentum_exit_plans(pos, _book(0.55, bid=0.20), _book(0.45))[1])
+
+    def test_take_profit_wins_over_stop(self):
+        """模擬盤是「先停利，沒觸發才看停損」，順序不能反。"""
+        variant = {"favoriteTakeProfitPrice": 0.90, "favoriteStopLossUsd": 1.0}
+        with mock.patch.object(strategy, "_LIVE_VARIANT", variant), \
+             mock.patch.object(strategy, "_live_direction_book_is_fresh", return_value=True), \
+             mock.patch.object(strategy, "_sell_plan", return_value={
+                 "side": "Up", "shares": 28.0, "limitPrice": 0.95, "riskNotional": 26.6, "fee": 0.0}):
+            tp, sp = strategy._momentum_exit_plans(self._pos(), _book(0.96, bid=0.95), _book(0.45))
+        self.assertIsNotNone(tp)
+        self.assertIsNone(sp)
+
+
+class DryRunCompoundingTests(unittest.TestCase):
+    """DRY-RUN 要跟模擬盤一樣複利（看板也寫著「複利」）。
+    實測 24 筆累計 +13.36，下注卻一直停在 $15 附近 —— 原本固定回傳 DRY_RUN_BALANCE_USD。"""
+
+    def test_cash_grows_with_realized_pnl(self):
+        state = {"trades": [
+            {"dryRun": True, "exitTime": 1.0, "pnlEstimate": 10.0},
+            {"dryRun": True, "exitTime": 2.0, "pnlEstimate": -3.0},
+        ], "position": None, "pendingSettlements": []}
+        with mock.patch.object(strategy, "live_state", state):
+            self.assertAlmostEqual(strategy._dry_run_cash(), strategy.DRY_RUN_BALANCE_USD + 7.0)
+
+    def test_real_trades_do_not_affect_dry_run_cash(self):
+        state = {"trades": [{"dryRun": False, "exitTime": 1.0, "pnlEstimate": 99.0}],
+                 "position": None, "pendingSettlements": []}
+        with mock.patch.object(strategy, "live_state", state):
+            self.assertAlmostEqual(strategy._dry_run_cash(), strategy.DRY_RUN_BALANCE_USD)
+
+    def test_open_position_cost_is_subtracted(self):
+        state = {"trades": [], "position": None, "pendingSettlements": []}
+        with mock.patch.object(strategy, "live_state", state), \
+             mock.patch.object(strategy, "_position_paid_cost", return_value=20.0):
+            state["position"] = {"dryRun": True}
+            self.assertAlmostEqual(strategy._dry_run_cash(), strategy.DRY_RUN_BALANCE_USD - 20.0)
+
+    def test_never_negative(self):
+        state = {"trades": [{"dryRun": True, "exitTime": 1.0, "pnlEstimate": -9999.0}],
+                 "position": None, "pendingSettlements": []}
+        with mock.patch.object(strategy, "live_state", state):
+            self.assertEqual(strategy._dry_run_cash(), 0.0)

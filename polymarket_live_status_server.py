@@ -331,7 +331,11 @@ def _fetch_state() -> dict:
             "openMomentumMinPrice": strategy.OPEN_MOMENTUM_MIN_PRICE,
             "openMomentumMaxPrice": strategy.OPEN_MOMENTUM_MAX_PRICE,
             "openMomentumMinMovePct": strategy.OPEN_MOMENTUM_MIN_MOVE_PCT,
-            "openMomentumStopLossPrice": strategy.OPEN_MOMENTUM_STOP_LOSS_PRICE,
+            # 2026-09-29：動能的停利／停損是體檢調參寫進變體的欄位，每次都重讀（模擬盤每 5 秒熱載入，
+            # _LIVE_VARIANT 與模擬盤是同一個 dict 物件），不能用 import 時的常數快照。
+            "openMomentumStopLossPrice": strategy._LIVE_VARIANT.get("favoriteStopLossPrice"),
+            "openMomentumStopLossUsd": strategy._LIVE_VARIANT.get("favoriteStopLossUsd"),
+            "openMomentumTakeProfitPrice": strategy._LIVE_VARIANT.get("favoriteTakeProfitPrice"),
             "lateDirectionSignal": (
                 "Binance Futures 窗口漲跌（比較實驗）"
                 if strategy._LIVE_VARIANT.get("directionSignalSource") == "binance_window"

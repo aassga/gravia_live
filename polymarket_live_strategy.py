@@ -1497,6 +1497,24 @@ async def _try_late_favorite_entry(
     return result == "filled"
 
 
+def _momentum_exit_plans(pos: dict, up_book: dict, down_book: dict) -> tuple[dict | None, dict | None]:
+    """中段動能的出場計畫，對齊模擬盤 openMomentum 分支：
+        if not _try_late_favorite_take_profit(...): _try_late_favorite_stop_loss(...)
+    停利／停損欄位（favoriteTakeProfitPrice／favoriteStopLossPrice／favoriteStopLossUsd）都在這裡
+    才從變體讀取——_LIVE_VARIANT 跟模擬盤是同一個 dict 物件，體檢調參 apply_variant_overrides
+    就地改寫後，這裡下一次呼叫就會看到新值（模擬盤每 5 秒熱載入），不會停在 import 時的快照。
+    回傳 (停利計畫, 停損計畫)；停利優先。"""
+    tp = _late_favorite_take_profit_plan(
+        pos, up_book, down_book, take_profit_price=_LIVE_VARIANT.get("favoriteTakeProfitPrice"))
+    if tp:
+        return tp, None
+    sp = _late_favorite_stop_plan(
+        pos, up_book, down_book,
+        stop_price=_LIVE_VARIANT.get("favoriteStopLossPrice"),
+        stop_usd=_LIVE_VARIANT.get("favoriteStopLossUsd"))
+    return None, sp
+
+
 def _open_momentum_plan(
     up_book: dict, down_book: dict, remaining_seconds: float, cash: float, diagnostic_slug: str | None = None
 ) -> dict | None:
@@ -1540,21 +1558,25 @@ def _open_momentum_plan(
              momentumPct=move_pct, openMinPrice=OPEN_MOMENTUM_MIN_PRICE)
         return None
     if not _live_direction_book_is_fresh(side, book):
-        diag("momentum_book_not_fresh", selectedSide=side,
+        diag("selected_book_not_fresh", selectedSide=side,
              dataGuardReason=sim._simulation_single_book_guard_reason(book))
         return None
 
-    _, budget = _target_pair_order(cash)
-    if budget < sim.SIM_MIN_ORDER_NOTIONAL_USD:
-        diag("momentum_budget_too_small", budgetUsd=budget)
+    pair_shares, budget = _target_pair_order(cash)
+    # 模擬盤是 `if shares <= 0 or budget < SIM_MIN_ORDER_NOTIONAL_USD`，兩個條件都要有才一致
+    if pair_shares <= 0 or budget < sim.SIM_MIN_ORDER_NOTIONAL_USD:
+        diag("insufficient_budget", targetShares=pair_shares, budgetUsd=budget)
         return None
     shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
     if shares < float(book.get("minOrderSize", 1) or 1):
-        diag("momentum_below_minimum_shares", targetShares=shares, minOrderSize=book.get("minOrderSize"))
+        diag("insufficient_ask_depth", targetShares=shares, minOrderSize=book.get("minOrderSize"))
         return None
+    # 模擬盤在 simulate_buy_fill 之後還會擋 fill["decisionNotional"] < SIM_MIN_ORDER_NOTIONAL_USD；
+    # 實盤這道檢查已經內建在 _buy_plan 裡（riskNotional < SIM_MIN_ORDER_NOTIONAL_USD 就回 None），
+    # 所以 plan 不是 None 就等於已經過了同一道門檻，不需要再加一層。
     plan = _buy_plan(side, book, shares)
     if not plan:
-        diag("momentum_insufficient_depth", selectedSide=side, targetShares=shares)
+        diag("insufficient_ask_depth", selectedSide=side, targetShares=shares)
         return None
     plan = dict(plan)
     plan["_movePct"] = move_pct
@@ -1761,9 +1783,28 @@ async def _cash_refresh_loop() -> None:
         await asyncio.sleep(CASH_CACHE_TTL_SECONDS)
 
 
+def _dry_run_cash() -> float:
+    """DRY-RUN 的現金基礎，對齊模擬盤 compute_cash_and_portfolio：
+        起始本金 + 已結算損益 − 還在場的部位成本
+    2026-09-29 修：原本固定回傳 DRY_RUN_BALANCE_USD，所以每注永遠是 15% × 100，
+    不會隨獲利成長——但模擬盤是複利的，看板也寫著「複利」。實測 24 筆累計 +13.36，
+    下注卻一直停在 $15 附近。"""
+    realized = sum(float(t.get("pnlEstimate") or 0.0)
+                   for t in (live_state.get("trades") or [])
+                   if t.get("dryRun") and t.get("exitTime"))
+    staked = 0.0
+    own = live_state.get("position")
+    if own and own.get("dryRun", True):
+        staked += _position_paid_cost(own)
+    for q in (live_state.get("pendingSettlements") or []):
+        if q.get("dryRun", True):
+            staked += _position_paid_cost(q)
+    return max(0.0, DRY_RUN_BALANCE_USD + realized - staked)
+
+
 async def _strategy_cash(dry_run: bool) -> float:
     if dry_run:
-        return DRY_RUN_BALANCE_USD
+        return _dry_run_cash()
     if _cash_cache["value"] is not None:
         return _cash_cache["value"]
     # 背景刷新任務還沒跑過第一次（進程剛啟動的瞬間），退而求其次同步查一次墊底，
@@ -1778,7 +1819,7 @@ def _strategy_cash_sync(dry_run: bool) -> float | None:
     改靠 3 秒輪詢那條路（原本的 evaluate_and_act，會正確 await 刷新）兜底，不在這條
     必須零延遲的路徑上等網路 I/O。"""
     if dry_run:
-        return DRY_RUN_BALANCE_USD
+        return _dry_run_cash()
     return _cash_cache["value"]
 
 
@@ -3090,18 +3131,15 @@ async def _evaluate_and_act_impl(
     if pos.get("strategy") == "wallet_follow":
         return   # 跟單：抱到結算，不補腿、不停損
     if pos.get("strategy") == "open_momentum":
-        # 2026-09-29：中段動能方向性＝抱到結算。少了這一段，部位會掉進下面的補鎖利與
-        # market_bid_above_model_value 提早出場，實測 20:11:01 進場後 0.8 秒就被掃出場
-        # （DRY-RUN 觀察到的真實行為），完全違背這條策略的設計。
-        # 只有在變體／環境變數明確設了停損時才停損。
-        if (OPEN_MOMENTUM_STOP_LOSS_PRICE is not None
-                and not pos.get("hedged")
-                and float(pos.get("entryPrice") or 0) > float(OPEN_MOMENTUM_STOP_LOSS_PRICE)):
-            exit_plan = _late_favorite_stop_plan(
-                pos, up_book, down_book, stop_price=float(OPEN_MOMENTUM_STOP_LOSS_PRICE))
-            if exit_plan:
-                await _close_late_favorite_stop(
-                    exit_plan, bool(pos.get("dryRun", True)), slug, reason="momentum_stop_loss")
+        # 2026-09-29：中段動能＝不補腿、不走 market_bid_above_model_value 提早出場
+        # （實測 20:11:01 進場後 0.8 秒就被掃出場）。出場條件與模擬盤完全一致：先停利、再停損。
+        tp_plan, stop_plan = _momentum_exit_plans(pos, up_book, down_book)
+        if tp_plan:
+            await _close_late_favorite_take_profit(tp_plan, bool(pos.get("dryRun", True)), slug)
+            return
+        if stop_plan:
+            await _close_late_favorite_stop(
+                stop_plan, bool(pos.get("dryRun", True)), slug, reason="momentum_stop_loss")
         return
     if pos.get("strategy") == "late_favorite":
         tp_plan = _late_favorite_take_profit_plan(pos, up_book, down_book)
@@ -3434,10 +3472,15 @@ def _on_ws_tick_sync_impl(token_id: str, session: aiohttp.ClientSession, decisio
     if pos.get("strategy") == "wallet_follow":
         return
     if pos.get("strategy") == "open_momentum":
-        # 2026-09-29：中段動能＝抱到結算，不補腿。DRY-RUN 實測 20:31:42 進場、20:32:07 就被
-        # 這條路的補腿接走（「第二腿 Down limit=$0.400」）——輪詢路徑已經擋了，WS 路徑漏了。
-        # 停損（若變體有設）刻意留給 3 秒輪詢路徑，理由同本檔既有註解：WS 即時評估拿到的是
-        # 薄訂單簿瞬間價，用高頻率採樣閾值容易把雜訊當訊號。
+        # 2026-09-29：不補腿（實測 20:31:42 進場、20:32:07 就被這條路的補腿接走）。
+        # 停利／停損比照 late_favorite 也走 WS 快速路徑，對齊模擬盤「每個 tick 都檢查」。
+        tp_plan, stop_plan = _momentum_exit_plans(pos, up_book, down_book)
+        if tp_plan or stop_plan:
+            _ws_action_in_flight["v"] = True
+            asyncio.get_running_loop().create_task(
+                _run_ws_momentum_exit("take_profit" if tp_plan else "stop",
+                                      bool(pos.get("dryRun", True)), slug, decision_lock)
+            )
         return
     if pos.get("strategy") == "late_favorite":
         tp_plan = _late_favorite_take_profit_plan(pos, up_book, down_book)
@@ -3581,15 +3624,21 @@ async def _run_ws_late_favorite_entry(
             save_live_state()
 
 
-def _late_favorite_take_profit_plan(pos: dict, up_book: dict, down_book: dict) -> dict | None:
+def _late_favorite_take_profit_plan(pos: dict, up_book: dict, down_book: dict,
+                                   take_profit_price: float | None = None) -> dict | None:
     """獲利了結：持有腿 best bid >= LATE_FAVORITE_TAKE_PROFIT_PRICE 就回傳保守賣出計畫（FOK 限價 bid − 1 tick，
-    正常會成交在 best bid）。"""
-    if LATE_FAVORITE_TAKE_PROFIT_PRICE is None:
+    正常會成交在 best bid）。
+
+    2026-09-29：多了 take_profit_price 參數，給中段動能用（在呼叫時才讀變體的
+    favoriteTakeProfitPrice，對齊模擬盤）。沒傳的舊呼叫端行為完全不變。"""
+    if take_profit_price is None:
+        take_profit_price = LATE_FAVORITE_TAKE_PROFIT_PRICE
+    if take_profit_price is None:
         return None
     held_book = up_book if pos["side"] == "Up" else down_book
     bids = held_book.get("bids") or []
     best_bid = max(float(b["price"]) for b in bids) if bids else None
-    if best_bid is None or best_bid < float(LATE_FAVORITE_TAKE_PROFIT_PRICE):
+    if best_bid is None or best_bid < float(take_profit_price):
         return None
     if not _live_direction_book_is_fresh(pos["side"], held_book):
         return None
@@ -3615,13 +3664,22 @@ async def _close_late_favorite_take_profit(exit_plan: dict, dry_run: bool, slug:
     await _close_position(exit_plan, dry_run, "favorite_take_profit")
 
 
-def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict, stop_price: float | None = None) -> dict | None:
+_STOP_USD_UNSET = object()
+
+
+def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict, stop_price: float | None = None,
+                             stop_usd=_STOP_USD_UNSET) -> dict | None:
     """持有腿保守可賣價 <= 停損價就回傳賣出計畫（預設用 LATE_FAVORITE_STOP_LOSS_PRICE；
-    方向性單腿傳 LATE_DIRECTION_STOP_LOSS_PRICE）。"""
-    stop_usd = None
-    if stop_price is None:
+    方向性單腿傳 LATE_DIRECTION_STOP_LOSS_PRICE）。
+
+    2026-09-29：多了 stop_usd 參數，給中段動能用——它的停損是體檢調參寫進變體的
+    favoriteStopLossUsd，必須在呼叫時才讀（模擬盤每 5 秒熱載入覆寫），不能用 import 時的快照。
+    沒傳 stop_usd 的舊呼叫端行為完全不變。"""
+    if stop_price is None and stop_usd is _STOP_USD_UNSET:
         stop_price = LATE_FAVORITE_STOP_LOSS_PRICE
         stop_usd = LATE_FAVORITE_STOP_LOSS_USD
+    elif stop_usd is _STOP_USD_UNSET:
+        stop_usd = None          # 明確傳 stop_price 的方向性呼叫端：只看價格，維持原行為
     if stop_price is None and stop_usd is None:
         return None
     held_book = up_book if pos["side"] == "Up" else down_book
@@ -3676,6 +3734,22 @@ async def _close_late_favorite_stop(exit_plan: dict, dry_run: bool, slug: str, r
         selectedSide=exit_plan["side"], exitLimitPrice=exit_plan["limitPrice"], stopLossPrice=stop_price,
     )
     await _close_position(exit_plan, dry_run, reason)
+
+
+async def _run_ws_momentum_exit(kind: str, dry_run: bool, slug: str, decision_lock: asyncio.Lock) -> None:
+    """中段動能的 WS 出場執行器。不能重用 _run_ws_late_favorite_* ——那兩支硬性要求
+    strategy == "late_favorite"，動能部位會被默默擋掉；而且它們重算時用的是 late_favorite 的
+    模組常數，不是動能該讀的變體欄位。這裡一律用 _momentum_exit_plans 以最新 book 重算。"""
+    _ws_action_in_flight["v"] = False
+    async with decision_lock:
+        pos = live_state.get("position")
+        if not pos or pos.get("strategy") != "open_momentum" or pos.get("windowSlug") != slug:
+            return
+        tp, sp = _momentum_exit_plans(pos, sim.state.get("upBook") or {}, sim.state.get("downBook") or {})
+        if kind == "take_profit" and tp:
+            await _close_late_favorite_take_profit(tp, dry_run, slug)
+        elif kind == "stop" and sp:
+            await _close_late_favorite_stop(sp, dry_run, slug, reason="momentum_stop_loss")
 
 
 async def _run_ws_late_favorite_take_profit(exit_plan: dict, dry_run: bool, slug: str, decision_lock: asyncio.Lock) -> None:

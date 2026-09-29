@@ -346,8 +346,14 @@ function onData(d){
       (momOn ? ` ・ 動能進場 T+${Number(cfg.openMomentumMinElapsed||0).toFixed(0)}～${Number(cfg.openMomentumMaxElapsed||0).toFixed(0)}s`+
                ` ・ |最近 1 分鐘動能| ≥ ${Number(cfg.openMomentumMinMovePct||0)}%`+
                ` ・ 買價 $${Number(cfg.openMomentumMinPrice||0).toFixed(2)}～$${Number(cfg.openMomentumMaxPrice||0).toFixed(2)}`+
+               (typeof cfg.openMomentumTakeProfitPrice==='number'
+                 ? ` ・ 停利 bid ≥ $${cfg.openMomentumTakeProfitPrice.toFixed(2)}` : '')+
                (typeof cfg.openMomentumStopLossPrice==='number'
-                 ? ` ・ 停損 $${cfg.openMomentumStopLossPrice.toFixed(2)}` : ' ・ 不停損') : '')+
+                 ? ` ・ 停損 $${cfg.openMomentumStopLossPrice.toFixed(2)}` : '')+
+               (typeof cfg.openMomentumStopLossUsd==='number'
+                 ? ` ・ 金額停損 虧損 ≥ $${cfg.openMomentumStopLossUsd.toFixed(2)}` : '')+
+               ((typeof cfg.openMomentumStopLossPrice!=='number' && typeof cfg.openMomentumStopLossUsd!=='number')
+                 ? ' ・ 不停損' : '') : '')+
       (favOn ? ` ・ 領先方買價 $${Number(cfg.lateFavoriteMinPrice||0).toFixed(2)}～$${Number(cfg.lateFavoriteMaxPrice||0).toFixed(2)}`+
                (typeof cfg.lateFavoriteStopLossPrice==='number' ? ` ・ 停損 $${cfg.lateFavoriteStopLossPrice.toFixed(2)}` : ' ・ 不停損')+
                (typeof cfg.lateFavoriteTakeProfitPrice==='number' ? ` ・ 獲利了結 bid ≥ $${cfg.lateFavoriteTakeProfitPrice.toFixed(2)}` : '') : '')+
