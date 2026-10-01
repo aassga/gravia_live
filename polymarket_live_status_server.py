@@ -143,8 +143,11 @@ def _dry_run_stats(state: dict) -> dict:
     那邊排除 DRY-RUN 是對的（2026-09-14 的決定），這裡不去動它。
     只算已結算的（有 exitTime），還抱著的部位不計入——跟真實那邊「不含未平倉部位」一致。
     """
+    # 2026-10-01：只算目前這個變體的。把不同策略的 DRY-RUN 損益混在一個數字裡會誤導，
+    # 而且現金基礎（_dry_run_cash）同樣是按變體隔離的，兩邊要一致。
     trades = [t for t in (state.get("trades") or [])
-              if t.get("dryRun", False) and t.get("exitTime")]
+              if t.get("dryRun", False) and t.get("exitTime")
+              and t.get("variantId") == strategy.LIVE_VARIANT_ID]
     if not trades:
         return {"dryRunTradeCount": 0, "dryRunTotalPnl": None, "dryRunWinRatePct": None,
                 "dryRunRoiPct": None, "dryRunStakeTotal": None, "dryRunFirstAt": None,

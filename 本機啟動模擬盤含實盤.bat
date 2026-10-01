@@ -38,10 +38,13 @@ echo  Config changes (variants / disabled list) trigger an auto-restart.
 echo.
 
 rem Read-only live #1 status server in its own window (never places orders).
-rem Use start's /d switch for the working directory: nesting quotes inside the
-rem command string ("cd /d "%~dp0" && ...") breaks cmd's parsing and the child
-rem only receives a fragment of the command line (hit this on 2026-09-30).
-start "Gravia live1 status 8767" /d "%~dp0" py polymarket_live_status_server.py
+rem Two start-related traps already hit here, hence the plain form below:
+rem   1) nesting quotes in the command ("cd /d "%~dp0" && ...") breaks cmd's
+rem      parsing and the child gets only a fragment (2026-09-30).
+rem   2) /d "%~dp0" fails because %~dp0 ends with a backslash, so \" swallows
+rem      the closing quote and the window never opens (2026-10-01).
+rem The script already did cd /d "%~dp0" above, so start inherits the right cwd.
+start "Gravia live1 status 8767" py polymarket_live_status_server.py
 
 :loop
 echo [%date% %time%] starting sim + live1 ...

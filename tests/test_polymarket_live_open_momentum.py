@@ -356,14 +356,14 @@ class DryRunCompoundingTests(unittest.TestCase):
 
     def test_cash_grows_with_realized_pnl(self):
         state = {"trades": [
-            {"dryRun": True, "exitTime": 1.0, "pnlEstimate": 10.0},
-            {"dryRun": True, "exitTime": 2.0, "pnlEstimate": -3.0},
+            {"dryRun": True, "exitTime": 1.0, "pnlEstimate": 10.0, "variantId": strategy.LIVE_VARIANT_ID},
+            {"dryRun": True, "exitTime": 2.0, "pnlEstimate": -3.0, "variantId": strategy.LIVE_VARIANT_ID},
         ], "position": None, "pendingSettlements": []}
         with mock.patch.object(strategy, "live_state", state):
             self.assertAlmostEqual(strategy._dry_run_cash(), strategy.DRY_RUN_BALANCE_USD + 7.0)
 
     def test_real_trades_do_not_affect_dry_run_cash(self):
-        state = {"trades": [{"dryRun": False, "exitTime": 1.0, "pnlEstimate": 99.0}],
+        state = {"trades": [{"dryRun": False, "exitTime": 1.0, "pnlEstimate": 99.0, "variantId": strategy.LIVE_VARIANT_ID}],
                  "position": None, "pendingSettlements": []}
         with mock.patch.object(strategy, "live_state", state):
             self.assertAlmostEqual(strategy._dry_run_cash(), strategy.DRY_RUN_BALANCE_USD)
@@ -375,8 +375,17 @@ class DryRunCompoundingTests(unittest.TestCase):
             state["position"] = {"dryRun": True}
             self.assertAlmostEqual(strategy._dry_run_cash(), strategy.DRY_RUN_BALANCE_USD - 20.0)
 
+
+    def test_other_variants_pnl_is_not_inherited(self):
+        """換策略時新策略必須從起始本金開始，不繼承舊策略的盈虧。"""
+        state = {"trades": [
+            {"dryRun": True, "exitTime": 1.0, "pnlEstimate": -93.0, "variantId": "old-strategy"},
+        ], "position": None, "pendingSettlements": []}
+        with mock.patch.object(strategy, "live_state", state):
+            self.assertAlmostEqual(strategy._dry_run_cash(), strategy.DRY_RUN_BALANCE_USD)
+
     def test_never_negative(self):
-        state = {"trades": [{"dryRun": True, "exitTime": 1.0, "pnlEstimate": -9999.0}],
+        state = {"trades": [{"dryRun": True, "exitTime": 1.0, "pnlEstimate": -9999.0, "variantId": strategy.LIVE_VARIANT_ID}],
                  "position": None, "pendingSettlements": []}
         with mock.patch.object(strategy, "live_state", state):
             self.assertEqual(strategy._dry_run_cash(), 0.0)

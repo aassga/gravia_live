@@ -10,9 +10,12 @@ import unittest
 import polymarket_live_status_server as status
 
 
-def _trade(pnl, stake=10.0, fees=0.3, dry=True, exit_time=1000.0):
+def _trade(pnl, stake=10.0, fees=0.3, dry=True, exit_time=1000.0, variant=None):
+    """variantId 預設填目前的實盤變體。2026-10-01 起統計只算目前這個變體的交易，
+    所以替身一定要帶 variantId，否則會被篩掉。"""
     return {"pnlEstimate": pnl, "stakeUsd": stake, "feesEstimate": fees,
-            "dryRun": dry, "exitTime": exit_time}
+            "dryRun": dry, "exitTime": exit_time,
+            "variantId": variant if variant is not None else status.strategy.LIVE_VARIANT_ID}
 
 
 class DryRunStatsTests(unittest.TestCase):
@@ -65,6 +68,28 @@ class RealStatsAreUnaffectedTests(unittest.TestCase):
         state = {"trades": [_trade(5.0), _trade(-3.0), _trade(7.0, dry=False), _trade(-1.0, dry=False)]}
         status._backfill_win_loss(state)
         self.assertEqual((state["winningTrades"], state["losingTrades"]), (1, 1))   # 只有真實那兩筆
+
+
+class DryRunStatsAreScopedToCurrentVariantTests(unittest.TestCase):
+    """2026-10-01：換策略時不能繼承舊策略的損益。
+
+    實測事故：實盤①從 doge 換成 sol-15m 後，現金只剩 $7.01（DOGE 虧掉 $92.99），
+    15% 預算 $1.05 在 ask 0.45~0.60 只買得起 1~2 股、低於 $1 最低下單金額，
+    於是模擬盤連三個窗口進場獲利、實盤一筆都沒進。
+    """
+
+    def test_other_variants_are_excluded(self):
+        r = status._dry_run_stats({"trades": [
+            _trade(5.0),
+            _trade(-93.0, variant="some-other-variant"),   # 舊策略的虧損
+        ]})
+        self.assertEqual(r["dryRunTradeCount"], 1)
+        self.assertAlmostEqual(r["dryRunTotalPnl"], 5.0)
+
+    def test_trades_without_variant_id_are_excluded(self):
+        """舊格式（沒有 variantId）的交易不能算進來——無法確定它屬於哪個策略。"""
+        r = status._dry_run_stats({"trades": [_trade(5.0, variant=False) | {"variantId": None}]})
+        self.assertEqual(r["dryRunTradeCount"], 0)
 
 
 if __name__ == "__main__":

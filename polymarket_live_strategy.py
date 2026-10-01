@@ -1788,16 +1788,24 @@ def _dry_run_cash() -> float:
         起始本金 + 已結算損益 − 還在場的部位成本
     2026-09-29 修：原本固定回傳 DRY_RUN_BALANCE_USD，所以每注永遠是 15% × 100，
     不會隨獲利成長——但模擬盤是複利的，看板也寫著「複利」。實測 24 筆累計 +13.36，
-    下注卻一直停在 $15 附近。"""
+    下注卻一直停在 $15 附近。
+
+    2026-10-01 修：只計算「目前這個變體」的損益。模擬盤的 compute_cash_and_portfolio 是
+    每個變體各自一份現金，實盤原本把所有變體的 DRY-RUN 損益加總，所以換策略時新策略會
+    繼承舊策略的盈虧。實測：換成 sol-15m 之後現金剩 $7.01（DOGE 虧掉 $92.99），
+    預算 15% 只有 $1.05，在 ask 0.45~0.60 只買得起 1~2 股、低於 $1 最低下單金額，
+    於是 _buy_plan 一律回 None、診斷記成 insufficient_ask_depth——模擬盤同一個窗口
+    連三次進場獲利，實盤一筆都沒進。"""
     realized = sum(float(t.get("pnlEstimate") or 0.0)
                    for t in (live_state.get("trades") or [])
-                   if t.get("dryRun") and t.get("exitTime"))
+                   if t.get("dryRun") and t.get("exitTime")
+                   and t.get("variantId") == LIVE_VARIANT_ID)
     staked = 0.0
     own = live_state.get("position")
-    if own and own.get("dryRun", True):
+    if own and own.get("dryRun", True) and own.get("variantId", LIVE_VARIANT_ID) == LIVE_VARIANT_ID:
         staked += _position_paid_cost(own)
     for q in (live_state.get("pendingSettlements") or []):
-        if q.get("dryRun", True):
+        if q.get("dryRun", True) and q.get("variantId", LIVE_VARIANT_ID) == LIVE_VARIANT_ID:
             staked += _position_paid_cost(q)
     return max(0.0, DRY_RUN_BALANCE_USD + realized - staked)
 
