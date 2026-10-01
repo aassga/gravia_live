@@ -838,10 +838,13 @@ def _mid_momentum_hold_variant(asset: dict) -> dict:
         "id": f"{asset['id']}-mid-momentum-hold", "assetId": asset["id"],
         "label": f"{asset['label']} 中段動能方向性（T+{60 * k:.0f}～{120 * k:.0f}s 最近 1 分鐘動能、0.45～0.60、抱到結算）",
         "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "openMomentum": True,
-        # 2026-09-29 依使用者要求：只開放 DOGE 這一組給實盤①選用（其餘資產維持純模擬）。
-        # simOnly=False 是解除「禁止真實下單」那道閘（見 polymarket_live_strategy 的 import 檢查）；
-        # 這組沒有停損、抱到結算，實測最大回撤 68.7%，只在 DRY-RUN 下驗證行為。
-        "simOnly": asset["id"] != "doge",
+        # 2026-09-29／2026-10-01 依使用者要求：開放給實盤①選用的資產（其餘維持純模擬）。
+        # simOnly=False 是解除「禁止真實下單」那道閘（見 polymarket_live_strategy 的 import 檢查）。
+        # 這一族都是「抱到結算、不停損」，單筆波動極大，只在 DRY-RUN 下驗證行為：
+        #   doge    289 筆 −$85.40　每筆 −0.295 ± 1.489（t = −0.20）回撤 97.2%
+        #   sol-15m  64 筆 +$73.57　每筆 +1.150 ± 2.519（t = +0.46）回撤 54.5%
+        # 兩組的標準誤都遠大於平均，統計上都還分不出是否有正期望。
+        "simOnly": asset["id"] not in ("doge", "sol-15m"),
         "openMinElapsedSeconds": 60.0 * k, "openMaxElapsedSeconds": 120.0 * k,
         "openMinPrice": 0.45, "openMaxPrice": 0.60, "openMinMovePct": 0.02,
     }

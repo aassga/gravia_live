@@ -150,10 +150,18 @@ class OpenMomentumWiringTests(unittest.TestCase):
 class SimOnlyGateTests(unittest.TestCase):
     """simOnly 是「禁止真實下單」那道閘：只有 DOGE 這一組解除，其餘資產維持純模擬。"""
 
-    def test_only_doge_is_opened_for_live(self):
-        opened = [v["id"] for v in strategy.sim.AB_VARIANTS
-                  if v["id"].endswith("mid-momentum-hold") and not v.get("simOnly")]
-        self.assertEqual(opened, ["doge-mid-momentum-hold"])
+    def test_only_the_approved_assets_are_opened_for_live(self):
+        """2026-10-01：實盤①改用 sol-15m，所以開放清單是 doge ＋ sol-15m。
+
+        直接測變體工廠的閘門，不依賴 POLY_SIM_ASSETS 裡有哪些資產 —— 把 sol-15m 加進測試
+        資產清單會改變其他測試斷言的變體集合（試過，弄壞 4 個測試）。
+        simOnly 是「禁止真實下單」的唯一防線，所以未經核可的資產必須維持 True。"""
+        for asset_id, expect_sim_only in (("doge", False), ("sol-15m", False),
+                                          ("btc", True), ("eth-15m", True), ("sol", True)):
+            v = strategy.sim._mid_momentum_hold_variant(
+                {"id": asset_id, "label": asset_id.upper(), "windowSeconds": 900})
+            with self.subTest(asset=asset_id):
+                self.assertEqual(bool(v["simOnly"]), expect_sim_only)
 
     def test_doge_variant_carries_the_expected_parameters(self):
         v = strategy.sim.AB_VARIANT_BY_ID["doge-mid-momentum-hold"]

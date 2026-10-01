@@ -10,6 +10,11 @@ os.environ["POLY_SIM_ASSETS"] = os.environ.get("POLY_SIM_ASSETS_TEST", "btc,btc-
 os.environ.pop("POLY_SIM_AUTO_VARIANTS_FILE", None)
 os.environ["POLY_SIM_AUTO_VARIANTS_FILE"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no_such_auto_variants.json")
 os.environ["POLY_SIM_VARIANT_OVERRIDES_FILE"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no_such_overrides.json")
+# 2026-10-01：停用清單檔也要隔離。自動變體檔與覆寫檔早就指向不存在的路徑了，但
+# sim_disabled_variants.json 漏了——操作者停用任何變體（例如依要求移除 0 成交的跟單變體）
+# 之後，斷言那些變體存在的測試就會 KeyError。測試驗的是變體定義與邏輯，不該綁在
+# 這台機器此刻停用了什麼。
+os.environ["POLY_SIM_DISABLED_VARIANTS_FILE"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no_such_disabled.json")
 
 # 2026-09-29：實盤注碼的兩個上限也要隔離。load_dotenv() 是 override=False，所以這裡先設定就會
 # 勝過 .env；否則操作者改 .env（例如依要求移除單注上限／現金保留）會讓 14 個實盤測試與 3 個
