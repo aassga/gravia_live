@@ -438,6 +438,10 @@ def main() -> None:
 
     touched = summary["changed"] + summary["killed"]
     if touched:
+        # 2026-09-30：備份目錄不存在時要先建。reset_variant_records 有 makedirs，這條路徑漏了，
+        # 所以在乾淨的機器上（本機剛接手 VPS 的資料時）分析全部跑完卻在寫備份時 FileNotFoundError，
+        # 一項變更都沒套用、報告也沒產生（排程結果碼 1 就是這個）。
+        os.makedirs(BACKUP_DIR, exist_ok=True)
         for path, data in ((AUTO_FILE, auto), (DISABLED_FILE, disabled), (OVERRIDES_FILE, overrides)):
             shutil.copy(path, os.path.join(BACKUP_DIR, f"{os.path.basename(path)}.doctor.{int(time.time())}")) if os.path.exists(path) else None
             _save(path, data)

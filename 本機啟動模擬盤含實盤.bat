@@ -23,8 +23,11 @@ echo  Live1 dashboard: web\polymarket_live.html   (port 8767)
 echo  Config changes (variants / disabled list) trigger an auto-restart.
 echo.
 
-rem Read-only live #1 status server in its own window (never places orders)
-start "Gravia live1 status 8767" cmd /c "cd /d "%~dp0" && py polymarket_live_status_server.py"
+rem Read-only live #1 status server in its own window (never places orders).
+rem Use start's /d switch for the working directory: nesting quotes inside the
+rem command string ("cd /d "%~dp0" && ...") breaks cmd's parsing and the child
+rem only receives a fragment of the command line (hit this on 2026-09-30).
+start "Gravia live1 status 8767" /d "%~dp0" py polymarket_live_status_server.py
 
 :loop
 echo [%date% %time%] starting sim + live1 ...
