@@ -11,6 +11,20 @@ rem Body kept ASCII on purpose: Chinese text inside a .bat gets mangled by cp950
 rem and breaks command parsing (hit this before). Chinese stays in the filename.
 rem ---------------------------------------------------------------------------
 
+rem 2026-10-01: refuse to start if another sim already owns port 8766, so the two
+rem launchers can never silently override each other (on 09-30 the sim-only
+rem launcher's loop kept replacing this one and live #1 was down for 13.5h
+rem without any visible sign on the sim dashboard).
+netstat -ano | findstr ":8766" | findstr "LISTENING" >nul 2>&1
+if not errorlevel 1 (
+  echo.
+  echo  [!] Port 8766 is already in use - a sim is already running.
+  echo      Close that window first if you want to run this launcher instead.
+  echo.
+  pause
+  exit /b 1
+)
+
 set POLY_SIM_SELF_RESTART=true
 set PYTHONUNBUFFERED=1
 set PYTHONIOENCODING=utf-8
