@@ -16,6 +16,10 @@ os.environ["POLY_SIM_VARIANT_OVERRIDES_FILE"] = os.path.join(os.path.dirname(os.
 # 這台機器此刻停用了什麼。
 os.environ["POLY_SIM_DISABLED_VARIANTS_FILE"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no_such_disabled.json")
 
+# 2026-10-03：DRY-RUN 起始本金也要隔離。操作者把它從 100 提高到 500（避免帳戶觸底後
+# 永久停擺）之後，斷言「預設是 100」的測試就紅了。測試固定用程式預設值。
+os.environ["POLY_DRY_RUN_BALANCE_USD"] = os.environ.get("POLY_DRY_RUN_BALANCE_USD_TEST", "100")
+
 # 2026-09-29：實盤注碼的兩個上限也要隔離。load_dotenv() 是 override=False，所以這裡先設定就會
 # 勝過 .env；否則操作者改 .env（例如依要求移除單注上限／現金保留）會讓 14 個實盤測試與 3 個
 # 「模擬盤鏡像實盤注碼」測試一起紅掉——那些測試驗的是換算邏輯，不該綁在機器的執行時設定上。

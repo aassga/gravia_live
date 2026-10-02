@@ -126,7 +126,10 @@ class OpenMomentumPlanTests(unittest.TestCase):
 class OpenMomentumWiringTests(unittest.TestCase):
     """設定與接線：確認閘門互斥、dry-run 預設、變體參數來源。"""
 
-    def test_dry_run_balance_defaults_to_100_usdc(self):
+    def test_dry_run_balance_comes_from_config_with_a_100_default(self):
+        """測試環境由 conftest 固定成 100（程式預設值）。實際運行時是 .env 決定：
+        2026-10-03 起操作者設 500，因為 $100 只能承受 −80% 回撤，而帳戶虧到
+        預算買不起市場最低 5 股之後就永久停擺。"""
         self.assertEqual(strategy.DRY_RUN_BALANCE_USD, 100.0)
 
     def test_single_leg_path_is_mutually_exclusive_with_momentum(self):
