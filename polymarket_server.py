@@ -1561,6 +1561,11 @@ def _get_sim_db() -> sqlite3.Connection:
                 PRIMARY KEY(run_id, variant_id, window_slug)
             );
             CREATE INDEX IF NOT EXISTS idx_sim_quotes_asset_ts ON sim_quotes(asset_id, ts);
+            -- 2026-10-04：體檢調參的 bid_path() 查的是 asset_id + window_slug + ts。
+            -- 只有 (asset_id, ts) 時它會從進場時間往後掃完該資產的所有報價再濾 window_slug：
+            -- 實測舊交易每次 78~87 ms、只回傳 0~52 列，21,506 筆成交推估約 28 分鐘，
+            -- 健檢因此跑不完（10/03 兩次都在分析階段被時限/session 中斷）。
+            CREATE INDEX IF NOT EXISTS idx_sim_quotes_asset_slug_ts ON sim_quotes(asset_id, window_slug, ts);
             CREATE INDEX IF NOT EXISTS idx_sim_trades_variant_time ON sim_trades(variant_id, exit_time);
             CREATE INDEX IF NOT EXISTS idx_sim_window_diag_variant_time
                 ON sim_window_diagnostics(variant_id, last_seen);

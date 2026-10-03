@@ -423,6 +423,20 @@ def main() -> None:
     finally:
         db.close()
 
+    # 2026-10-04：寫入階段之前先把 WAL 收掉。模擬盤每小時寫約一萬筆報價，WAL 實測在
+    # 19 小時內長到 882 MB（主檔才 449 MB）；在那個狀態下 reset_variant_records 另開
+    # 寫入連線會拋 sqlite3.OperationalError: disk I/O error，導致變更半套用（設定檔已寫、
+    # 紀錄只清了一部分、報告沒產生、模擬盤沒重啟）。integrity_check 事後是 ok，所以不是
+    # 資料損壞，單純是 WAL 太大。checkpoint 實測 0.1 秒，很便宜。
+    try:
+        _ck = sqlite3.connect(DB_PATH, timeout=180)
+        _ck.execute("PRAGMA busy_timeout=180000")
+        _ck.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        _ck.commit()
+        _ck.close()
+    except sqlite3.Error as exc:
+        log.warning(f"寫入前的 WAL checkpoint 失敗（繼續嘗試套用）：{exc}")
+
     auto = [s for s in (_load(AUTO_FILE, []) or []) if isinstance(s, dict)]
     disabled = [str(x) for x in (_load(DISABLED_FILE, []) or []) if x]
     overrides = _load(OVERRIDES_FILE, {}) or {}
