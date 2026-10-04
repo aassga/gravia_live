@@ -317,6 +317,13 @@ ASSET_CATALOG = [
     {"id": "eth",     "label": "ETH MM",   "slugPrefix": "eth-updown-5m-",  "binanceSymbol": "ETHUSDT", "windowSeconds": 300, "marketMakerOnly": True},
     {"id": "eth-alt", "label": "ETH",      "slugPrefix": "eth-updown-5m-",  "binanceSymbol": "ETHUSDT", "windowSeconds": 300},
     {"id": "sol",     "label": "SOL",      "slugPrefix": "sol-updown-5m-",  "binanceSymbol": "SOLUSDT", "windowSeconds": 300},
+    # 2026-10-04：15m 的資產原本只有 btc-15m 寫在目錄裡，eth-15m／xrp-15m／doge-15m／sol-15m
+    # 都是靠 sim_auto_variants.json 自動補登的。這代表健檢或市場掃描一旦調整自動變體、
+    # 讓某個資產不再被任何自動變體引用，那個資產就會從目錄消失——實盤①指著 sol-15m 時
+    # 就是這樣整個崩潰迴圈（KeyError: 'sol-15m'，每 5 秒重啟一次）。
+    # 實盤用得到的資產必須寫死在目錄裡，不能依賴自動變體。
+    # 註：列在目錄 ≠ 啟用；仍要 POLY_SIM_ASSETS 選到或被自動變體帶進來才會跑。
+    {"id": "sol-15m", "label": "SOL 15m",  "slugPrefix": "sol-updown-15m-", "binanceSymbol": "SOLUSDT", "windowSeconds": 900},
     {"id": "xrp",     "label": "XRP",      "slugPrefix": "xrp-updown-5m-",  "binanceSymbol": "XRPUSDT", "windowSeconds": 300},
     {"id": "bnb",     "label": "BNB",      "slugPrefix": "bnb-updown-5m-",  "binanceSymbol": "BNBUSDT", "windowSeconds": 300},
     {"id": "doge",    "label": "DOGE",     "slugPrefix": "doge-updown-5m-", "binanceSymbol": "DOGEUSDT", "windowSeconds": 300},

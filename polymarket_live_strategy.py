@@ -111,6 +111,16 @@ async def _warm_order_executors() -> None:
 # id（例如 "btc-15m"），評估其他窗口在真實下單時表不表現得更好，不用另外複製一份程式。
 LIVE_ASSET_ID = os.environ.get("POLY_LIVE_ASSET_ID", "btc")
 if LIVE_ASSET_ID != "btc":
+    # 2026-10-04：原本直接下標，資產不存在時丟出的是裸 KeyError: 'sol-15m'，而主進程
+    # 會每 5 秒重啟一次形成崩潰迴圈，從訊息完全看不出要怎麼修。實際發生過：sol-15m 當時
+    # 只靠 sim_auto_variants.json 自動補登，健檢調整自動變體後那個資產就從目錄消失了。
+    if LIVE_ASSET_ID not in sim.markets_state:
+        raise RuntimeError(
+            f"POLY_LIVE_ASSET_ID={LIVE_ASSET_ID} 不在模擬盤的資產清單裡"
+            f"（目前有：{', '.join(sorted(sim.markets_state))}）。"
+            " 請確認它同時出現在 polymarket_server.ASSET_CATALOG 與 POLY_SIM_ASSETS；"
+            " 只靠 sim_auto_variants.json 帶進來的資產會在健檢／掃描調整後消失。"
+        )
     sim.state = sim.markets_state[LIVE_ASSET_ID]  # 重新指向對應資產的市場狀態（見 sim.state 的定義）
 
 # 真實版可用環境變數選擇模擬盤的同資產策略，讓兩邊共用同一組策略定義。
