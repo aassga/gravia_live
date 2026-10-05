@@ -158,3 +158,52 @@ class DoctorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GrossEdgeTests(unittest.TestCase):
+    """2026-10-06：健檢要看毛優勢（扣手續費之前）。
+
+    手續費 = 股數 × 費率 × price × (1 − price)，在 0.50 最貴、往兩端急降。
+    實測全盤 20,046 筆：手續費佔總虧損 65%；73 組裡有 19 組毛損益為正——方向判斷有優勢，
+    只是進場價選在高費率區被吃光。對這種變體判死會丟掉有效訊號，正確處理是改進場價區間。
+    """
+
+    def _rec(self, gross_per_trade, fee_per_trade, n=60, se=0.01):
+        """直接組一個 diagnose 會產出的 gross 區塊。"""
+        return {"total": gross_per_trade * n, "perTrade": gross_per_trade, "se": se,
+                "feeTotal": fee_per_trade * n, "feePerTrade": fee_per_trade,
+                "edgeIsReal": gross_per_trade - doctor.GROSS_SE_MARGIN * se > 0}
+
+    def test_gross_margin_constant_exists(self):
+        self.assertGreaterEqual(doctor.GROSS_SE_MARGIN, 1.0)
+
+    def test_edge_is_real_needs_to_beat_its_own_noise(self):
+        # 毛每筆 +0.50、標準誤 0.01 → 明確有優勢
+        self.assertTrue(self._rec(0.50, 0.10, se=0.01)["edgeIsReal"])
+        # 毛每筆 +0.50、標準誤 2.00 → 雜訊，不算有優勢
+        self.assertFalse(self._rec(0.50, 0.10, se=2.00)["edgeIsReal"])
+        # 毛每筆為負 → 不算
+        self.assertFalse(self._rec(-0.20, 0.10, se=0.01)["edgeIsReal"])
+
+    def test_apply_actions_ignores_feebound(self):
+        """feebound 不能改動任何設定檔——它只是個標記，實際處理要人決定改哪個區間。"""
+        auto = [{"id": "v1", "favoriteStopLossPrice": 0.6}]
+        disabled, overrides = [], {}
+        recs = [{"id": "v1", "action": "feebound", "detail": "毛為正但被手續費吃掉"}]
+        summary = doctor.apply_actions(recs, auto, disabled, overrides)
+        self.assertEqual(summary["changed"], [])
+        self.assertEqual(summary["killed"], [])
+        self.assertEqual(disabled, [])          # 沒有被停用
+        self.assertEqual(overrides, {})         # 沒有被改停損
+        self.assertEqual(auto[0]["favoriteStopLossPrice"], 0.6)
+
+    def test_kill_still_removes_a_variant_with_no_gross_edge(self):
+        """對照組：毛也是負的才該判死——證明上面那個守衛沒有擋錯。"""
+        auto = [{"id": "v2"}]
+        disabled, overrides = [], {"v2": {"favoriteStopLossPrice": 0.5}}
+        summary = doctor.apply_actions([{"id": "v2", "action": "kill", "detail": "負期望"}],
+                                       auto, disabled, overrides)
+        self.assertEqual(summary["killed"], ["v2"])
+        self.assertIn("v2", disabled)
+        self.assertEqual(auto, [])
+        self.assertNotIn("v2", overrides)

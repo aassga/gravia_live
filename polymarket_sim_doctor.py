@@ -50,6 +50,14 @@ TICK = 0.01
 STOP_PRICE_GRID = [round(0.40 + i * TICK, 2) for i in range(int((0.95 - 0.40) / TICK) + 1)]
 USD_STOP_FRACTIONS = [round(0.02 + i * 0.02, 2) for i in range(30)]   # 成本的 2%～60%
 
+# 2026-10-06：手續費是 shares × SIM_TAKER_FEE_RATE × price × (1 − price)，在 0.50 最貴、
+# 往兩端急降。實測全盤 20,046 筆：淨 −$3,141、手續費 −$2,042（佔 65%）、毛 −$1,099，
+# 每筆手續費 0.102 是毛虧損 0.055 的兩倍。73 組（>=50 筆）裡有 19 組毛損益為正——
+# 它們的方向判斷有優勢，只是進場價選在高費率區被吃光（例如 0.45~0.60 的門檻是 3.3%，
+# 而 0.98 只要 0.14%）。對這種變體，正確的處理是改進場價區間，不是判死。
+GROSS_SE_MARGIN = 1.0   # 毛每筆要贏過 0 這麼多個標準誤，才算「確實有優勢」
+
+
 SINGLE_LEG_FLAGS = ("lateFavorite", "openMomentum", "openReversal", "followWallets", "lateUnderdog")
 
 
@@ -343,6 +351,17 @@ def diagnose(variants: list[dict], db: sqlite3.Connection, rid: int) -> list[dic
             items.append({"trade": t, "path": bid_path(db, str(v.get("assetId")), t["windowSlug"], t["side"], float(t["entryTime"]))})
         rec["lossReasons"] = loss_reasons(items)
         rec["winRate"] = round(100 * sum(1 for t in trades if t["pnl"] > 0) / len(trades), 1)
+        # 2026-10-06：毛優勢（扣手續費之前）。成交紀錄本來就有 grossPnl 與 fees 兩個欄位。
+        _gross = [float(t.get("grossPnl") if t.get("grossPnl") is not None
+                        else (t.get("pnl") or 0) + (t.get("fees") or 0)) for t in trades]
+        _fees = [float(t.get("fees") or 0) for t in trades]
+        _gmean, _gse = _stats(_gross)
+        rec["gross"] = {
+            "total": round(sum(_gross), 2), "perTrade": round(_gmean, 4), "se": round(_gse, 4),
+            "feeTotal": round(sum(_fees), 2), "feePerTrade": round(sum(_fees) / len(trades), 4),
+            # 毛每筆減掉 GROSS_SE_MARGIN 個標準誤仍為正 = 這個優勢不是雜訊
+            "edgeIsReal": bool(_gmean - GROSS_SE_MARGIN * _gse > 0),
+        }
         if len(trades) < MIN_TRADES_FOR_EXIT_TUNE:
             rec["action"] = "wait"; rec["detail"] = f"只有 {len(trades)} 筆，未達調參門檻 {MIN_TRADES_FOR_EXIT_TUNE}"
             out.append(rec); continue
@@ -361,9 +380,21 @@ def diagnose(variants: list[dict], db: sqlite3.Connection, rid: int) -> list[dic
             rec["detail"] = (f"停損 {cmp['current']['stopPrice']}／${cmp['current']['stopUsd']} → {b['stopPrice']}／${b['stopUsd']}："
                              f"每筆 {cmp['current']['mean']:+.3f} → {b['mean']:+.3f}（差 {cmp['margin']:+.3f} > 誤差 {cmp['threshold']:.3f}）")
         elif len(trades) >= MIN_TRADES_FOR_KILL and cmp["best"]["mean"] + SE_MARGIN * cmp["best"]["se"] <= 0:
-            rec["action"] = "kill"
-            rec["detail"] = (f"{len(trades)} 筆（可回放 {cmp['usable']}），最佳設定每筆仍 "
-                             f"{cmp['best']['mean']:+.3f}±{cmp['best']['se']:.3f}（負期望）")
+            g = rec["gross"]
+            if g["edgeIsReal"]:
+                # 方向判斷確實有優勢，是手續費把它吃掉的。判死會丟掉一個有效訊號，
+                # 正確的處理是把進場價移出高費率區（費率 ∝ price × (1 − price)）。
+                # apply_actions 只處理 retune／loosen／kill，所以這個動作不會改任何設定。
+                rec["action"] = "feebound"
+                rec["detail"] = (f"{len(trades)} 筆：毛每筆 {g['perTrade']:+.4f}±{g['se']:.4f}（確實有優勢）"
+                                 f"，但手續費每筆 {g['feePerTrade']:.4f} 吃掉它 → 淨 "
+                                 f"{g['perTrade'] - g['feePerTrade']:+.4f}。不判死：應改進場價區間"
+                                 f"（費率 ∝ price×(1−price)，0.50 最貴、0.98 只要約 1/24）")
+            else:
+                rec["action"] = "kill"
+                rec["detail"] = (f"{len(trades)} 筆（可回放 {cmp['usable']}），最佳設定每筆仍 "
+                                 f"{cmp['best']['mean']:+.3f}±{cmp['best']['se']:.3f}（負期望）"
+                                 f"；毛每筆也只有 {g['perTrade']:+.4f}±{g['se']:.4f}")
         else:
             rec["detail"] = f"維持現狀（最佳設定僅多 {cmp['margin']:+.3f}，誤差 {cmp['threshold']:.3f}）"
         out.append(rec)
