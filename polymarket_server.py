@@ -324,6 +324,9 @@ ASSET_CATALOG = [
     # 實盤用得到的資產必須寫死在目錄裡，不能依賴自動變體。
     # 註：列在目錄 ≠ 啟用；仍要 POLY_SIM_ASSETS 選到或被自動變體帶進來才會跑。
     {"id": "sol-15m", "label": "SOL 15m",  "slugPrefix": "sol-updown-15m-", "binanceSymbol": "SOLUSDT", "windowSeconds": 900},
+    # 2026-10-06：實盤①改指 eth-15m-last10-30-092-095，所以 eth-15m 也要寫死在目錄裡，
+    # 理由同上面 sol-15m 那條——只靠自動變體帶進來的資產，會在健檢／掃描調整後消失。
+    {"id": "eth-15m", "label": "ETH 15m",  "slugPrefix": "eth-updown-15m-", "binanceSymbol": "ETHUSDT", "windowSeconds": 900},
     {"id": "xrp",     "label": "XRP",      "slugPrefix": "xrp-updown-5m-",  "binanceSymbol": "XRPUSDT", "windowSeconds": 300},
     {"id": "bnb",     "label": "BNB",      "slugPrefix": "bnb-updown-5m-",  "binanceSymbol": "BNBUSDT", "windowSeconds": 300},
     {"id": "doge",    "label": "DOGE",     "slugPrefix": "doge-updown-5m-", "binanceSymbol": "DOGEUSDT", "windowSeconds": 300},
