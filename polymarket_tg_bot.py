@@ -6,7 +6,7 @@ Telegram 查詢機器人：回報實盤／模擬盤目前狀態與損益。純�
     - 只回應 TG_ALLOWED_USER_IDS 白名單內的 Telegram user id，其他人一律不理。
     - 主動推播（每 15 秒比對一次快照）：「策略停機／恢復」、「REAL↔DRY-RUN 切換」、「新部位」（含 DRY-RUN）；
       結算不推（2026-09-14 依使用者要求），要看用 /trades。
-    - /scan 手動觸發每週市場掃描（polymarket_weekly_scan.py），/report 看最近一次報告摘要。
+    - /report 看最近一次每週市場掃描的報告摘要（排程每週一 12:00 台北）。
 
 環境變數（.env）：
     TG_BOT_TOKEN          @BotFather 給的 token
@@ -190,20 +190,13 @@ HELP_TEXT = (
     "/live — 實盤真實下單開關（REAL ↔ DRY-RUN，按鈕確認後切換並重啟）\n"
     "/strategy — 更換實盤策略（選實盤 → 選模擬盤的買領先方變體 → 確認；不動每注%與 REAL/DRY-RUN）\n"
     "/stake — 改實盤每注 %（選實盤 → 選 5～100% → 確認；或 /stake <實盤編號> <數字>，0.5～100）\n"
-    "/stop — 改模擬盤變體的停損：價格停損（最佳 bid 跌到 X）或金額停損（帳面虧損達 $X）；選單操作，或直接打 /stop <實盤編號|變體id> <值>（例 /stop 1 $2、/stop 3 0.88、/stop 1 0）；有實盤在用同一變體會一起改並重啟\n"
     "/loss — 分析某實盤最近的真實虧損原因（選實盤；或 /loss <實盤編號> [筆數]，預設 5 筆）\n"
-    "/roi — 模擬盤 ROI 排行（各資產前 5、≥10 筆；含打平勝率、1 輸＝幾贏）\n"
-    "/tune — 某模擬盤變體的停損回放（各檔位假停損／淨損益）\n"
-    "/mirror — 模擬盤 vs 實盤同窗口一致性（最近 12h 誰有進誰沒進）\n"
-    "/disable /enable — 停用／啟用模擬盤變體（改停用清單；實盤①空手時重啟主進程）\n"
-    "/reset — 清空某模擬盤變體重記，或實盤頁面全部重製（備份後重設基準）\n"
     "/pnl — 實盤損益、平均每筆、最好／最差、今日統計\n"
     "/trades [n] — 最近 n 筆真單（預設 10）\n"
     "/sim — 模擬盤各組損益\n"
-    "/scan — 選擇要掃描的市場（BTC 5m／15m、ETH、SOL、XRP、其他＝全站探索最多人玩的盤）\n"
-    "/report — 最近一次市場掃描的建議摘要\n"
+    "/report — 最近一次每週市場掃描的建議摘要（排程每週一 12:00 台北）\n"
     "/help — 這份說明\n"
-    "（除了 /live 開關與 /scan 之外都是純查詢；主動推播：停機／恢復、REAL↔DRY-RUN 切換、新部位）"
+    "（只有 /live /strategy /stake 會改設定，其餘純查詢；主動推播：停機／恢復、REAL↔DRY-RUN 切換、新部位、真實虧損、餘額不足）"
 )
 
 
@@ -524,222 +517,6 @@ async def apply_stake(idx: int, pct: float) -> str:
     return f"💰 {inst['name']} 每注 {old}% → {_fmt_pct(pct)}%，服務已重啟，模式 {'REAL' if armed else 'DRY-RUN'}（未變）"
 
 
-# ── 2026-09-20 依使用者要求：TG 上改模擬盤變體的停損；有實盤在用同一變體就一起改 ──────────
-# 模擬盤：寫 sim_variant_overrides.json（主進程每 5 秒熱更新，不用重啟）；實盤：改該實盤 env 的
-# POLY_LIVE_FAVORITE_STOP_LOSS_PRICE 並重啟其服務（有持倉先不重啟，等結算後再按一次）。
-SIM_VARIANT_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_variant_overrides.json")
-STOP_PRESETS = ("0", "0.40", "0.50", "0.60", "0.70", "0.80", "0.90")
-STOP_USD_PRESETS = ("0", "0.5", "1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5", "5.5", "6", "7", "8", "9", "10",
-                    "20", "30", "40", "50", "60", "70", "80", "90", "100")   # 2026-09-22：金額停損（帳面虧損 >= $X 即賣出），0 = 不設
-_STOP_CANDIDATES: dict[str, list[dict]] = {}   # asset_id -> variants
-
-
-def parse_stop_price(text: str) -> float | None:
-    """回傳停損價；'0'／'none' = 不停損（回 0.0）；無效回 None。"""
-    t = str(text).strip().lower()
-    if t in ("0", "none", "off", "不停損"):
-        return 0.0
-    try:
-        v = float(t)
-    except ValueError:
-        return None
-    return v if 0.05 <= v <= 0.95 else None
-
-
-def _stop_txt(stop) -> str:
-    return f"停損 {float(stop):.2f}" if stop else "不停損"
-
-
-def stop_variants(sim: dict) -> dict[str, list[dict]]:
-    """主模擬盤裡的買領先方變體，依資產分組（含 simOnly；停損欄位就是它的現值）。"""
-    out: dict[str, list[dict]] = {}
-    for v in sim.get("abVariants") or []:
-        # 2026-09-21 依使用者要求：所有單腿方向性策略（買領先方／開盤動能／開盤反向／跟單／買便宜邊）都可設停損
-        if any(v.get(f) for f in ("lateFavorite", "openMomentum", "openReversal", "followWallets", "lateUnderdog")):
-            out.setdefault(str(v.get("assetId")), []).append(v)
-    for rows in out.values():
-        rows.sort(key=lambda v: -float(v.get("totalPnl") or 0))
-    return out
-
-
-def parse_stop_usd(text: str) -> float | None:
-    t = str(text).strip().lower()
-    if t in ("0", "none", "off", "不設"):
-        return 0.0
-    try:
-        v = float(t)
-    except ValueError:
-        return None
-    return v if 0.1 <= v <= 1000 else None
-
-
-def _usd_txt(usd) -> str:
-    return f"虧損≥${float(usd):g} 停損" if usd else "不設金額停損"
-
-
-def write_variant_override(vid: str, stop: float, path: str = SIM_VARIANT_OVERRIDES_FILE, key: str = "favoriteStopLossPrice") -> dict:
-    data = {}
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-        except Exception:
-            data = {}
-    data.setdefault(vid, {})[key] = (float(stop) if stop else None)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
-    return data
-
-
-def live_instances_using(vid: str) -> list[int]:
-    return [idx for idx, inst in enumerate(LIVE_INSTANCES) if _read_env_value(inst["env"], "POLY_LIVE_VARIANT_ID") == vid]
-
-
-def stop_asset_keyboard(groups: dict[str, list[dict]], asset_labels: dict[str, str]) -> list[list[dict]]:
-    kb = [[{"text": f"{asset_labels.get(aid, aid)}（{len(rows)} 組）", "callback_data": f"stop:a:{aid}"}] for aid, rows in groups.items()]
-    kb.append([{"text": "取消", "callback_data": "stop:cancel"}])
-    return kb
-
-
-def stop_variant_keyboard(aid: str, rows: list[dict]) -> list[list[dict]]:
-    kb = []
-    for n, v in enumerate(rows):
-        live_mark = "🟢" if live_instances_using(str(v.get("id"))) else ""
-        text = f"{live_mark}{v.get('label')} {_money(v.get('totalPnl'))}/{int(v.get('totalTrades') or 0)}筆"
-        kb.append([{"text": text[:60], "callback_data": f"stop:v:{aid}:{n}"}])
-    kb.append([{"text": "取消", "callback_data": "stop:cancel"}])
-    return kb
-
-
-def stop_value_keyboard(aid: str, n: int, current, current_usd=None) -> list[list[dict]]:
-    cur = f"{float(current):.2f}" if current else "0"
-    btns = [{"text": ("★ " if p == cur else "") + ("不停損" if p == "0" else p), "callback_data": f"stop:s:{aid}:{n}:{p}"} for p in STOP_PRESETS]
-    cur_usd = f"{float(current_usd):g}" if current_usd else "0"
-    usd = [{"text": ("★ " if u == cur_usd else "") + ("不設金額" if u == "0" else f"${u}"), "callback_data": f"stop:m:{aid}:{n}:{u}"} for u in STOP_USD_PRESETS]
-    rows = [btns[:4], btns[4:]] + [usd[i:i + 5] for i in range(0, len(usd), 5)]
-    rows.append([{"text": "取消", "callback_data": "stop:cancel"}])
-    return rows
-
-
-def stop_confirm_keyboard(aid: str, n: int, p: str, kind: str = "price") -> list[list[dict]]:
-    if kind == "usd":
-        return [[{"text": f"✅ 確認改為 {_usd_txt(float(p))}", "callback_data": f"stop:k:{aid}:{n}:{p}"}],
-                [{"text": "取消", "callback_data": "stop:cancel"}]]
-    return [[{"text": f"✅ 確認改為 {_stop_txt(float(p))}", "callback_data": f"stop:c:{aid}:{n}:{p}"}],
-            [{"text": "取消", "callback_data": "stop:cancel"}]]
-
-
-async def send_stop_asset_menu(client: httpx.AsyncClient, chat_id: int) -> None:
-    try:
-        sim = await fetch_snapshot(SIM_WS)
-    except Exception as exc:
-        await tg_send(client, chat_id, f"⚠️ 讀不到模擬盤快照（{exc.__class__.__name__}），稍後再試。"); return
-    groups = stop_variants(sim)
-    if not groups:
-        await tg_send(client, chat_id, "模擬盤目前沒有買領先方變體。"); return
-    _STOP_CANDIDATES.clear(); _STOP_CANDIDATES.update(groups)
-    labels = {a.get("id"): a.get("label") for a in (sim.get("assetList") or [])}
-    try:
-        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": "要改哪個資產的變體停損？",
-                                                        "reply_markup": {"inline_keyboard": stop_asset_keyboard(groups, labels)}})
-    except Exception as exc:
-        log.warning(f"sendMessage(stop asset menu) failed: {exc}")
-
-
-async def send_stop_variant_menu(client: httpx.AsyncClient, chat_id: int, aid: str) -> None:
-    rows = _STOP_CANDIDATES.get(aid) or []
-    if not rows:
-        await tg_send(client, chat_id, "清單已過期，請重新 /stop。"); return
-    try:
-        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": "選變體（🟢＝有實盤正在用，會一起改）：",
-                                                        "reply_markup": {"inline_keyboard": stop_variant_keyboard(aid, rows)}})
-    except Exception as exc:
-        log.warning(f"sendMessage(stop variant menu) failed: {exc}")
-
-
-async def send_stop_value_menu(client: httpx.AsyncClient, chat_id: int, aid: str, n: int) -> None:
-    v = _STOP_CANDIDATES[aid][n]
-    using = [LIVE_INSTANCES[i]["name"] for i in live_instances_using(str(v.get("id")))]
-    text = (f"{v.get('label')}\n目前：{_stop_txt(v.get('favoriteStopLossPrice'))} · {_usd_txt(v.get('favoriteStopLossUsd'))}"
-            + (f"\n使用中的實盤：{'、'.join(using)}（會一起改並重啟）" if using else "")
-            + "\n改為（上兩列＝價格停損：最佳 bid 跌到該價就賣；下兩列＝金額停損：帳面虧損達 $X 就賣）：")
-    try:
-        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": text,
-                                                        "reply_markup": {"inline_keyboard": stop_value_keyboard(aid, n, v.get("favoriteStopLossPrice"), v.get("favoriteStopLossUsd"))}})
-    except Exception as exc:
-        log.warning(f"sendMessage(stop value menu) failed: {exc}")
-
-
-def parse_stop_args(parts: list[str]) -> tuple[str, str, float] | None:
-    """2026-09-22 依使用者要求：/stop 可直接打字。格式 /stop <實盤編號|變體id> <值>；值 '$3'／'3usd' = 金額停損，'0.88' = 價格停損，'0' = 不設。
-    回傳 (target, kind, value) 或 None。"""
-    if len(parts) != 3:
-        return None
-    target, raw = parts[1], parts[2].strip().lower()
-    if raw.startswith("$") or raw.endswith("usd") or raw.endswith("u"):
-        val = parse_stop_usd(raw.lstrip("$").rstrip("usd").rstrip("u") or "0")
-        return (target, "usd", val) if val is not None else None
-    val = parse_stop_price(raw)
-    return (target, "price", val) if val is not None else None
-
-
-async def resolve_stop_target(target: str) -> dict | None:
-    """實盤編號（1～N）→ 該實盤目前變體；否則當變體 id。從主模擬盤快照取完整變體資料。"""
-    vid = target
-    if target.isdigit() and 1 <= int(target) <= len(LIVE_INSTANCES):
-        vid = _read_env_value(LIVE_INSTANCES[int(target) - 1]["env"], "POLY_LIVE_VARIANT_ID")
-    try:
-        sim = await fetch_snapshot(SIM_WS)
-    except Exception:
-        return None
-    return next((v for v in (sim.get("abVariants") or []) if v.get("id") == vid), None)
-
-
-async def send_stop_direct_confirm(client: httpx.AsyncClient, chat_id: int, v: dict, kind: str, value: float) -> None:
-    _STOP_CANDIDATES["_direct"] = [v]
-    using = [LIVE_INSTANCES[i]["name"] for i in live_instances_using(str(v.get("id")))]
-    txt = _usd_txt(value) if kind == "usd" else _stop_txt(value)
-    p = f"{value:g}" if kind == "usd" else (f"{value:.2f}" if value else "0")
-    try:
-        await client.post(f"{API}/sendMessage", json={
-            "chat_id": chat_id,
-            "text": f"確定把 {v.get('label')} 改為 {txt}？" + (f"\n實盤 {'、'.join(using)} 會一起改並重啟（有持倉會先不重啟）" if using else ""),
-            "reply_markup": {"inline_keyboard": stop_confirm_keyboard("_direct", 0, p, kind)}})
-    except Exception as exc:
-        log.warning(f"sendMessage(stop direct) failed: {exc}")
-
-
-async def apply_stop(v: dict, stop: float, kind: str = "price") -> str:
-    """模擬盤：寫覆寫檔（主進程熱更新）。實盤：使用同一變體的每一盤改 env 並重啟（有持倉的先不重啟）。
-    kind='price' 改 favoriteStopLossPrice／POLY_LIVE_FAVORITE_STOP_LOSS_PRICE；kind='usd' 改 favoriteStopLossUsd／POLY_LIVE_FAVORITE_STOP_LOSS_USD。"""
-    vid = str(v.get("id"))
-    if kind == "usd":
-        write_variant_override(vid, stop, key="favoriteStopLossUsd")
-        lines = [f"🛑 {v.get('label')}：{_usd_txt(v.get('favoriteStopLossUsd'))} → {_usd_txt(stop)}", "模擬盤：已寫入覆寫檔，主進程 5 秒內套用"]
-        env_key, env_val, new_txt = "POLY_LIVE_FAVORITE_STOP_LOSS_USD", (f"{float(stop):g}" if stop else "0"), _usd_txt(stop)
-    else:
-        write_variant_override(vid, stop)
-        lines = [f"🛑 {v.get('label')}：{_stop_txt(v.get('favoriteStopLossPrice'))} → {_stop_txt(stop)}", "模擬盤：已寫入覆寫檔，主進程 5 秒內套用"]
-        env_key, env_val, new_txt = "POLY_LIVE_FAVORITE_STOP_LOSS_PRICE", (f"{float(stop):.2f}" if stop else "0"), _stop_txt(stop)
-    for idx in live_instances_using(vid):
-        inst = LIVE_INSTANCES[idx]
-        write_env_flag(env_key, env_val, inst["env"])
-        if _live_position_open(inst["state"]):
-            lines.append(f"⏸ {inst['name']}：env 已改，但目前有持倉／待結算，未重啟；結算後再按一次或用 /live 重啟")
-            continue
-        proc = await asyncio.create_subprocess_exec(
-            "sudo", "-n", "systemctl", "restart", *inst["services"],
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        out, _ = await asyncio.wait_for(proc.communicate(), 90)
-        if proc.returncode != 0:
-            lines.append(f"⚠️ {inst['name']}：env 已改，但重啟失敗（{proc.returncode}）：{(out or b'').decode(errors='replace')[:200]}")
-        else:
-            lines.append(f"🔁 {inst['name']}：已改為 {new_txt}，服務已重啟")
-    return "\n".join(lines)
-
-
 # ── 2026-09-20 依使用者要求：TG 上分析某實盤的虧損原因（純讀取）────────────────────
 SIM_DB_PATH = os.environ.get("POLY_SIM_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_sim.sqlite3"))
 
@@ -764,191 +541,9 @@ async def run_loss_analysis(idx: int, limit: int = 5) -> str:
     return await asyncio.to_thread(loss.analyze_losses, inst["state"], asset_id, variant_id, SIM_DB_PATH, limit, inst["name"])
 
 
-# ── 2026-09-20 依使用者要求：/roi /tune /mirror /disable /enable /reset ─────────────────────
-import polymarket_tg_tools as tools
-
-SIM_DISABLED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_disabled_variants.json")
-BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backup")
-MAIN_SERVICES = ["gravia.service", "gravia-status.service"]
-_PICK: dict[str, list[dict]] = {}   # 各指令的候選清單（callback 用索引）
-
-
-async def _restart_services(services: list[str]) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_exec("sudo", "-n", "systemctl", "restart", *services,
-                                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    out, _ = await asyncio.wait_for(proc.communicate(), 120)
-    return proc.returncode, (out or b"").decode(errors="replace")[:300]
-
-
-async def _stop_services(services: list[str]) -> None:
-    proc = await asyncio.create_subprocess_exec("sudo", "-n", "systemctl", "stop", *services)
-    await asyncio.wait_for(proc.wait(), 120)
-
-
-async def _start_services(services: list[str]) -> None:
-    proc = await asyncio.create_subprocess_exec("sudo", "-n", "systemctl", "start", *services)
-    await asyncio.wait_for(proc.wait(), 120)
-
-
-def _live1_real_position_open() -> bool:
-    """主進程內嵌實盤①：有真實持倉／待結算就不能重啟主進程。"""
-    inst = LIVE_INSTANCES[0]
-    try:
-        with open(inst["state"], "r", encoding="utf-8") as f:
-            st = json.load(f)
-    except Exception:
-        return False
-    pos = st.get("position")
-    if pos and not pos.get("dryRun", True):
-        return True
-    return any(not p.get("dryRun", True) for p in (st.get("pendingSettlements") or []))
-
-
-def _variants_in_use() -> dict[str, str]:
-    return {_read_env_value(inst["env"], "POLY_LIVE_VARIANT_ID"): inst["name"] for inst in LIVE_INSTANCES}
-
-
-async def _sim_variants_by_asset(client, chat_id, only_late_favorite: bool = False):
-    try:
-        sim = await fetch_snapshot(SIM_WS)
-    except Exception as exc:
-        await tg_send(client, chat_id, f"⚠️ 讀不到模擬盤快照（{exc.__class__.__name__}），稍後再試。"); return None, None
-    groups: dict[str, list[dict]] = {}
-    for v in sim.get("abVariants") or []:
-        if only_late_favorite and not v.get("lateFavorite"):
-            continue
-        groups.setdefault(str(v.get("assetId")), []).append(v)
-    for rows in groups.values():
-        rows.sort(key=lambda v: -float(v.get("totalPnl") or 0))
-    labels = {a.get("id"): a.get("label") for a in (sim.get("assetList") or [])}
-    return groups, labels
-
-
-def _asset_keyboard(prefix: str, groups: dict, labels: dict) -> list[list[dict]]:
-    kb = [[{"text": f"{labels.get(aid, aid)}（{len(rows)} 組）", "callback_data": f"{prefix}:a:{aid}"}] for aid, rows in groups.items()]
-    kb.append([{"text": "取消", "callback_data": f"{prefix}:cancel"}])
-    return kb
-
-
-def _variant_keyboard(prefix: str, aid: str, rows: list[dict], mark_ids: dict | None = None) -> list[list[dict]]:
-    kb = []
-    for n, v in enumerate(rows):
-        mark = "🟢" if mark_ids and v.get("id") in mark_ids else ""
-        kb.append([{"text": f"{mark}{v.get('label')} {_money(v.get('totalPnl'))}/{int(v.get('totalTrades') or 0)}筆"[:60], "callback_data": f"{prefix}:v:{aid}:{n}"}])
-    kb.append([{"text": "取消", "callback_data": f"{prefix}:cancel"}])
-    return kb
-
-
-async def send_pick_asset(client, chat_id, prefix: str, title: str, only_late_favorite: bool = False) -> None:
-    groups, labels = await _sim_variants_by_asset(client, chat_id, only_late_favorite)
-    if not groups:
-        return
-    _PICK.clear(); _PICK.update(groups)
-    try:
-        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": title, "reply_markup": {"inline_keyboard": _asset_keyboard(prefix, groups, labels)}})
-    except Exception as exc:
-        log.warning(f"sendMessage({prefix} asset) failed: {exc}")
-
-
-async def send_pick_variant(client, chat_id, prefix: str, aid: str, title: str) -> None:
-    rows = _PICK.get(aid) or []
-    if not rows:
-        await tg_send(client, chat_id, f"清單已過期，請重新 /{prefix}。"); return
-    try:
-        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": title,
-                                                        "reply_markup": {"inline_keyboard": _variant_keyboard(prefix, aid, rows, _variants_in_use())}})
-    except Exception as exc:
-        log.warning(f"sendMessage({prefix} variant) failed: {exc}")
-
-
-def _confirm_kb(prefix: str, aid: str, n: int, text: str) -> list[list[dict]]:
-    return [[{"text": text, "callback_data": f"{prefix}:c:{aid}:{n}"}], [{"text": "取消", "callback_data": f"{prefix}:cancel"}]]
-
-
-async def apply_disable(v: dict, disabled: bool) -> str:
-    vid = str(v.get("id"))
-    in_use = _variants_in_use()
-    if disabled and vid in in_use:
-        return f"⛔ {v.get('label')} 正被 {in_use[vid]} 使用，停用會讓實盤崩潰；請先用 /strategy 換掉它。"
-    tools.set_variant_disabled(SIM_DISABLED_FILE, vid, disabled)
-    action = "停用" if disabled else "啟用"
-    if _live1_real_position_open():
-        return f"✅ {v.get('label')} 已寫入{action}清單，但實盤①目前有真實持倉，主進程未重啟；結算後再按一次或等下次重啟生效。"
-    rc, out = await _restart_services(MAIN_SERVICES)
-    return (f"✅ {v.get('label')} 已{action}，主進程已重啟" if rc == 0 else f"⚠️ 已寫入{action}清單，但重啟失敗（{rc}）：{out}")
-
-
-async def send_enable_menu(client, chat_id) -> None:
-    ids = tools.disabled_variants(SIM_DISABLED_FILE)
-    if not ids:
-        await tg_send(client, chat_id, "停用清單是空的。"); return
-    rows = [{"id": vid, "label": vid, "totalPnl": 0, "totalTrades": 0} for vid in sorted(ids)]
-    _PICK.clear(); _PICK["_disabled"] = rows
-    kb = [[{"text": vid, "callback_data": f"enable:v:_disabled:{n}"}] for n, vid in enumerate(sorted(ids))]
-    kb.append([{"text": "取消", "callback_data": "enable:cancel"}])
-    try:
-        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": f"停用清單（{len(ids)} 組），選一組啟用：", "reply_markup": {"inline_keyboard": kb}})
-    except Exception as exc:
-        log.warning(f"sendMessage(enable) failed: {exc}")
-
-
-async def apply_reset_variant(v: dict) -> str:
-    if _live1_real_position_open():
-        return "⏸ 實盤①目前有真實持倉，主進程不能停；結算後再按一次。"
-    await _stop_services(MAIN_SERVICES)
-    try:
-        msg = await asyncio.to_thread(tools.reset_sim_variant, SIM_DB_PATH, str(v.get("id")), BACKUP_DIR)
-    finally:
-        await _start_services(MAIN_SERVICES)
-    return f"🧹 {v.get('label')}：{msg}；主進程已重啟"
-
-
-async def apply_reset_live() -> str:
-    for inst in LIVE_INSTANCES:
-        if _live_position_open(inst["state"]):
-            return f"⏸ {inst['name']}目前有持倉或待結算，先不重製；等結算完再按一次。"
-    services = sorted({s for inst in LIVE_INSTANCES for s in inst["services"]})
-    await _stop_services(services)
-    try:
-        states = [inst["state"] for inst in LIVE_INSTANCES]
-        baselines = [st.replace("_strategy_state.json", "_baseline.json").replace("_state.json", "_baseline.json") for st in states]
-        msg = await asyncio.to_thread(tools.reset_live_states, states, baselines, BACKUP_DIR)
-    finally:
-        await _start_services(services)
-    return "🧹 實盤全部重製：\n" + msg + "\n服務已重啟，基準以當下餘額重設"
-
-
-def reset_menu_keyboard() -> list[list[dict]]:
-    return [[{"text": "🧹 清空某模擬盤變體重記", "callback_data": "reset:sim"}],
-            [{"text": "🧹 實盤頁面全部重製（三盤）", "callback_data": "reset:live"}],
-            [{"text": "取消", "callback_data": "reset:cancel"}]]
-
-
-async def run_roi() -> str:
-    labels = {}
-    try:
-        sim = await fetch_snapshot(SIM_WS)
-        labels = {v.get("id"): v.get("label") for v in (sim.get("abVariants") or [])}
-    except Exception:
-        pass
-    return await asyncio.to_thread(tools.roi_table, SIM_DB_PATH, labels)
-
-
-async def run_tune(v: dict) -> str:
-    return await asyncio.to_thread(tools.stop_replay_table, SIM_DB_PATH, str(v.get("id")), str(v.get("assetId")), v.get("label"))
-
-
-async def run_mirror(idx: int) -> str:
-    inst = LIVE_INSTANCES[idx]
-    vid = _read_env_value(inst["env"], "POLY_LIVE_VARIANT_ID") or ""
-    return await asyncio.to_thread(tools.mirror_report, SIM_DB_PATH, inst["state"], vid, 12.0, inst["name"])
-
-
-def mirror_instance_keyboard() -> list[list[dict]]:
-    return [[{"text": f"🪞 {inst['name']}", "callback_data": f"mirror:{idx}"}] for idx, inst in enumerate(LIVE_INSTANCES)]
-
-
 # ── 推播：真實虧損即時分析、餘額不足 5 股警報 ──────────────────────────────
+import polymarket_tg_tools as tools   # 餘額夠不夠買最低 5 股的檢查
+
 _last_loss_alert: dict[int, float] = {}
 _stake_alert_state: dict[int, bool] = {}
 
@@ -991,7 +586,6 @@ async def _restart_self_later() -> None:
 
 
 REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports", "weekly")
-_scan_running = {"v": False}
 
 
 def latest_report_summary() -> str:
@@ -1000,7 +594,7 @@ def latest_report_summary() -> str:
     except FileNotFoundError:
         files = []
     if not files:
-        return "📈 還沒有掃描報告；用 /scan 產生一份，或等每週一 12:00（台北）的排程。"
+        return "📈 還沒有掃描報告；等每週一 12:00（台北）的排程產生。"
     with open(os.path.join(REPORT_DIR, files[-1]), encoding="utf-8") as f:
         data = json.load(f)
     lines = [f"📈 最近一次掃描：{files[-1][:-5]}（最近 {float(data.get('hours') or 0):.0f}h、{data['report']['windows']} 窗）", "最賺型態（依粗估 PnL）："]
@@ -1009,37 +603,6 @@ def latest_report_summary() -> str:
     for sug in data.get("suggestions", []):
         lines.append(f"\n🔎 {sug['title']}\n{sug['finding']}\n👍 {sug['pros']}\n👎 {sug['cons']}")
     return "\n".join(lines)
-
-
-SCAN_MARKETS = [("BTC 5 分鐘", "btc"), ("BTC 15 分鐘", "btc-15m"), ("ETH 5 分鐘", "eth"),
-                ("SOL 5 分鐘", "sol"), ("XRP 5 分鐘", "xrp"), ("其他：全站最多人玩的盤", "other")]
-
-
-async def send_scan_menu(client: httpx.AsyncClient, chat_id: int) -> None:
-    keyboard = [[{"text": label, "callback_data": f"scan:{key}"}] for label, key in SCAN_MARKETS]
-    try:
-        await client.post(f"{API}/sendMessage", json={
-            "chat_id": chat_id, "text": "要掃描哪個市場？（Up/Down 市場掃最近 24 小時；「其他」會撈全站 24h 成交額最高的盤並推估玩法）",
-            "reply_markup": {"inline_keyboard": keyboard},
-        })
-    except Exception as exc:
-        log.warning(f"sendMessage(menu) failed: {exc}")
-
-
-async def run_scan_in_background(client: httpx.AsyncClient, chat_id: int, hours: float, market: str = "btc") -> None:
-    import sys
-    if _scan_running["v"]:
-        await tg_send(client, chat_id, "⏳ 已有一次掃描在跑，請稍候。")
-        return
-    _scan_running["v"] = True
-    try:
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "polymarket_weekly_scan.py")
-        proc = await asyncio.create_subprocess_exec(sys.executable, script, "--hours", str(hours), "--market", market)
-        code = await proc.wait()
-        if code != 0:
-            await tg_send(client, chat_id, f"⚠️ 掃描結束但回傳碼 {code}，請看 gravia-tg.service 日誌。")
-    finally:
-        _scan_running["v"] = False
 
 
 async def _for_each_live(fmt) -> str:
@@ -1185,44 +748,6 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                                 except Exception as exc:
                                     await tg_send(client, chat_id, f"⚠️ 修改失敗：{exc}")
                         continue
-                    if data_str.startswith("stop:"):
-                        parts_cb = data_str.split(":")   # stop:a:<aid> | stop:v:<aid>:<n> | stop:s:<aid>:<n>:<p> | stop:c:<aid>:<n>:<p> | stop:cancel
-                        try:
-                            if data_str == "stop:cancel":
-                                await tg_send(client, chat_id, "已取消。")
-                            elif parts_cb[1] == "a" and len(parts_cb) == 3:
-                                await send_stop_variant_menu(client, chat_id, parts_cb[2])
-                            elif parts_cb[1] == "v" and len(parts_cb) == 4 and parts_cb[3].isdigit() and int(parts_cb[3]) < len(_STOP_CANDIDATES.get(parts_cb[2]) or []):
-                                await send_stop_value_menu(client, chat_id, parts_cb[2], int(parts_cb[3]))
-                            elif parts_cb[1] in ("m", "k") and len(parts_cb) == 5 and parts_cb[3].isdigit() and int(parts_cb[3]) < len(_STOP_CANDIDATES.get(parts_cb[2]) or []) and parse_stop_usd(parts_cb[4]) is not None:
-                                aid, n, p = parts_cb[2], int(parts_cb[3]), parts_cb[4]
-                                v = _STOP_CANDIDATES[aid][n]; usd = parse_stop_usd(p)
-                                if parts_cb[1] == "m":
-                                    using = [LIVE_INSTANCES[i]["name"] for i in live_instances_using(str(v.get("id")))]
-                                    await client.post(f"{API}/sendMessage", json={
-                                        "chat_id": chat_id,
-                                        "text": f"確定把 {v.get('label')} 改為 {_usd_txt(usd)}？" + (f"\n實盤 {'、'.join(using)} 會一起改並重啟（有持倉會先不重啟）" if using else ""),
-                                        "reply_markup": {"inline_keyboard": stop_confirm_keyboard(aid, n, p, "usd")}})
-                                else:
-                                    log.info(f"[TG] user {uid} setting usd stop of {v.get('id')} to {p}")
-                                    await tg_send(client, chat_id, await apply_stop(v, usd, "usd"))
-                            elif parts_cb[1] in ("s", "c") and len(parts_cb) == 5 and parts_cb[3].isdigit() and int(parts_cb[3]) < len(_STOP_CANDIDATES.get(parts_cb[2]) or []) and parse_stop_price(parts_cb[4]) is not None:
-                                aid, n, p = parts_cb[2], int(parts_cb[3]), parts_cb[4]
-                                v = _STOP_CANDIDATES[aid][n]
-                                if parts_cb[1] == "s":
-                                    using = [LIVE_INSTANCES[i]["name"] for i in live_instances_using(str(v.get("id")))]
-                                    await client.post(f"{API}/sendMessage", json={
-                                        "chat_id": chat_id,
-                                        "text": f"確定把 {v.get('label')} 改為 {_stop_txt(parse_stop_price(p))}？" + (f"\n實盤 {'、'.join(using)} 會一起改並重啟（有持倉會先不重啟）" if using else ""),
-                                        "reply_markup": {"inline_keyboard": stop_confirm_keyboard(aid, n, p)}})
-                                else:
-                                    log.info(f"[TG] user {uid} setting stop of {v.get('id')} to {p}")
-                                    await tg_send(client, chat_id, await apply_stop(v, parse_stop_price(p)))
-                            else:
-                                await tg_send(client, chat_id, "清單已過期，請重新 /stop。")
-                        except Exception as exc:
-                            await tg_send(client, chat_id, f"⚠️ 停損修改失敗：{exc}")
-                        continue
                     if data_str.startswith("loss:"):
                         parts_cb = data_str.split(":")
                         if len(parts_cb) == 2 and parts_cb[1].isdigit() and int(parts_cb[1]) < len(LIVE_INSTANCES):
@@ -1231,53 +756,6 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                             except Exception as exc:
                                 await tg_send(client, chat_id, f"⚠️ 分析失敗：{exc}")
                         continue
-                    if data_str.split(":")[0] in ("disable", "enable", "tune", "reset", "mirror", "rsim"):
-                        parts_cb = data_str.split(":")
-                        prefix = parts_cb[0]
-                        try:
-                            if parts_cb[-1] == "cancel":
-                                await tg_send(client, chat_id, "已取消。")
-                            elif prefix == "mirror" and len(parts_cb) == 2 and parts_cb[1].isdigit() and int(parts_cb[1]) < len(LIVE_INSTANCES):
-                                await tg_send(client, chat_id, await run_mirror(int(parts_cb[1])))
-                            elif prefix == "reset" and len(parts_cb) == 2:
-                                if parts_cb[1] == "sim":
-                                    await send_pick_asset(client, chat_id, "rsim", "要清空哪個資產的變體？")
-                                elif parts_cb[1] == "live":
-                                    await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": "確定重製三個實盤頁面？（備份後清空成交／計數，基準以當下餘額重設；有持倉會被拒絕）",
-                                                                                    "reply_markup": {"inline_keyboard": [[{"text": "✅ 確認重製", "callback_data": "reset:live:confirm"}], [{"text": "取消", "callback_data": "reset:cancel"}]]}})
-                            elif prefix == "reset" and data_str == "reset:live:confirm":
-                                log.info(f"[TG] user {uid} resetting live states")
-                                await tg_send(client, chat_id, await apply_reset_live())
-                            elif len(parts_cb) >= 3 and parts_cb[1] == "a":
-                                titles = {"disable": "選要停用的變體（🟢＝實盤使用中，不能停用）：", "tune": "選要回放停損的變體：", "rsim": "選要清空重記的變體（🟢＝實盤使用中）："}
-                                await send_pick_variant(client, chat_id, prefix, parts_cb[2], titles.get(prefix, "選變體："))
-                            elif len(parts_cb) == 4 and parts_cb[1] == "v" and parts_cb[3].isdigit() and int(parts_cb[3]) < len(_PICK.get(parts_cb[2]) or []):
-                                aid, n = parts_cb[2], int(parts_cb[3]); v = _PICK[aid][n]
-                                if prefix == "tune":
-                                    await tg_send(client, chat_id, await run_tune(v))
-                                else:
-                                    verb = {"disable": "停用", "enable": "啟用", "rsim": "清空重記"}[prefix]
-                                    await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": f"確定{verb}：{v.get('label')}？",
-                                                                                    "reply_markup": {"inline_keyboard": _confirm_kb(prefix, aid, n, f"✅ 確認{verb}")}})
-                            elif len(parts_cb) == 4 and parts_cb[1] == "c" and parts_cb[3].isdigit() and int(parts_cb[3]) < len(_PICK.get(parts_cb[2]) or []):
-                                v = _PICK[parts_cb[2]][int(parts_cb[3])]
-                                log.info(f"[TG] user {uid} {prefix} {v.get('id')}")
-                                if prefix == "disable":
-                                    await tg_send(client, chat_id, await apply_disable(v, True))
-                                elif prefix == "enable":
-                                    await tg_send(client, chat_id, await apply_disable(v, False))
-                                elif prefix == "rsim":
-                                    await tg_send(client, chat_id, await apply_reset_variant(v))
-                            else:
-                                await tg_send(client, chat_id, f"清單已過期，請重新 /{prefix}。")
-                        except Exception as exc:
-                            await tg_send(client, chat_id, f"⚠️ 操作失敗：{exc}")
-                        continue
-                    if data_str.startswith("scan:"):
-                        market = data_str.split(":", 1)[1]
-                        label = next((l for l, k in SCAN_MARKETS if k == market), market)
-                        await tg_send(client, chat_id, f"🔍 開始掃描：{label}（完成後推播，Up/Down 市場約 10～15 分鐘、全站探索約 1～2 分鐘）。")
-                        asyncio.get_running_loop().create_task(run_scan_in_background(client, chat_id, 24.0, market))
                     continue
                 msg = upd.get("message") or {}
                 chat_id = (msg.get("chat") or {}).get("id")
@@ -1294,31 +772,6 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                 if parts and parts[0].split("@")[0].lower() == "/strategy":
                     await send_strategy_menu(client, chat_id)
                     continue
-                cmd0 = parts[0].split("@")[0].lower() if parts else ""
-                if cmd0 == "/roi":
-                    try:
-                        await tg_send(client, chat_id, await run_roi())
-                    except Exception as exc:
-                        await tg_send(client, chat_id, f"⚠️ 計算失敗：{exc}")
-                    continue
-                if cmd0 == "/tune":
-                    await send_pick_asset(client, chat_id, "tune", "要回放哪個資產的變體？", only_late_favorite=True); continue
-                if cmd0 == "/disable":
-                    await send_pick_asset(client, chat_id, "disable", "要停用哪個資產的變體？"); continue
-                if cmd0 == "/enable":
-                    await send_enable_menu(client, chat_id); continue
-                if cmd0 == "/reset":
-                    try:
-                        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": "要重製什麼？", "reply_markup": {"inline_keyboard": reset_menu_keyboard()}})
-                    except Exception as exc:
-                        log.warning(f"sendMessage(reset) failed: {exc}")
-                    continue
-                if cmd0 == "/mirror":
-                    try:
-                        await client.post(f"{API}/sendMessage", json={"chat_id": chat_id, "text": "要檢查哪個實盤的鏡像一致性？", "reply_markup": {"inline_keyboard": mirror_instance_keyboard()}})
-                    except Exception as exc:
-                        log.warning(f"sendMessage(mirror) failed: {exc}")
-                    continue
                 if parts and parts[0].split("@")[0].lower() == "/loss":
                     if len(parts) >= 2 and parts[1].isdigit() and 1 <= int(parts[1]) <= len(LIVE_INSTANCES):
                         limit = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 5
@@ -1329,20 +782,6 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                     else:
                         await send_loss_menu(client, chat_id)
                     continue
-                if parts and parts[0].split("@")[0].lower() == "/stop":
-                    args = parse_stop_args(parts)
-                    if len(parts) >= 2 and args is None:
-                        await tg_send(client, chat_id, "格式：/stop <實盤編號 1～N 或 變體id> <值>；值 $3 = 帳面虧損達 $3 賣出，0.88 = 最佳 bid 跌到 0.88 賣出，0 = 不設。例：/stop 1 $2")
-                    elif args:
-                        target, kind, value = args
-                        v = await resolve_stop_target(target)
-                        if not v:
-                            await tg_send(client, chat_id, f"找不到變體「{target}」（可用實盤編號 1～{len(LIVE_INSTANCES)}，或模擬盤變體 id）。")
-                        else:
-                            await send_stop_direct_confirm(client, chat_id, v, kind, value)
-                    else:
-                        await send_stop_asset_menu(client, chat_id)
-                    continue
                 if parts and parts[0].split("@")[0].lower() == "/stake":
                     # /stake → 選單；/stake <實盤編號 1~N> <數字> → 直接到確認
                     if len(parts) == 3 and parts[1].isdigit() and 1 <= int(parts[1]) <= len(LIVE_INSTANCES) and parse_stake_pct(parts[2]) is not None:
@@ -1351,10 +790,6 @@ async def poll_updates(client: httpx.AsyncClient) -> None:
                         await tg_send(client, chat_id, f"格式：/stake <實盤編號 1～{len(LIVE_INSTANCES)}> <每注 %，{STAKE_MIN:g}～{STAKE_MAX:g}>")
                     else:
                         await send_stake_menu(client, chat_id)
-                    continue
-                if parts and parts[0].split("@")[0].lower() == "/scan":
-                    # 2026-09-16 依使用者要求：移除 /scan [小時]，一律出市場選單
-                    await send_scan_menu(client, chat_id)
                     continue
                 reply = await handle_command(text)
                 await tg_send(client, chat_id, reply)

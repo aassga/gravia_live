@@ -149,45 +149,20 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(bot.stake_confirm_keyboard(1, 12.5)[0][0]["callback_data"], "stake:1:12.5:confirm")
         self.assertEqual(bot.live_toggle_keyboard(False, 0)[-1][1]["callback_data"], "stake:0")
 
-    def test_stop_helpers(self):
-        # 2026-09-20 /stop：值解析、分組、覆寫檔寫入、鍵盤 callback
-        import tempfile
-        self.assertEqual(bot.parse_stop_price("0"), 0.0)
-        self.assertEqual(bot.parse_stop_price("0.60"), 0.6)
-        self.assertIsNone(bot.parse_stop_price("1.2")); self.assertIsNone(bot.parse_stop_price("x"))
-        sim = {"assetList": [{"id": "btc", "label": "BTC"}],
-               "abVariants": [{"id": "a", "assetId": "btc", "label": "A（0.98～0.99、不停損）", "lateFavorite": True, "favoriteStopLossPrice": None, "totalPnl": 1, "totalTrades": 2},
-                              {"id": "b", "assetId": "btc", "label": "B（停損 0.60）", "lateFavorite": True, "favoriteStopLossPrice": 0.6, "totalPnl": 5, "totalTrades": 3},
-                              {"id": "c", "assetId": "btc", "label": "C", "openMomentum": True, "totalPnl": 9},
-                              {"id": "d", "assetId": "btc", "label": "D", "twoSidedMaker": True, "totalPnl": 99}]}
-        groups = bot.stop_variants(sim)
-        self.assertEqual([v["id"] for v in groups["btc"]], ["c", "b", "a"])   # 單腿策略都列（含 openMomentum）；兩腿做市不列
-        kb = bot.stop_value_keyboard("btc", 0, 0.6)
-        self.assertEqual(kb[0][0]["text"], "不停損"); self.assertEqual(kb[0][3]["text"], "★ 0.60")
-        self.assertEqual(kb[0][3]["callback_data"], "stop:s:btc:0:0.60")
-        self.assertEqual(bot.stop_confirm_keyboard("btc", 0, "0")[0][0]["callback_data"], "stop:c:btc:0:0")
-        # 2026-09-22 金額停損
-        self.assertEqual(bot.parse_stop_usd("2"), 2.0); self.assertEqual(bot.parse_stop_usd("0"), 0.0); self.assertIsNone(bot.parse_stop_usd("x"))
-        kb = bot.stop_value_keyboard("btc", 0, 0.6, 2)
-        flat = [b for row in kb[2:-1] for b in row]
-        self.assertEqual(flat[0]["text"], "不設金額"); self.assertEqual(len(flat), 26); self.assertEqual(flat[-1]["text"], "$100")
-        star = next(b for b in flat if b["text"].startswith("★ ")); self.assertEqual((star["text"], star["callback_data"]), ("★ $2", "stop:m:btc:0:2"))
-        self.assertEqual(kb[-1][0]["callback_data"], "stop:cancel")
-        self.assertEqual(bot.stop_confirm_keyboard("btc", 0, "5", "usd")[0][0]["callback_data"], "stop:k:btc:0:5")
-        # 直接打字：/stop 1 $2 → 金額；/stop 3 0.88 → 價格；/stop 1 0 → 不設價格停損；/stop 1 $0 → 不設金額
-        self.assertEqual(bot.parse_stop_args(["/stop", "1", "$2"]), ("1", "usd", 2.0))
-        self.assertEqual(bot.parse_stop_args(["/stop", "3", "0.88"]), ("3", "price", 0.88))
-        self.assertEqual(bot.parse_stop_args(["/stop", "1", "0"]), ("1", "price", 0.0))
-        self.assertEqual(bot.parse_stop_args(["/stop", "1", "$0"]), ("1", "usd", 0.0))
-        self.assertEqual(bot.parse_stop_args(["/stop", "eth-15m-auto-60-90s-098-099", "3usd"]), ("eth-15m-auto-60-90s-098-099", "usd", 3.0))
-        self.assertIsNone(bot.parse_stop_args(["/stop", "1", "abc"])); self.assertIsNone(bot.parse_stop_args(["/stop"]))
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "ov.json")
-            bot.write_variant_override("a", 0.6, path); data = bot.write_variant_override("b", 0.0, path)
-            self.assertEqual(data, {"a": {"favoriteStopLossPrice": 0.6}, "b": {"favoriteStopLossPrice": None}})
-            data = bot.write_variant_override("a", 2.0, path, key="favoriteStopLossUsd")
-            self.assertEqual(data["a"], {"favoriteStopLossPrice": 0.6, "favoriteStopLossUsd": 2.0})
-            self.assertEqual(json.load(open(path, encoding="utf-8"))["b"]["favoriteStopLossPrice"], None)
+    def test_trimmed_commands_are_gone(self):
+        # 2026-10-09 依使用者要求精簡 TG：只留 9 個核心指令 + /report
+        gone = ("/stop", "/roi", "/tune", "/mirror", "/disable", "/enable", "/reset", "/scan")
+        for cmd in gone:
+            self.assertNotIn(cmd + " ", bot.HELP_TEXT)          # /help 不再列出
+            self.assertNotIn(cmd + " /", bot.HELP_TEXT)         # 「/disable /enable」那種合併行
+        for name in ("run_roi", "run_tune", "run_mirror", "send_scan_menu", "send_enable_menu",
+                     "reset_menu_keyboard", "mirror_instance_keyboard", "send_pick_asset",
+                     "parse_stop_args", "apply_stop", "write_variant_override", "apply_disable",
+                     "apply_reset_live", "run_scan_in_background"):
+            self.assertFalse(hasattr(bot, name), f"{name} 應該已移除")
+        for name in ("format_status", "format_pnl", "format_trades", "format_sim", "send_live_menu",
+                     "send_strategy_menu", "send_stake_menu", "send_loss_menu", "latest_report_summary"):
+            self.assertTrue(hasattr(bot, name), f"{name} 不該被移除")
 
     def test_new_real_loss_and_stake_alert(self):
         # 2026-09-20 推播：新的真實虧損單、餘額不足 5 股
