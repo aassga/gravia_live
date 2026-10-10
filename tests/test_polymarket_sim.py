@@ -482,11 +482,9 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual((b["openMinElapsedSeconds"], b["openMaxElapsedSeconds"], b["openMinPrice"], b["openMaxPrice"], b["openMinMovePct"]), (60.0, 120.0, 0.45, 0.60, 0.02))
         self.assertNotIn("favoriteStopLossPrice", b)
         self.assertEqual((sim.AB_VARIANT_BY_ID["btc-15m-mid-momentum-hold"]["openMinElapsedSeconds"], sim.AB_VARIANT_BY_ID["btc-15m-mid-momentum-hold"]["openMaxElapsedSeconds"]), (180.0, 360.0))
-        # (C) 跟單兩個中段方向性錢包
-        c1 = sim.AB_VARIANT_BY_ID["btc-follow-0x17b3ba"]; c2 = sim.AB_VARIANT_BY_ID["btc-follow-0xa8278b"]
-        self.assertEqual((c1["followWallets"], c1["followMaxPrice"]), (["0x17b3babf88a6ed72458f3675ccdf2ade7ee2ff40"], 0.70))
-        self.assertEqual((c2["followWallets"], c2["followMaxPrice"]), (["0xa8278bd8002eddb9b26deb70d8331c23da45f959"], 0.95))
-        self.assertIn("0x17b3babf88a6ed72458f3675ccdf2ade7ee2ff40", sim._follow_wallets_for_asset("btc"))
+        # (C) 2026-10-10 依使用者要求移除所有內建跟單錢包變體：預設不該有任何 followWallets
+        self.assertEqual([v["id"] for v in sim.AB_VARIANTS if v.get("followWallets")], [])
+        self.assertEqual(sim._follow_wallets_for_asset("btc"), set())
 
     def test_late_underdog_buys_cheap_side_in_last_minute(self):
         # 2026-09-21：最後 60 秒某邊 ask <= 0.10 → 買那一邊；太貴不進；每窗口一次
@@ -533,10 +531,16 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNone(sim.ab_states[vid]["position"])
 
     def test_wallet_follow_variant_copies_followed_wallet_buy(self):
-        # 2026-09-17：跟單錢包——看到跟單對象在本窗口 BUY，就買同一邊（ask <= 0.90）、每窗一次
-        vid = "btc-follow-0x167ef4"
-        v = sim.AB_VARIANT_BY_ID[vid]
-        wallet = v["followWallets"][0]
+        # 2026-09-17：跟單錢包——看到跟單對象在本窗口 BUY，就買同一邊（ask <= followMaxPrice）、每窗一次
+        # 2026-10-10：內建跟單錢包變體已全部移除，引擎保留；用臨時掛的變體驗證引擎還是對的
+        vid = "btc-follow-test"
+        wallet = "0x167ef4770dfd6038ce4d9dd9f76e1c70ca5c28d9"
+        v = {"id": vid, "assetId": "btc", "label": "t", "entryMaxPrice": None, "lockMaxSum": sim.SIM_LOCK_MAX_SUM,
+             "simOnly": True, "followWallets": [wallet], "followMaxPrice": 0.90, "followMinRemaining": 5.0}
+        sim.AB_VARIANTS.append(v); sim.AB_VARIANT_BY_ID[vid] = v
+        sim.ab_states[vid] = sim._new_variant_state()
+        self.addCleanup(lambda: (sim.AB_VARIANTS.remove(v), sim.AB_VARIANT_BY_ID.pop(vid, None), sim.ab_states.pop(vid, None)))
+        self.assertIn(wallet, sim._follow_wallets_for_asset("btc"))
         ms = sim.markets_state["btc"]
         ms["walletSignals"] = {}
         up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 1, "asks": [{"price": 0.62, "size": 500}], "bids": [{"price": 0.61, "size": 500}]})
@@ -560,7 +564,6 @@ class PolymarketSimulationTests(unittest.TestCase):
         sim.simulate_trading(vid, "btc-window-2", up_hi, down, 200.0, None)
         self.assertIsNone(sim.ab_states[vid]["position"])
         ms["walletSignals"] = {}
-        self.assertIn("btc-15m-follow-0x42811a", sim.AB_VARIANT_BY_ID)
 
     def test_orphaned_position_is_queued_for_settlement_after_restart(self):
         # 2026-09-19：重啟後殘留在舊窗口的持倉要移到待結算，不能永遠卡住 hasPosition

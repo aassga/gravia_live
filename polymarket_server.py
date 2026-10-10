@@ -637,15 +637,6 @@ for _asset in ASSETS:
             "openMinPrice":          OPEN_REVERSAL_MIN_PRICE,
             "openMaxPrice":          OPEN_REVERSAL_MAX_PRICE,
         })
-        # 2026-09-17 依使用者要求：跟單市場上賺最多的錢包（24h 掃描）。每 WALLET_FOLLOW_POLL_SECONDS 秒查 data-api
-        # 該窗口的成交，看到跟單對象 BUY 就買同一邊（ask <= followMaxPrice）、抱到結算；每窗一次。
-        for _w in ("0x167ef4770dfd6038ce4d9dd9f76e1c70ca5c28d9",):
-            AB_VARIANTS.append({
-                "id": f"btc-follow-{_w[:8]}", "assetId": "btc",
-                "label": f"BTC 跟單錢包 {_w[:8]}（中段狙擊、24h +2,800）",
-                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": False,   # 2026-09-17 開放實盤選用
-                "followWallets": [_w], "followMaxPrice": 0.90, "followMinRemaining": 5.0,
-            })
         AB_VARIANTS.append({
             "id":                    "btc-price-triggered-favorite",
             "assetId":               "btc",
@@ -716,15 +707,6 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
         },
     ]
     if aid == "btc-15m":
-        # 2026-09-17 跟單錢包（見 btc-follow-*）：0x167ef4（BTC 15m 24h +2,221）、0x42811a（中段順勢累積 +855）。
-        for _w, _note in (("0x167ef4770dfd6038ce4d9dd9f76e1c70ca5c28d9", "中段狙擊、24h +2,221"),
-                          ("0x42811a04202d471323a87c33885677187aff1a5a", "中段順勢累積、24h +855")):
-            fam.append({
-                "id": f"btc-15m-follow-{_w[:8]}", "assetId": "btc-15m",
-                "label": f"BTC 15m 跟單錢包 {_w[:8]}（{_note}）",
-                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": False,   # 2026-09-17 開放實盤選用
-                "followWallets": [_w], "followMaxPrice": 0.90, "followMinRemaining": 10.0,
-            })
         # 2026-09-16 依使用者要求：BTC 15m 的「最後 30～90 秒 0.92～0.95」加停損（模擬與實盤同步；0.85 → 同日改 0.60）。
         # 2026-09-17：5 次停損有 3 次是假停損（跌破 0.60 又漲回贏），依使用者要求 0.60 → 0.40。
         # 2026-09-18 依使用者要求改為不停損：0.40 停損 03:28 那筆賣在 0.37 是假停損（-8.09），一筆吃掉整天獲利。
@@ -868,33 +850,6 @@ for _asset in ASSETS:
         if not any(v["id"] == _nv["id"] for v in AB_VARIANTS):
             AB_VARIANTS.append(_nv)
 del _asset, _mk, _nv
-
-# 2026-09-19 (C) 依使用者要求：跟單 24h BTC 5m 掃描「窗口中段單邊方向性」最賺的兩個錢包（用現成跟單引擎複製它們的買單）。
-if any(a["id"] == "btc" for a in ASSETS):
-    for _w, _lbl, _maxp in (
-        ("0x17b3babf88a6ed72458f3675ccdf2ade7ee2ff40", "BTC 跟單錢包 0x17b3ba（中段 50/50 押方向、24h 59 窗 63%、+4,717）", 0.70),
-        ("0xa8278bd8002eddb9b26deb70d8331c23da45f959", "BTC 跟單錢包 0xa8278b（中段買領先方 0.87～0.93、24h 20 窗 100%、+2,250）", 0.95),
-    ):
-        if not any(v["id"] == f"btc-follow-{_w[:8]}" for v in AB_VARIANTS):
-            AB_VARIANTS.append({
-                "id": f"btc-follow-{_w[:8]}", "assetId": "btc", "label": _lbl,
-                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": True,
-                "followWallets": [_w], "followMaxPrice": _maxp, "followMinRemaining": 5.0,
-            })
-    del _w, _lbl, _maxp
-# 2026-09-20 依使用者要求：XRP 5m 也做 (C)——24h XRP 5m 掃描（288 窗、22k 筆）最賺的兩個方向性錢包（市場小，單窗名目只有 $25～75，純觀察）。
-if any(a["id"] == "xrp" for a in ASSETS):
-    for _w, _lbl, _maxp in (
-        ("0xe3eeb127d5763a6e4ad597f773f9d259c94d5176", "XRP 跟單錢包 0xe3eeb1（中段買領先方 0.945、24h 55 窗 70%、+260）", 0.97),
-        ("0xa9369ef35c84e7fb6e569f673afc585309bd56ac", "XRP 跟單錢包 0xa9369e（中段 50/50 押方向 0.60、24h 29 窗 72%、+247）", 0.70),
-    ):
-        if not any(v["id"] == f"xrp-follow-{_w[:8]}" for v in AB_VARIANTS):
-            AB_VARIANTS.append({
-                "id": f"xrp-follow-{_w[:8]}", "assetId": "xrp", "label": _lbl,
-                "entryMaxPrice": None, "lockMaxSum": SIM_LOCK_MAX_SUM, "simOnly": True,
-                "followWallets": [_w], "followMaxPrice": _maxp, "followMinRemaining": 5.0,
-            })
-    del _w, _lbl, _maxp
 
 # 2026-09-21 依使用者要求：ETH 5m 買領先方的對手盤——最後 60 秒買便宜邊、抱到結算。純觀察。
 # 同日改區間 ≤0.10 → 0.10～0.40：0.01 是市場已定局的純樂透（5,000 股 -53），掃描裡賺錢的便宜邊買的是還有懸念的價位。
@@ -3421,7 +3376,10 @@ def _follow_wallets_for_asset(aid: str) -> set:
 
 
 async def wallet_follow_loop() -> None:
-    """跟單：每 WALLET_FOLLOW_POLL_SECONDS 秒查一次各資產目前窗口的公開成交，記下跟單對象最新的 BUY。"""
+    """跟單：每 WALLET_FOLLOW_POLL_SECONDS 秒查一次各資產目前窗口的公開成交，記下跟單對象最新的 BUY。
+
+    2026-10-10 依使用者要求移除所有內建跟單錢包變體，所以預設沒有任何 followWallets，
+    這個迴圈會直接 return、不打 data-api。引擎保留，之後要再掛跟單變體不用重寫。"""
     wanted = {a["id"]: _follow_wallets_for_asset(a["id"]) for a in ASSETS}
     wanted = {k: v for k, v in wanted.items() if v}
     if not wanted:
