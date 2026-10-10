@@ -487,28 +487,27 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertEqual(sim._follow_wallets_for_asset("btc"), set())
 
     def test_eth_15m_wide_late_favorite_variant(self):
-        # 2026-10-10 依使用者要求新增 ETH 15m 最後 30～135 秒、0.88～0.95、不停損。
+        # 2026-10-10 依使用者要求新增，同日改規格：最後 90～135 秒、0.88～0.95、停損 0.40。
         # 測試資產清單沒有 eth-15m，所以直接檢查家族產生器的輸出。
         fam = sim._favorite_family_for_asset({"id": "eth-15m", "label": "ETH 15m", "windowSeconds": 900})
-        v = next(x for x in fam if x["id"] == "eth-15m-last10-45-088-095")
-        self.assertEqual(v["label"], "ETH 15m 最後 30～135 秒買領先方（0.88～0.95、不停損）")
-        self.assertEqual((v["favoriteWindowSeconds"], v["favoriteMinRemaining"]), (135.0, 30.0))
+        v = next(x for x in fam if x["id"] == "eth-15m-last30-45-088-095")
+        self.assertEqual(v["label"], "ETH 15m 最後 90～135 秒買領先方（0.88～0.95、停損 0.40）")
+        self.assertEqual((v["favoriteWindowSeconds"], v["favoriteMinRemaining"]), (135.0, 90.0))
         self.assertEqual((v["favoriteMinPrice"], v["favoriteMaxPrice"]), (0.88, 0.95))
-        self.assertIsNone(v["favoriteStopLossPrice"])
+        self.assertEqual(v["favoriteStopLossPrice"], 0.40)
         self.assertIsNone(v["favoriteTakeProfitPrice"])
         self.assertTrue(v["lateFavorite"])
         self.assertFalse(v["simOnly"])                       # 實盤可選用
-        # 跟實盤在用的兄弟組只差「窗口長度」與「買價下緣」，其他條件要一致才比得準
-        sib = next(x for x in fam if x["id"] == "eth-15m-last10-30-092-095")
-        self.assertEqual((sib["favoriteWindowSeconds"], sib["favoriteMinPrice"]), (90.0, 0.92))
-        self.assertEqual(v["favoriteMaxPairAskSum"], sib.get("favoriteMaxPairAskSum", 1.03))
-        self.assertEqual(v["favoriteStableSeconds"], sib["favoriteStableSeconds"])
-        # noStop：全域規則會把停損 None 的買領先方塞回 0.60，標了 noStop 的不受影響
-        self.assertTrue(v["noStop"])
-        guarded = [x for x in sim.AB_VARIANTS if x.get("lateFavorite") and x.get("noStop")]
-        self.assertTrue(guarded)
-        for x in guarded:
-            self.assertIsNone(x["favoriteStopLossPrice"], x["id"])
+        self.assertEqual(v["favoriteMaxPairAskSum"], 1.03)   # 0.88/0.95 套不到那個全域迴圈，要自己寫
+        self.assertNotIn("noStop", v)                        # 停損是明確值，不需要擋全域預設
+        # 停損是明確的 0.40，不能被「停損 None 就塞回 0.60」的全域規則動到
+        self.assertNotEqual(v["favoriteStopLossPrice"], sim.SIM_FAVORITE_STOP_LOSS_DEFAULT)
+        # 跟既有的 -088-092 只差買價上限（同窗口、同停損），這樣才測得出「上限放寬」的效果
+        sib = next(x for x in fam if x["id"] == "eth-15m-last30-45-088-092")
+        self.assertEqual((sib["favoriteWindowSeconds"], sib["favoriteMinRemaining"]), (135.0, 90.0))
+        self.assertEqual((sib["favoriteMinPrice"], sib["favoriteMaxPrice"]), (0.88, 0.92))
+        # 舊 id 不該再存在（規格變了，舊紀錄不能混進來）
+        self.assertFalse(any(x["id"] == "eth-15m-last10-45-088-095" for x in fam))
 
     def test_late_underdog_buys_cheap_side_in_last_minute(self):
         # 2026-09-21：最後 60 秒某邊 ask <= 0.10 → 買那一邊；太貴不進；每窗口一次
