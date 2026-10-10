@@ -718,6 +718,20 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
         fam.append(dict(common, id="btc-15m-last120-092-098-hold", label="BTC 15m 最後 120 秒買領先方（0.92～0.98、不停損）",
                         favoriteWindowSeconds=120.0, favoriteMinPrice=0.92, favoriteMaxPrice=0.98,
                         favoriteStopLossPrice=None, favoriteStableSeconds=0.0, simOnly=False))   # 2026-09-17 開放實盤選用（實盤①）
+    if aid == "eth-15m":
+        # 2026-10-10 依使用者要求新增：把實盤在用的 eth-15m-last10-30-092-095（最後 30～90 秒、0.92～0.95）
+        # 往前拉到 135 秒、下緣放寬到 0.88。對照組意義：窗口更早＋價位更低 = 賠率較好（打平勝率 88% vs 92%），
+        # 但領先方還沒站穩，翻面風險較高。兩組都不停損、記帳各自獨立，可以直接比。
+        # noStop：下面的全域規則會把停損 None 的買領先方塞回預設 0.60，要真的不停損必須標這個旗標
+        # （兄弟組 eth-15m-last10-30-092-095 是靠 VPS 的 overrides 檔設 null，這裡不依賴那個檔）。
+        # favoriteMaxPairAskSum 1.03：0.92～0.95 家族的訂單簿一致性檢查只套在「剛好 0.92/0.95」上，
+        # 這組是 0.88/0.95 不會被套到；明寫同一個值，讓兩組的差別只有窗口與下緣，比較才乾淨。
+        fam.append(dict(common, id="eth-15m-last10-45-088-095",
+                        label="ETH 15m 最後 30～135 秒買領先方（0.88～0.95、不停損）",
+                        favoriteWindowSeconds=135.0, favoriteMinRemaining=30.0,
+                        favoriteMinPrice=0.88, favoriteMaxPrice=0.95,
+                        favoriteStopLossPrice=None, noStop=True, favoriteMaxPairAskSum=1.03,
+                        favoriteStableSeconds=0.0, simOnly=False))
     # 2026-09-15 依 24h 五市場掃描（以收益為主）新增的候選，各市場買價／進場秒數取掃描中每股淨利為正的區間：
     #   ETH 20～60s 0.92～0.98（各價位皆正、99.3% > 打平 95.3%）、BTC 15m ≥0.95（型態總損益 +988）、
     #   XRP 0.88～0.95（每股 +0.034，深度薄）、SOL 0.88～0.92 只在最後 30 秒（45～60s 區間為負）。
