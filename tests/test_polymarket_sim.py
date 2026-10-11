@@ -588,6 +588,133 @@ class PolymarketSimulationTests(unittest.TestCase):
         self.assertIsNone(sim.ab_states[vid]["position"])
         ms["walletSignals"] = {}
 
+    # ── 2026-10-11 停損賣不掉的三個修法（依使用者要求：先可見、再部分成交、再限制部位）──
+    def _stop_fixture(self, shares=1000.0, entry=0.95, bid=0.30, bid_size=200.0, min_size=5):
+        """掛一組有停損的 btc 買領先方變體，部位比買盤深得多（重現 10-11 07:28 那筆）。"""
+        vid = "btc-stop-depth-test"
+        v = {"id": vid, "assetId": "btc", "label": "t", "entryMaxPrice": None,
+             "lockMaxSum": sim.SIM_LOCK_MAX_SUM, "lateFavorite": True, "simOnly": True,
+             "favoriteStopLossPrice": 0.40, "favoriteStopLossUsd": None}
+        sim.AB_VARIANTS.append(v); sim.AB_VARIANT_BY_ID[vid] = v
+        sim.ab_states[vid] = sim._new_variant_state()
+        self.addCleanup(lambda: (sim.AB_VARIANTS.remove(v),
+                                 sim.AB_VARIANT_BY_ID.pop(vid, None),
+                                 sim.ab_states.pop(vid, None)))
+        notional = shares * entry
+        sim.ab_states[vid]["position"] = {
+            "windowSlug": "btc-window", "side": "Down", "shares": shares, "entryPrice": entry,
+            "entryNotional": notional, "entryFee": 1.0, "entryTime": sim.real_now() - 10,
+            "hedged": False, "stakeUsd": notional + 1.0,
+        }
+        held = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": min_size,
+                                    "bids": [{"price": bid, "size": bid_size}],
+                                    "asks": [{"price": bid + 0.01, "size": bid_size}]})
+        other = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": min_size,
+                                     "bids": [{"price": 0.69, "size": 500}],
+                                     "asks": [{"price": 0.70, "size": 500}]})
+        return vid, v, other, held
+
+    def _diag_rec(self, vid, slug="btc-window"):
+        for item in sim.ab_states[vid].get("windowDiagnostics") or []:
+            if item.get("windowSlug") == slug:
+                return item
+        return {}
+
+    def _diag_reasons(self, vid, slug="btc-window"):
+        return self._diag_rec(vid, slug).get("reasonCounts") or {}
+
+    def test_stop_loss_sells_what_the_book_can_absorb(self):
+        # 修法 1：買盤吃不下整筆時賣掉吃得下的部分，剩下的繼續抱（原本整筆放棄 -> 抱到結算虧光）
+        vid, v, up, down = self._stop_fixture(shares=1000.0, bid=0.30, bid_size=200.0)
+        sim._try_late_favorite_stop_loss(vid, "btc-window", up, down)
+        pos = sim.ab_states[vid]["position"]
+        self.assertIsNotNone(pos, "部分成交後部位要留著，不能整筆消失")
+        self.assertAlmostEqual(pos["shares"], 800.0, places=6)          # 1000 - 200
+        self.assertAlmostEqual(pos["partialExitShares"], 200.0, places=6)
+        self.assertLess(pos["partialPnl"], 0)                            # 0.95 買、0.30 賣 = 已實現虧損
+        self.assertAlmostEqual(pos["entryNotional"], 1000.0 * 0.95 * 0.8, places=4)   # 成本按比例縮減
+        self.assertAlmostEqual(pos["entryFee"], 0.8, places=6)
+        self.assertIn("favorite_stop_loss_partial", self._diag_reasons(vid))
+
+    def test_stop_loss_records_when_it_cannot_sell_at_all(self):
+        # 修法 2：連最低下單量都賣不掉時要留下紀錄，不能靜默吞掉
+        vid, v, up, down = self._stop_fixture(shares=1000.0, bid=0.30, bid_size=2.0, min_size=5)
+        sim._try_late_favorite_stop_loss(vid, "btc-window", up, down)
+        pos = sim.ab_states[vid]["position"]
+        self.assertIsNotNone(pos)
+        self.assertAlmostEqual(pos["shares"], 1000.0, places=6)          # 一股都沒賣掉
+        rc = self._diag_reasons(vid)
+        self.assertIn("favorite_stop_loss_blocked_no_bid_depth", rc)
+        rec = self._diag_rec(vid)
+        self.assertAlmostEqual(rec["visibleBidDepth"], 2.0, places=6)
+        self.assertAlmostEqual(rec["heldShares"], 1000.0, places=6)
+
+    def test_stop_loss_still_closes_whole_position_when_depth_allows(self):
+        # 回歸：深度夠的時候行為不變——整筆賣掉、記一筆 early_exit
+        vid, v, up, down = self._stop_fixture(shares=100.0, bid=0.30, bid_size=5000.0)
+        sim._try_late_favorite_stop_loss(vid, "btc-window", up, down)
+        self.assertIsNone(sim.ab_states[vid]["position"])
+        trades = sim.ab_states[vid]["trades"]
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["exitReason"], "favorite_stop_loss")
+        self.assertIn("favorite_stop_loss", self._diag_reasons(vid))
+
+    def test_partial_exit_then_settlement_accounts_pnl_exactly_once(self):
+        # 會計：部分出場 + 結算的總損益，要等於「整筆抱到結算 + 已實現部分」，且 totalPnl 不重複計
+        vid, v, up, down = self._stop_fixture(shares=1000.0, entry=0.95, bid=0.30, bid_size=200.0)
+        st = sim.ab_states[vid]
+        pos = st["position"]
+        cost0 = pos["entryNotional"] + pos["entryFee"]
+        sim._try_late_favorite_stop_loss(vid, "btc-window", up, down)
+        pos = st["position"]
+        realized = pos["partialPnl"]
+        remaining = pos["shares"]
+        self.assertEqual(st["totalPnl"], 0.0, "部分出場時不能先把損益記進 totalPnl，否則結算會重複計")
+        # 輸掉 -> payout 0；總損益應該 = 已實現部分 + (0 - 剩下的成本)
+        expected = realized - (pos["entryNotional"] + pos["entryFee"])
+        self.assertAlmostEqual(sim._settle_pnl(pos, "Up"), expected, places=6)
+        sim.record_trade(vid, pos, sim._settle_pnl(pos, "Up"), "Up")
+        self.assertAlmostEqual(st["totalPnl"], expected, places=6)
+        # 整筆賣不掉而抱到結算的話會虧掉全部成本；有部分停損應該虧得比較少
+        self.assertGreater(expected, -cost0)
+        t = st["trades"][0]
+        self.assertAlmostEqual(t["partialExitShares"], 200.0, places=6)
+        self.assertAlmostEqual(t["shares"], remaining, places=6)
+
+    def test_entry_size_is_capped_by_visible_bid_depth(self):
+        # 修法 3：進場不能買超過「該腿可見買盤深度 × 比例」，否則停損時出不去
+        vid = "btc-depth-cap-test"
+        v = {"id": vid, "assetId": "btc", "label": "t", "entryMaxPrice": None,
+             "lockMaxSum": sim.SIM_LOCK_MAX_SUM, "lateFavorite": True, "simOnly": True,
+             "favoriteWindowSeconds": 60.0, "favoriteMinRemaining": 10.0,
+             "favoriteMinPrice": 0.88, "favoriteMaxPrice": 0.95,
+             "favoriteStopLossPrice": None, "favoriteStableSeconds": 0.0}
+        sim.AB_VARIANTS.append(v); sim.AB_VARIANT_BY_ID[vid] = v
+        sim.ab_states[vid] = sim._new_variant_state()
+        self.addCleanup(lambda: (sim.AB_VARIANTS.remove(v),
+                                 sim.AB_VARIANT_BY_ID.pop(vid, None),
+                                 sim.ab_states.pop(vid, None)))
+        sim.shared_config["startBalance"] = 10_000.0   # 預算遠大於買盤深度
+        up = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 5,
+                                  "bids": [{"price": 0.89, "size": 40}],      # 只有 40 股買盤
+                                  "asks": [{"price": 0.90, "size": 100_000}]})
+        down = self._fresh_ws_book({"tickSize": 0.01, "minOrderSize": 5,
+                                    "bids": [{"price": 0.09, "size": 500}],
+                                    "asks": [{"price": 0.10, "size": 500}]})
+        sim.simulate_trading(vid, "btc-window", up, down, 30.0, None)
+        pos = sim.ab_states[vid]["position"]
+        self.assertIsNotNone(pos, "被限制後仍應該進場，只是股數變小")
+        self.assertLessEqual(pos["shares"], 40.0, "部位不得超過可見買盤深度")
+        rc = self._diag_reasons(vid)
+        self.assertIn("favorite_size_capped_by_bid_depth", rc)
+        # 關掉限制就會買到遠超過買盤深度的量（證明是這個開關在作用）
+        old = sim.SIM_MAX_BID_DEPTH_FRACTION
+        sim.SIM_MAX_BID_DEPTH_FRACTION = 0.0
+        self.addCleanup(lambda: setattr(sim, "SIM_MAX_BID_DEPTH_FRACTION", old))
+        sim.ab_states[vid] = sim._new_variant_state()
+        sim.simulate_trading(vid, "btc-window-2", up, down, 30.0, None)
+        self.assertGreater(sim.ab_states[vid]["position"]["shares"], 40.0)
+
     def test_orphaned_position_is_queued_for_settlement_after_restart(self):
         # 2026-09-19：重啟後殘留在舊窗口的持倉要移到待結算，不能永遠卡住 hasPosition
         vid = "btc-relaxed-lock"

@@ -168,6 +168,9 @@ SIM_PRICE_BUFFER_TICKS     = 1
 SIM_BOOK_MAX_AGE_SECONDS   = 2.0
 SIM_BOOK_MAX_SKEW_SECONDS  = 0.5
 SIM_DATA_GUARD_LOG_SECONDS = 30.0
+# 2026-10-11 依使用者要求：買領先方的部位不得超過「進場當下該腿可見買盤深度 × 這個比例」。
+# 1.0 = 最多等於看得到的買盤量。設 0 關閉這個限制。
+SIM_MAX_BID_DEPTH_FRACTION = max(0.0, float(os.environ.get("POLY_SIM_MAX_BID_DEPTH_FRACTION", "1.0")))
 
 # ── ETH maker 紙上策略 ─────────────────────────────────────────────────────
 # 只模擬在 best bid（或價差夠寬時改善一格）掛被動 BUY，不會呼叫任何下單 API。
@@ -1337,11 +1340,16 @@ def with_decision_fill(book: dict, fill: dict | None, side: str) -> dict | None:
     return enriched
 
 
-def simulate_book_fill(levels: list, shares: float, side: str) -> dict | None:
+def simulate_book_fill(levels: list, shares: float, side: str, allow_partial: bool = False) -> dict | None:
     """用目前可見深度模擬 taker 成交。
 
     BUY 由最低 ask 往上吃，SELL 由最高 bid 往下賣；深度不足時整筆視為未成交，
     等同 FOK。額外套用少量延遲滑點，避免把收到報價的瞬間價格當成必然可得。
+
+    2026-10-11：allow_partial=True 改為「吃得到多少算多少」，給停損用。原本的 FOK
+    行為讓停損在最需要跑的時候跑不掉（部位 1,529 股、崩盤時買盤吃不下），結果抱到
+    結算全額虧光——比真實 taker 還糟，真實情況是至少能賣掉買盤吃得下的那部分。
+    回傳的 shares 是「實際成交股數」，requestedShares 才是原本想賣的量。
     """
     if shares <= 0 or not levels:
         return None
@@ -1366,12 +1374,17 @@ def simulate_book_fill(levels: list, shares: float, side: str) -> dict | None:
         if remaining <= 1e-9:
             break
 
-    if remaining > 1e-9:
+    filled = shares - remaining
+    if remaining > 1e-9 and not allow_partial:
         return None
-    vwap = notional / shares
-    fee = taker_fee(shares, vwap)
+    if filled <= 1e-9:
+        return None
+    vwap = notional / filled
+    fee = taker_fee(filled, vwap)
     return {
-        "shares": shares,
+        "shares": filled,
+        "requestedShares": shares,
+        "partial": remaining > 1e-9,
         "vwap": vwap,
         "notional": notional,
         "fee": fee,
@@ -1388,6 +1401,16 @@ def simulate_sell_fill(book: dict, shares: float) -> dict | None:
     return with_decision_fill(book, simulate_book_fill(book.get("bids") or [], shares, "SELL"), "SELL")
 
 
+def simulate_partial_sell_fill(book: dict, shares: float) -> dict | None:
+    """停損專用：買盤吃得下多少就賣多少（不是 FOK）。回傳的 shares 是實際成交股數。"""
+    return with_decision_fill(
+        book, simulate_book_fill(book.get("bids") or [], shares, "SELL", allow_partial=True), "SELL")
+
+
+def visible_bid_depth(book: dict) -> float:
+    return sum(max(0.0, float(b.get("size", 0) or 0)) for b in (book.get("bids") or []))
+
+
 def _position_paid_cost(pos: dict) -> float:
     if pos.get("strategyMode") == "inventory_rotation":
         return (
@@ -1399,7 +1422,13 @@ def _position_paid_cost(pos: dict) -> float:
     if pos.get("hedged"):
         cost += float(pos.get("hedgeNotional", pos.get("hedgeShares", 0) * (pos.get("hedgePrice") or 0)))
         cost += float(pos.get("hedgeFee", 0))
-    return cost
+    # 2026-10-11 部分停損：賣掉的那部分成本已在 _reduce_directional_position 裡按比例扣掉，
+    # 收回的現金與那部分成本的差額記在 partialPnl。這裡再減掉它，三個地方就同時正確：
+    #   現金 = 起始 + totalPnl - staked（staked 用這個函式）
+    #   結算損益 = payout - 這個函式  → 自動含已實現的部分損益
+    #   提早出場損益 = 賣出淨額 - 這個函式  → 同上
+    # 所以 record_trade 的 totalPnl += pnl 只會把整筆損益算進去一次，不會重複計。
+    return cost - float(pos.get("partialPnl", 0.0) or 0.0)
 
 
 def _position_decision_cost(pos: dict) -> float:
@@ -3231,6 +3260,20 @@ def _try_late_favorite_entry(
             return
         # 領先方單價高，同樣預算買到的股數少；用預算 / 買價換算，不沿用兩腿的股數。
         shares = float(Decimal(str(budget / ask)).to_integral_value(rounding=ROUND_DOWN))
+    # 2026-10-11 依使用者要求：部位不能大於這一腿「賣得掉」的量，否則停損觸發時出不去
+    # （10-11 07:28 那筆 1,529 股，崩盤時買盤吃不下，停損跑不掉，抱到結算虧 $1,468）。
+    # 用進場當下該腿可見買盤深度乘上比例當上限；買盤深度為 0 表示根本沒人接，直接不進。
+    if SIM_MAX_BID_DEPTH_FRACTION > 0:
+        depth_cap = visible_bid_depth(book) * SIM_MAX_BID_DEPTH_FRACTION
+        if shares > depth_cap:
+            capped = float(Decimal(str(max(0.0, depth_cap))).to_integral_value(rounding=ROUND_DOWN))
+            record_window_diagnostic(
+                variant_id, slug, "favorite_size_capped_by_bid_depth",
+                targetShares=shares, cappedShares=capped, visibleBidDepth=visible_bid_depth(book),
+                bidDepthFraction=SIM_MAX_BID_DEPTH_FRACTION, **common,
+            )
+            shares = capped
+            budget = shares * ask
     if shares < float(book.get("minOrderSize", 1) or 1):
         record_window_diagnostic(
             variant_id, slug, "below_minimum_shares",
@@ -3595,16 +3638,11 @@ def _try_late_favorite_stop_loss(variant_id: str, slug: str, up_book: dict, down
     reason, best_bid, mark_pnl = _stop_trigger(pos, held_book, stop_price, stop_usd)
     if reason is None:
         return
-    fill = simulate_sell_fill(held_book, float(pos["shares"]))
-    if not fill:
-        return
-    record_window_diagnostic(
-        variant_id, slug, reason,
-        selectedSide=pos["side"], bestBid=best_bid, markPnl=round(mark_pnl, 4), exitDecisionPrice=fill["decisionPrice"],
+    _try_stop_exit(
+        variant_id, slug, reason, held_book,
+        selectedSide=pos["side"], bestBid=best_bid, markPnl=round(mark_pnl, 4),
         favoriteStopLossPrice=stop_price, favoriteStopLossUsd=stop_usd,
     )
-    _close_directional_position(variant_id, fill, reason)
-    save_sim_state()
 
 
 def _try_direction_stop_loss(variant_id: str, slug: str, up_book: dict, down_book: dict) -> None:
@@ -3621,7 +3659,15 @@ def _try_direction_stop_loss(variant_id: str, slug: str, up_book: dict, down_boo
     if not _simulation_direction_book_is_fresh(variant["assetId"], pos["side"], held_book):
         return
     fill = simulate_sell_fill(held_book, float(pos["shares"]))
-    if not fill or fill["decisionPrice"] > float(stop_price):
+    if fill is None:
+        # 2026-10-11：整筆賣不掉時，照買領先方停損的做法賣掉吃得下的部分並留下紀錄，
+        # 不再靜默放棄。觸發條件仍要可賣價 <= 停損價，所以用部分成交的判斷價來驗。
+        partial = simulate_partial_sell_fill(held_book, float(pos["shares"]))
+        if partial is not None and partial["decisionPrice"] <= float(stop_price):
+            _try_stop_exit(variant_id, slug, "direction_stop_loss", held_book,
+                           selectedSide=pos["side"], directionStopLossPrice=stop_price)
+        return
+    if fill["decisionPrice"] > float(stop_price):
         return
     record_window_diagnostic(
         variant_id, slug, "direction_stop_loss",
@@ -3644,6 +3690,86 @@ def _close_directional_position(variant_id: str, fill: dict, reason: str) -> Non
     st["position"] = None
     record_trade(variant_id, pos, pnl, "EarlyExit")
     log.info(f"[SIM:{variant_id}] 提早退出 {pos['side']} VWAP=${fill['vwap']:.4f} PnL=${pnl:+.2f} reason={reason}")
+
+
+def _reduce_directional_position(variant_id: str, fill: dict, reason: str) -> float:
+    """2026-10-11 部分停損：買盤吃不下整筆時，賣掉吃得下的股數，剩下的繼續抱。
+
+    成本基礎按賣出比例縮減，已實現損益累加到 pos["partialPnl"]（見 _position_paid_cost
+    的說明）。回傳這次賣掉的股數。"""
+    st = ab_states[variant_id]
+    pos = st["position"]
+    held = float(pos["shares"])
+    sold = min(float(fill["shares"]), held)
+    if sold <= 1e-9:
+        return 0.0
+    frac = sold / held
+    cost_before = float(pos.get("entryNotional", held * pos["entryPrice"])) + float(pos.get("entryFee", 0))
+    cost_sold = cost_before * frac
+    proceeds = float(fill["notional"]) - float(fill["fee"])
+
+    pos["entryNotional"] = float(pos.get("entryNotional", held * pos["entryPrice"])) * (1 - frac)
+    pos["entryFee"] = float(pos.get("entryFee", 0)) * (1 - frac)
+    pos["shares"] = held - sold
+    pos["partialPnl"] = float(pos.get("partialPnl", 0.0) or 0.0) + (proceeds - cost_sold)
+    pos["exitFee"] = float(pos.get("exitFee", 0) or 0) + float(fill["fee"])
+    pos.setdefault("partialExits", []).append({
+        "reason": reason, "shares": sold, "vwap": fill["vwap"],
+        "decisionPrice": fill.get("decisionPrice"), "pnl": proceeds - cost_sold, "at": time.time(),
+    })
+    pos["partialExitShares"] = float(pos.get("partialExitShares", 0.0) or 0.0) + sold
+    log.info(
+        f"[SIM:{variant_id}] 部分停損 {pos['side']} 賣 {sold:.0f}/{held:.0f} 股 "
+        f"VWAP=${fill['vwap']:.4f} 已實現=${proceeds - cost_sold:+.2f} 剩 {pos['shares']:.0f} 股 reason={reason}"
+    )
+    return sold
+
+
+_sim_stop_block_log_at: dict = {}
+
+
+def _try_stop_exit(variant_id: str, slug: str, reason: str, held_book: dict, **extra) -> bool:
+    """停損的出場執行：先試整筆，吃不下就賣吃得下的部分，兩者都不行就留下紀錄。
+
+    2026-10-11 之前這裡是 `fill = simulate_sell_fill(...); if not fill: return` ——
+    買盤深度不足就靜默放棄，不記診斷也不寫 log，所以看板上看起來像「停損沒設」。
+    實測 10-11 07:28 那筆：bid 連續 12 個 tick 在 0.40 以下，部位 1,529 股賣不掉，
+    抱到結算虧 $1,468。回傳是否已把整個部位結清。"""
+    st = ab_states[variant_id]
+    pos = st["position"]
+    shares = float(pos["shares"])
+    fill = simulate_sell_fill(held_book, shares)
+    if fill:
+        record_window_diagnostic(variant_id, slug, reason, exitDecisionPrice=fill["decisionPrice"], **extra)
+        _close_directional_position(variant_id, fill, reason)
+        save_sim_state()
+        return True
+
+    depth = visible_bid_depth(held_book)
+    min_size = float(held_book.get("minOrderSize", 1) or 1)
+    partial = simulate_partial_sell_fill(held_book, shares)
+    if partial and float(partial["shares"]) >= min_size:
+        sold = _reduce_directional_position(variant_id, partial, reason)
+        record_window_diagnostic(
+            variant_id, slug, f"{reason}_partial",
+            soldShares=sold, remainingShares=float(pos["shares"]), visibleBidDepth=depth,
+            exitDecisionPrice=partial.get("decisionPrice"), **extra)
+        save_sim_state()
+        return float(pos["shares"]) <= 1e-9
+
+    # 連最低下單量都賣不掉：留下紀錄，不要再靜默吞掉
+    record_window_diagnostic(
+        variant_id, slug, f"{reason}_blocked_no_bid_depth",
+        heldShares=shares, visibleBidDepth=depth, minOrderSize=min_size, **extra)
+    key = f"{variant_id}:{slug}"
+    now = time.monotonic()
+    if now - _sim_stop_block_log_at.get(key, 0.0) >= SIM_DATA_GUARD_LOG_SECONDS:
+        _sim_stop_block_log_at[key] = now
+        log.warning(
+            f"[SIM:{variant_id}] 停損觸發但賣不掉：持有 {shares:.0f} 股、可見買盤只有 "
+            f"{depth:.0f} 股（最低下單 {min_size:.0f}）→ 只能繼續抱 reason={reason}"
+        )
+    return False
 
 
 def _maker_stats(st: dict) -> dict:
@@ -4561,6 +4687,9 @@ def record_trade(variant_id: str, pos: dict, pnl: float, outcome: str) -> None:
         "exitDecisionPrice": pos.get("exitDecisionPrice"),
         "exitFee":      pos.get("exitFee", 0),
         "exitReason":   pos.get("exitReason"),
+        "partialExitShares": pos.get("partialExitShares"),
+        "partialPnl":   pos.get("partialPnl"),
+        "partialExits": pos.get("partialExits"),
         "fairProbability": pos.get("fairProbability"),
         "entryEdge":    pos.get("entryEdge"),
         "strategyMode": pos.get("strategyMode"),
