@@ -509,6 +509,27 @@ class PolymarketSimulationTests(unittest.TestCase):
         # 舊 id 不該再存在（規格變了，舊紀錄不能混進來）
         self.assertFalse(any(x["id"] == "eth-15m-last10-45-088-095" for x in fam))
 
+    def test_eth_5m_control_matches_eth_15m_subject(self):
+        # 2026-10-18 依使用者要求啟用 eth-alt-last10-30-092-095 當 eth-15m 同族的對照組。
+        # 對照的價值在於「只有時間框架不同」，所以除了窗口長度，其他條件必須一致——
+        # 尤其停損：全域規則會把 None 塞回 0.60，而停損已實測有害（8/11 假停損），
+        # 若對照組有停損、受測組沒有，差異就不能歸因於時間框架。
+        eth5 = sim._favorite_family_for_asset({"id": "eth-alt", "label": "ETH", "windowSeconds": 300})
+        eth15 = sim._favorite_family_for_asset({"id": "eth-15m", "label": "ETH 15m", "windowSeconds": 900})
+        a = next(x for x in eth5 if x["id"] == "eth-alt-last10-30-092-095")
+        b = next(x for x in eth15 if x["id"] == "eth-15m-last10-30-092-095")
+        # 時間框架照 ×3 等比放大，這是唯一該有的差別
+        self.assertEqual((a["favoriteMinRemaining"], a["favoriteWindowSeconds"]), (10.0, 30.0))
+        self.assertEqual((b["favoriteMinRemaining"], b["favoriteWindowSeconds"]), (30.0, 90.0))
+        # 其餘條件必須相同
+        for k in ("favoriteMinPrice", "favoriteMaxPrice", "favoriteStableSeconds", "lateFavorite"):
+            self.assertEqual(a[k], b[k], k)
+        self.assertIsNone(a["favoriteStopLossPrice"])
+        self.assertTrue(a["noStop"], "對照組必須標 noStop，否則會被全域規則塞回停損 0.60")
+        self.assertIn("不停損", a["label"])
+        # 不能還留在寫死的移除清單裡
+        self.assertNotIn("eth-alt-last10-30-092-095", sim._SIM_DEFAULT_DISABLED)
+
     def test_late_underdog_buys_cheap_side_in_last_minute(self):
         # 2026-09-21：最後 60 秒某邊 ask <= 0.10 → 買那一邊；太貴不進；每窗口一次
         # 測試資產清單沒有 eth-alt：用同樣的旗標臨時掛一組 btc 變體驗證進場邏輯

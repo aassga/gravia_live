@@ -745,6 +745,14 @@ def _favorite_family_for_asset(asset: dict) -> list[dict]:
         fam.append(dict(common, id="eth-alt-last20-60-092-098", label="ETH 最後 20～60 秒買領先方（0.92～0.98、不停損）",
                         favoriteWindowSeconds=60.0, favoriteMinRemaining=20.0, favoriteMinPrice=0.92, favoriteMaxPrice=0.98,
                         favoriteStopLossPrice=None, favoriteStableSeconds=0.0))
+        # 2026-10-18：eth-alt-last10-30-092-095 是 eth-15m 同族的對照組（同資產、不同時間框架），
+        # 必須跟受測組一樣不停損，否則差異會混進「停損有害」這個已知效應（實測 8/11 是假停損）。
+        # 全域規則會把停損 None 的買領先方塞回預設 0.60，所以要標 noStop。
+        for v in fam:
+            if v["id"] == "eth-alt-last10-30-092-095":
+                v["favoriteStopLossPrice"] = None
+                v["noStop"] = True
+                v["label"] = "ETH 最後 10～30 秒買領先方（0.92～0.95、不停損）"
     if aid == "xrp":
         fam.append(dict(common, id="xrp-last60-088-095", label="XRP 最後 60 秒買領先方（0.88～0.95、不停損）",
                         favoriteWindowSeconds=60.0, favoriteMinPrice=0.88, favoriteMaxPrice=0.95,
@@ -935,7 +943,12 @@ _SIM_DEFAULT_DISABLED = (
     # 2026-09-16 依使用者要求：BTC 15m 暴跌後補腿（3s/-15%）、BTC 15m 最後 90～135 秒 0.88～0.92。
     "btc-15m-dump-then-hedge,btc-15m-last30-45-088-092,"
     # 2026-09-16 14:1x 依使用者要求停用累計虧損 20 以上者：SOL 10～30s、XRP 10～30s、SOL 5～30s、ETH 10～30s、XRP 30～45s。
-    "sol-last10-30-092-095,xrp-last10-30-092-095,sol-last5-30-088-092,eth-alt-last10-30-092-095,xrp-last30-45-088-092"
+    # 2026-10-18 依使用者要求把 eth-alt-last10-30-092-095 移出清單，重新啟用當對照組：
+    # eth-15m 的同族（最後 30~90 秒、0.92~0.95）509 筆毛每注 +0.0308（gt 3.4）看起來有優勢，但
+    # btc-15m 同族 675 筆是 -0.0075、sol-15m 是 -0.0099，跨資產不成立。要分辨「ETH 的市場結構」
+    # 與「雜訊」，最乾淨的對照就是同一個資產的另一個時間框架（ETH 5m）。
+    # 註：它當初是在累計虧損才 $20 時被停用的——那個樣本量下的判定本身就是雜訊。
+    "sol-last10-30-092-095,xrp-last10-30-092-095,sol-last5-30-088-092,xrp-last30-45-088-092"
 )
 _SIM_DISABLED_VARIANT_IDS = {
     value.strip()
