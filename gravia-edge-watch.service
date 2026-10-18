@@ -1,0 +1,12 @@
+[Unit]
+Description=Gravia live edge check: 每天跑一次實盤優勢判準，只在結論有變化時推播 TG
+After=gravia-status.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/gravia_live
+EnvironmentFile=/home/ubuntu/gravia_live/.env
+ExecStart=/home/ubuntu/venv/bin/python /home/ubuntu/gravia_live/polymarket_live_edge_watch.py
+TimeoutStartSec=300
+Nice=10

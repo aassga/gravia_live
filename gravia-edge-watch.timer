@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Gravia live edge check daily
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

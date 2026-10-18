@@ -71,3 +71,5 @@ backup_local/
 # 2026-10-01：體檢調參的本機資料與稽核檔（每個變體的成交備份會長到數 MB），不進版控
 backup/
 reports/
+live_edge_watch_state.json
+live_edge_watch_state.json.tmp
