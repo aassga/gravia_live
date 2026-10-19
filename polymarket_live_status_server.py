@@ -307,6 +307,7 @@ def _fetch_state() -> dict:
             "lateFavoriteMaxPrice": strategy.LATE_FAVORITE_MAX_PRICE,
             "lateFavoriteStopLossPrice": strategy.LATE_FAVORITE_STOP_LOSS_PRICE,
             "lateFavoriteStopLossUsd": strategy.LATE_FAVORITE_STOP_LOSS_USD,
+            "lateFavoriteStopLossPct": strategy.LATE_FAVORITE_STOP_LOSS_PCT,
             "lateFavoriteTakeProfitPrice": strategy.LATE_FAVORITE_TAKE_PROFIT_PRICE,
             "lateFavoriteStableSeconds": strategy.LATE_FAVORITE_STABLE_SECONDS,
             "lateFavoriteFlipLookbackSeconds": strategy.LATE_FAVORITE_FLIP_LOOKBACK_SECONDS,
@@ -338,6 +339,7 @@ def _fetch_state() -> dict:
             # _LIVE_VARIANT 與模擬盤是同一個 dict 物件），不能用 import 時的常數快照。
             "openMomentumStopLossPrice": strategy._LIVE_VARIANT.get("favoriteStopLossPrice"),
             "openMomentumStopLossUsd": strategy._LIVE_VARIANT.get("favoriteStopLossUsd"),
+            "openMomentumStopLossPct": strategy._LIVE_VARIANT.get("favoriteStopLossPct"),
             "openMomentumTakeProfitPrice": strategy._LIVE_VARIANT.get("favoriteTakeProfitPrice"),
             "lateDirectionSignal": (
                 "Binance Futures 窗口漲跌（比較實驗）"

@@ -136,11 +136,12 @@ def hold_pnl(trade: dict, path: list[tuple[float, float]]) -> float | None:
 
 
 def replay_trade(trade: dict, path: list[tuple[float, float]], stop_price: float | None, stop_usd: float | None,
-                 baseline: float | None = None) -> float | None:
+                 baseline: float | None = None, stop_pct: float | None = None) -> float | None:
     """在真實 bid 路徑上套用出場設定後的單筆損益；沒觸發就用「抱到結算」的損益（baseline）。
-    觸發判斷看最佳 bid（跟線上邏輯一致），成交價保守估在 bid 下一檔。"""
+    觸發判斷看最佳 bid（跟線上邏輯一致），成交價保守估在 bid 下一檔。
+    2026-10-19：stop_pct 是「帳面虧損 >= 這筆的成本 × pct」，與線上的比例停損同一個定義。"""
     base = hold_pnl(trade, path) if baseline is None else baseline
-    if stop_price is None and stop_usd is None:
+    if stop_price is None and stop_usd is None and stop_pct is None:
         return base
     if base is None:
         return None
@@ -148,7 +149,9 @@ def replay_trade(trade: dict, path: list[tuple[float, float]], stop_price: float
     cost = trade_cost(trade)
     for _ts, bid in path:
         mark = bid * shares - taker_fee(shares, bid) - cost
-        hit = (stop_usd is not None and mark <= -stop_usd + 1e-9) or (stop_price is not None and bid <= stop_price + 1e-9)
+        hit = ((stop_pct is not None and cost > 0 and mark <= -stop_pct * cost + 1e-9)
+               or (stop_usd is not None and mark <= -stop_usd + 1e-9)
+               or (stop_price is not None and bid <= stop_price + 1e-9))
         if hit:
             px = max(0.01, round(bid - TICK, 4))
             return px * shares - taker_fee(shares, px) - cost
@@ -167,31 +170,49 @@ def _stats(values: list[float]) -> tuple[float, float]:
     return mean, math.sqrt(var / n)
 
 
-def best_exit_config(items: list[dict], current_price, current_usd) -> dict:
+def _fmt_stop(cfg: dict) -> str:
+    """把一組出場設定寫成人看得懂的字串（價格／比例／舊的金額）。"""
+    parts = []
+    if cfg.get("stopPrice") is not None:
+        parts.append(f"價格 {cfg['stopPrice']:.2f}")
+    if cfg.get("stopPct") is not None:
+        parts.append(f"虧損≥下注額 {cfg['stopPct'] * 100:.0f}%")
+    if cfg.get("stopUsd") is not None:
+        parts.append(f"虧損≥${cfg['stopUsd']:g}")
+    return "／".join(parts) or "不停損"
+
+
+def best_exit_config(items: list[dict], current_price, current_usd, current_pct=None) -> dict:
     """items: [{trade, path}]。回放所有設定，回傳最佳與目前設定的比較。
-    只有新設定的每筆平均贏過目前設定 SE_MARGIN 個標準誤才建議更換。"""
+    只有新設定的每筆平均贏過目前設定 SE_MARGIN 個標準誤才建議更換。
+
+    2026-10-19 依使用者要求：候選的金額停損改成**比例**停損。本來就是用 USD_STOP_FRACTIONS
+    （成本的 2%~60%）挑門檻，只是寫入前乘上當時的中位成本換成美元；部位複利成長後那個
+    美元值就相對變緊了。現在直接把比例存下來，門檻就會跟著部位縮放。"""
     usable = [dict(i, base=hold_pnl(i["trade"], i["path"])) for i in items]
     usable = [i for i in usable if i["base"] is not None and i["path"]]
     if not usable:
         return {"current": None, "best": None, "margin": 0.0, "threshold": 0.0, "change": False, "usable": 0}
-    med_cost = sorted(trade_cost(i["trade"]) for i in usable)[len(usable) // 2] or 1.0
-    candidates: list[tuple[float | None, float | None]] = [(None, None)]
-    candidates += [(p, None) for p in STOP_PRICE_GRID]
-    candidates += [(None, round(f * med_cost, 2)) for f in USD_STOP_FRACTIONS]
-    if (current_price, current_usd) not in candidates:
-        candidates.append((current_price, current_usd))
+    candidates: list[tuple[float | None, float | None, float | None]] = [(None, None, None)]
+    candidates += [(p, None, None) for p in STOP_PRICE_GRID]
+    candidates += [(None, None, f) for f in USD_STOP_FRACTIONS]
+    if (current_price, current_usd, current_pct) not in candidates:
+        candidates.append((current_price, current_usd, current_pct))
     scored = []
-    for sp, su in candidates:
-        pnls = [replay_trade(i["trade"], i["path"], sp, su, i["base"]) for i in usable]
+    for sp, su, sf in candidates:
+        pnls = [replay_trade(i["trade"], i["path"], sp, su, i["base"], sf) for i in usable]
         mean, se = _stats(pnls)
-        scored.append({"stopPrice": sp, "stopUsd": su, "mean": mean, "se": se, "net": sum(pnls),
+        scored.append({"stopPrice": sp, "stopUsd": su, "stopPct": sf, "mean": mean, "se": se, "net": sum(pnls),
                        "wins": sum(1 for v in pnls if v > 0), "losses": sum(1 for v in pnls if v <= 0)})
-    cur = next(s for s in scored if s["stopPrice"] == current_price and s["stopUsd"] == current_usd)
+    cur = next(s for s in scored if s["stopPrice"] == current_price
+               and s["stopUsd"] == current_usd and s["stopPct"] == current_pct)
     best = max(scored, key=lambda s: s["mean"])
     margin = best["mean"] - cur["mean"]
     threshold = SE_MARGIN * math.sqrt(best["se"] ** 2 + cur["se"] ** 2)
+    differs = (best["stopPrice"] != cur["stopPrice"] or best["stopUsd"] != cur["stopUsd"]
+               or best["stopPct"] != cur["stopPct"])
     return {"current": cur, "best": best, "margin": margin, "threshold": threshold, "usable": len(usable),
-            "change": margin > threshold and (best["stopPrice"] != cur["stopPrice"] or best["stopUsd"] != cur["stopUsd"])}
+            "change": margin > threshold and differs}
 
 
 # ── 虧損原因 ──────────────────────────────────────────────────────────────
@@ -365,19 +386,22 @@ def diagnose(variants: list[dict], db: sqlite3.Connection, rid: int) -> list[dic
         if len(trades) < MIN_TRADES_FOR_EXIT_TUNE:
             rec["action"] = "wait"; rec["detail"] = f"只有 {len(trades)} 筆，未達調參門檻 {MIN_TRADES_FOR_EXIT_TUNE}"
             out.append(rec); continue
-        cmp = best_exit_config(items, v.get("favoriteStopLossPrice"), v.get("favoriteStopLossUsd"))
+        cmp = best_exit_config(items, v.get("favoriteStopLossPrice"), v.get("favoriteStopLossUsd"),
+                               v.get("favoriteStopLossPct"))
         if cmp["best"] is None or cmp["usable"] < MIN_TRADES_FOR_EXIT_TUNE:
             rec["action"] = "wait"; rec["detail"] = f"可回放的成交只有 {cmp['usable']} 筆（缺報價路徑）"
             out.append(rec); continue
         rec["exit"] = {k: cmp[k] for k in ("margin", "threshold", "change", "usable")}
         rec["exit"]["current"] = cmp["current"]; rec["exit"]["best"] = cmp["best"]
         losses = len(trades) - int(rec["winRate"] * len(trades) / 100 + 0.5)
-        if cmp["change"] and (cmp["best"]["stopPrice"] is not None or cmp["best"]["stopUsd"] is not None) and losses < MIN_LOSSES_FOR_STOP:
+        _best_has_stop = (cmp["best"]["stopPrice"] is not None or cmp["best"]["stopUsd"] is not None
+                          or cmp["best"].get("stopPct") is not None)
+        if cmp["change"] and _best_has_stop and losses < MIN_LOSSES_FOR_STOP:
             rec["action"] = "wait"; rec["detail"] = f"虧損樣本只有 {losses} 筆，先不動停損"
         elif cmp["change"]:
             rec["action"] = "retune"
             b = cmp["best"]
-            rec["detail"] = (f"停損 {cmp['current']['stopPrice']}／${cmp['current']['stopUsd']} → {b['stopPrice']}／${b['stopUsd']}："
+            rec["detail"] = (f"停損 {_fmt_stop(cmp['current'])} → {_fmt_stop(b)}："
                              f"每筆 {cmp['current']['mean']:+.3f} → {b['mean']:+.3f}（差 {cmp['margin']:+.3f} > 誤差 {cmp['threshold']:.3f}）")
         elif len(trades) >= MIN_TRADES_FOR_KILL and cmp["best"]["mean"] + SE_MARGIN * cmp["best"]["se"] <= 0:
             g = rec["gross"]
@@ -411,11 +435,14 @@ def apply_actions(records: list[dict], auto: list[dict], disabled: list[str], ov
             b = rec["exit"]["best"]
             overrides.setdefault(vid, {})["favoriteStopLossPrice"] = b["stopPrice"]
             overrides[vid]["favoriteStopLossUsd"] = b["stopUsd"]
+            overrides[vid]["favoriteStopLossPct"] = b.get("stopPct")
             spec = by_id.get(vid)
             if spec is not None:
                 spec["favoriteStopLossPrice"] = b["stopPrice"]
                 spec["favoriteStopLossUsd"] = b["stopUsd"]
-                spec["noStop"] = b["stopPrice"] is None and b["stopUsd"] is None
+                spec["favoriteStopLossPct"] = b.get("stopPct")
+                spec["noStop"] = (b["stopPrice"] is None and b["stopUsd"] is None
+                                  and b.get("stopPct") is None)
             changed_ids.append(vid)
         elif rec["action"] == "loosen":
             spec = by_id.get(vid)

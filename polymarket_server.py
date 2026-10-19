@@ -983,6 +983,14 @@ def _relabel_stop(label: str, stop: float | None) -> str:
     return out
 
 
+def _relabel_stop_pct(label: str, pct: float | None) -> str:
+    """把標籤尾端的「・虧損≥…停損」換成比例版本（2026-10-19）。"""
+    base = re.sub(r"・虧損≥[^・]*停損", "", label)
+    if pct is None:
+        return base
+    return f"{base}・虧損≥下注額{pct * 100:.0f}% 停損"
+
+
 def _relabel_stop_usd(label: str, usd: float | None) -> str:
     """金額停損：標籤尾端「・虧損≥$X 停損」加上或拿掉。"""
     base = re.sub(r"・虧損≥\$[\d.]+ 停損$", "", label)
@@ -990,7 +998,7 @@ def _relabel_stop_usd(label: str, usd: float | None) -> str:
 
 
 def apply_variant_overrides(overrides: dict) -> list[str]:
-    """套用 TG 寫的變體覆寫（favoriteStopLossPrice／favoriteStopLossUsd）；回傳有變動的變體 id。"""
+    """套用變體覆寫（favoriteStopLossPrice／favoriteStopLossPct／favoriteStopLossUsd）；回傳有變動的變體 id。"""
     changed = []
     for vid, o in (overrides or {}).items():
         v = AB_VARIANT_BY_ID.get(vid)
@@ -1006,6 +1014,18 @@ def apply_variant_overrides(overrides: dict) -> list[str]:
                 v["label"] = _relabel_stop(v["label"], stop)
                 touched = True
                 log.info(f"[SIM:{vid}] 停損覆寫 → {'不停損' if stop is None else f'{stop:.2f}'}：{v['label']}")
+        if "favoriteStopLossPct" in o:
+            raw = o.get("favoriteStopLossPct")
+            pct = None if raw in (None, "", 0, 0.0) else float(raw)
+            if v.get("favoriteStopLossPct") != pct:
+                v["favoriteStopLossPct"] = pct
+                # 比例停損優先於金額停損；設了比例就清掉舊的金額值，避免兩套門檻並存
+                if pct is not None:
+                    v["favoriteStopLossUsd"] = None
+                v["label"] = _relabel_stop_pct(v["label"], pct)
+                touched = True
+                log.info(f"[SIM:{vid}] 比例停損覆寫 → "
+                         f"{'不設' if pct is None else f'下注額 {pct * 100:.0f}%'}：{v['label']}")
         if "favoriteStopLossUsd" in o:
             raw = o.get("favoriteStopLossUsd")
             usd = float(raw) if raw not in (None, "", 0, "0") else None
@@ -3617,10 +3637,15 @@ def _try_late_favorite_take_profit(variant_id: str, slug: str, up_book: dict, do
     return True
 
 
-def _stop_trigger(pos: dict, held_book: dict, stop_price, stop_usd) -> tuple[str | None, float | None, float | None]:
+def _stop_trigger(pos: dict, held_book: dict, stop_price, stop_usd,
+                  stop_pct=None) -> tuple[str | None, float | None, float | None]:
     """2026-09-22 依使用者要求：停損觸發改看「最佳 bid」而不是整筆砸進去的最差成交價——
     XRP／BTC 5m 買盤薄，50 股一砸就走到 0.88 以下，明明市場還在 0.95 卻被判定翻面（09-21 一天 33 次）。
     價格停損：best_bid <= stop_price；金額停損：以 best_bid 估的帳面虧損 >= stop_usd。
+    2026-10-19 依使用者要求新增比例停損 stop_pct：帳面虧損 >= 下注額 × stop_pct。
+    固定金額停損搭配會複利成長的部位是規模不一致的——健檢本來就是用「成本的 N%」挑出門檻，
+    只是寫入前乘上當時的中位成本換成美元後就凍住了，之後部位變大門檻就相對變緊。
+    基準用進場當下的 stakeUsd（= notional + fee），它在部位存續期間不變。
     回傳 (原因, best_bid, 帳面損益)。"""
     bids = held_book.get("bids") or []
     best_bid = max(float(b["price"]) for b in bids) if bids else None
@@ -3628,6 +3653,10 @@ def _stop_trigger(pos: dict, held_book: dict, stop_price, stop_usd) -> tuple[str
         return None, None, None
     shares = float(pos["shares"])
     mark_pnl = best_bid * shares - taker_fee(shares, best_bid) - _position_paid_cost(pos)
+    if stop_pct is not None and float(stop_pct) > 0:
+        basis = float(pos.get("stakeUsd") or 0) or _position_paid_cost(pos)
+        if basis > 0 and mark_pnl <= -float(stop_pct) * basis + 1e-9:
+            return "favorite_stop_loss_pct", best_bid, mark_pnl
     if stop_usd is not None and mark_pnl <= -float(stop_usd) + 1e-9:
         return "favorite_stop_loss_usd", best_bid, mark_pnl
     if stop_price is not None and best_bid <= float(stop_price) + 1e-9:
@@ -3641,20 +3670,21 @@ def _try_late_favorite_stop_loss(variant_id: str, slug: str, up_book: dict, down
     variant = AB_VARIANT_BY_ID[variant_id]
     stop_price = variant.get("favoriteStopLossPrice")
     stop_usd = variant.get("favoriteStopLossUsd")
-    if stop_price is None and stop_usd is None:
+    stop_pct = variant.get("favoriteStopLossPct")
+    if stop_price is None and stop_usd is None and stop_pct is None:
         return
     st = ab_states[variant_id]
     pos = st["position"]
     held_book = up_book if pos["side"] == "Up" else down_book
     if not _simulation_direction_book_is_fresh(variant["assetId"], pos["side"], held_book):
         return
-    reason, best_bid, mark_pnl = _stop_trigger(pos, held_book, stop_price, stop_usd)
+    reason, best_bid, mark_pnl = _stop_trigger(pos, held_book, stop_price, stop_usd, stop_pct)
     if reason is None:
         return
     _try_stop_exit(
         variant_id, slug, reason, held_book,
         selectedSide=pos["side"], bestBid=best_bid, markPnl=round(mark_pnl, 4),
-        favoriteStopLossPrice=stop_price, favoriteStopLossUsd=stop_usd,
+        favoriteStopLossPrice=stop_price, favoriteStopLossUsd=stop_usd, favoriteStopLossPct=stop_pct,
     )
 
 

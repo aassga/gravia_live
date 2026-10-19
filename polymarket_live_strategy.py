@@ -182,6 +182,13 @@ LATE_FAVORITE_STOP_LOSS_PRICE = (
 # 2026-09-22 依使用者要求：金額停損——持有腿最佳 bid 估的帳面虧損 >= 這個美元數就 FOK 賣出；空／0 = 關閉。
 _fav_stop_usd_raw = os.environ.get("POLY_LIVE_FAVORITE_STOP_LOSS_USD", "").strip()
 LATE_FAVORITE_STOP_LOSS_USD = float(_fav_stop_usd_raw) if _fav_stop_usd_raw and float(_fav_stop_usd_raw) > 0 else None
+# 2026-10-19 依使用者要求：比例停損——帳面虧損 >= 下注額 × 這個比例就賣出。固定金額門檻搭配
+# 會複利成長的部位是規模不一致的，所以健檢改成直接存比例。空／0 = 關閉；沒設就吃變體的值。
+_fav_stop_pct_raw = os.environ.get("POLY_LIVE_FAVORITE_STOP_LOSS_PCT", "").strip()
+LATE_FAVORITE_STOP_LOSS_PCT = (
+    (float(_fav_stop_pct_raw) if float(_fav_stop_pct_raw) > 0 else None)
+    if _fav_stop_pct_raw else _LIVE_VARIANT.get("favoriteStopLossPct")
+)
 _dir_stop_raw = os.environ.get("POLY_LIVE_DIRECTION_STOP_LOSS_PRICE", "").strip()
 LATE_DIRECTION_STOP_LOSS_PRICE = (
     (float(_dir_stop_raw) if float(_dir_stop_raw) > 0 else None)
@@ -1521,7 +1528,8 @@ def _momentum_exit_plans(pos: dict, up_book: dict, down_book: dict) -> tuple[dic
     sp = _late_favorite_stop_plan(
         pos, up_book, down_book,
         stop_price=_LIVE_VARIANT.get("favoriteStopLossPrice"),
-        stop_usd=_LIVE_VARIANT.get("favoriteStopLossUsd"))
+        stop_usd=_LIVE_VARIANT.get("favoriteStopLossUsd"),
+        stop_pct=_LIVE_VARIANT.get("favoriteStopLossPct"))
     return None, sp
 
 
@@ -3683,10 +3691,11 @@ async def _close_late_favorite_take_profit(exit_plan: dict, dry_run: bool, slug:
 
 
 _STOP_USD_UNSET = object()
+_STOP_PCT_UNSET = object()
 
 
 def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict, stop_price: float | None = None,
-                             stop_usd=_STOP_USD_UNSET) -> dict | None:
+                             stop_usd=_STOP_USD_UNSET, stop_pct=_STOP_PCT_UNSET) -> dict | None:
     """持有腿保守可賣價 <= 停損價就回傳賣出計畫（預設用 LATE_FAVORITE_STOP_LOSS_PRICE；
     方向性單腿傳 LATE_DIRECTION_STOP_LOSS_PRICE）。
 
@@ -3696,9 +3705,13 @@ def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict, stop_pri
     if stop_price is None and stop_usd is _STOP_USD_UNSET:
         stop_price = LATE_FAVORITE_STOP_LOSS_PRICE
         stop_usd = LATE_FAVORITE_STOP_LOSS_USD
+        if stop_pct is _STOP_PCT_UNSET:
+            stop_pct = LATE_FAVORITE_STOP_LOSS_PCT
     elif stop_usd is _STOP_USD_UNSET:
         stop_usd = None          # 明確傳 stop_price 的方向性呼叫端：只看價格，維持原行為
-    if stop_price is None and stop_usd is None:
+    if stop_pct is _STOP_PCT_UNSET:
+        stop_pct = None
+    if stop_price is None and stop_usd is None and stop_pct is None:
         return None
     held_book = up_book if pos["side"] == "Up" else down_book
     if not _live_direction_book_is_fresh(pos["side"], held_book):
@@ -3706,7 +3719,7 @@ def _late_favorite_stop_plan(pos: dict, up_book: dict, down_book: dict, stop_pri
     if not pos.get("dryRun", True) and not live.order_tokens_and_fees_are_warm([_token_id(pos["side"])]):
         return None
     # 2026-09-22：觸發改看最佳 bid（市場真的翻了才算），不再用整筆砸下去的最差成交價（薄買盤會誤觸發）
-    reason, best_bid, mark_pnl = sim._stop_trigger(pos, held_book, stop_price, stop_usd)
+    reason, best_bid, mark_pnl = sim._stop_trigger(pos, held_book, stop_price, stop_usd, stop_pct)
     if reason is None:
         return None
     exit_plan = _sell_plan(pos["side"], held_book, float(pos["shares"]))
@@ -3873,6 +3886,8 @@ def _log_startup_banner(mode: str) -> None:
         )
         if LATE_FAVORITE_STOP_LOSS_PRICE is not None:
             log.warning(f"  領先方翻面停損：持有腿最佳 bid <= ${float(LATE_FAVORITE_STOP_LOSS_PRICE):.2f} 時 FOK 賣出")
+        if LATE_FAVORITE_STOP_LOSS_PCT is not None:
+            log.warning(f"  比例停損：帳面虧損 >= 下注額的 {LATE_FAVORITE_STOP_LOSS_PCT * 100:.0f}% 時 FOK 賣出")
         if LATE_FAVORITE_STOP_LOSS_USD is not None:
             log.warning(f"  金額停損：帳面虧損 >= ${LATE_FAVORITE_STOP_LOSS_USD:g} 時 FOK 賣出")
         else:
