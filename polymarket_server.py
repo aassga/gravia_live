@@ -5719,6 +5719,9 @@ def build_ab_leaderboard() -> list:
             "favoriteMaxPrice": v.get("favoriteMaxPrice"),
             "favoriteStopLossPrice": v.get("favoriteStopLossPrice"),
             "favoriteStopLossUsd": v.get("favoriteStopLossUsd"),
+            # 2026-10-19：比例停損一定要出現在快照裡——健檢是從快照的 abVariants 讀「目前設定」，
+            # 漏掉的話它會把現況誤判成「不停損」，拿最佳設定跟錯的基準比，然後亂調參數。
+            "favoriteStopLossPct": v.get("favoriteStopLossPct"),
             "favoriteTakeProfitPrice": v.get("favoriteTakeProfitPrice"),
             "favoriteStableSeconds": v.get("favoriteStableSeconds"),
             "favoriteFlipLookbackSeconds": v.get("favoriteFlipLookbackSeconds"),

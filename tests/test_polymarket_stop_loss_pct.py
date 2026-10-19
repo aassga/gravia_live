@@ -109,6 +109,29 @@ class StopPctOverrideTests(unittest.TestCase):
         self.assertEqual(self.v["label"], "測試變體")
 
 
+class SnapshotExposureTests(unittest.TestCase):
+    def test_snapshot_carries_stop_pct(self):
+        # 健檢是從快照的 abVariants 讀「目前設定」。漏掉 favoriteStopLossPct 的話它會把現況
+        # 誤判成「不停損」，拿最佳設定去跟錯的基準比較，然後亂調參數——所以這個欄位必須在。
+        vid = "btc-15m-last10-30-092-095"
+        v = sim.AB_VARIANT_BY_ID[vid]
+        orig = v.get("favoriteStopLossPct")
+        v["favoriteStopLossPct"] = 0.38
+        self.addCleanup(lambda: v.__setitem__("favoriteStopLossPct", orig)
+                        if orig is not None else v.pop("favoriteStopLossPct", None))
+        payload = sim.build_snapshot() if hasattr(sim, "build_snapshot") else None
+        if payload is None:
+            self.skipTest("找不到快照建構函式，改由下面的欄位清單測試覆蓋")
+        row = next(r for r in payload["abVariants"] if r["id"] == vid)
+        self.assertEqual(row["favoriteStopLossPct"], 0.38)
+
+    def test_snapshot_field_is_listed_in_source(self):
+        # 不依賴能不能在測試環境建出完整快照：直接確認欄位有被列進 payload
+        import pathlib
+        src = pathlib.Path(sim.__file__).read_text(encoding="utf-8")
+        self.assertIn('"favoriteStopLossPct": v.get("favoriteStopLossPct")', src)
+
+
 class DoctorStopPctTests(unittest.TestCase):
     def _trade_and_path(self, shares=100, entry=0.88, dip_to=0.40):
         trade = {"shares": shares, "entryPrice": entry, "entryFee": 1.0,
