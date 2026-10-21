@@ -530,6 +530,21 @@ class PolymarketSimulationTests(unittest.TestCase):
         # 不能還留在寫死的移除清單裡
         self.assertNotIn("eth-alt-last10-30-092-095", sim._SIM_DEFAULT_DISABLED)
 
+    def test_only_btc_15m_mid_favorite_is_live_eligible(self):
+        # 2026-10-21 依使用者要求：實盤① 改用 btc-15m-mid-favorite-087-095，只解鎖這一組。
+        # 中段買領先方在 eth-alt／sol-15m 是顯著為負的（gt -3.5／-4.1），其他資產必須維持純觀察。
+        self.assertEqual(sim._LIVE_ELIGIBLE_FACTORY_IDS, {"btc-15m-mid-favorite-087-095"})
+        btc15 = sim.AB_VARIANT_BY_ID.get("btc-15m-mid-favorite-087-095")
+        self.assertIsNotNone(btc15)
+        self.assertFalse(btc15["simOnly"], "這一組要開放實盤選用")
+        # 工廠本身的預設仍是 simOnly=True
+        raw = sim._mid_favorite_variant({"id": "eth-alt", "label": "ETH", "windowSeconds": 300})
+        self.assertTrue(raw["simOnly"], "工廠預設必須仍是純觀察")
+        for other in ("btc-mid-favorite-087-095", "eth-15m-mid-favorite-087-095"):
+            v = sim.AB_VARIANT_BY_ID.get(other)
+            if v is not None:
+                self.assertTrue(v["simOnly"], f"{other} 不該被一起解鎖")
+
     def test_late_underdog_buys_cheap_side_in_last_minute(self):
         # 2026-09-21：最後 60 秒某邊 ask <= 0.10 → 買那一邊；太貴不進；每窗口一次
         # 測試資產清單沒有 eth-alt：用同樣的旗標臨時掛一組 btc 變體驗證進場邏輯

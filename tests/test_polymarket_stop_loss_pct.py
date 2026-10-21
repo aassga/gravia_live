@@ -167,3 +167,16 @@ class DoctorStopPctTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveUsdStopFallbackTests(unittest.TestCase):
+    """2026-10-21：實盤的金額停損要 fallback 到變體，否則模擬盤有停損、實盤沒有。"""
+
+    def test_source_has_variant_fallback(self):
+        import pathlib
+        src = pathlib.Path(__file__).resolve().parents[1] / "polymarket_live_strategy.py"
+        text = src.read_text(encoding="utf-8")
+        # 這四個常數都該有「env 沒設就吃變體」的 fallback，金額停損原本漏掉
+        for field in ("favoriteStopLossUsd", "favoriteStopLossPct",
+                      "favoriteMinPrice", "favoriteMaxPrice"):
+            self.assertIn(f'_LIVE_VARIANT.get("{field}"', text, field)

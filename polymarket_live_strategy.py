@@ -181,7 +181,13 @@ LATE_FAVORITE_STOP_LOSS_PRICE = (
 # 只在進場價 > 停損價時啟用。
 # 2026-09-22 依使用者要求：金額停損——持有腿最佳 bid 估的帳面虧損 >= 這個美元數就 FOK 賣出；空／0 = 關閉。
 _fav_stop_usd_raw = os.environ.get("POLY_LIVE_FAVORITE_STOP_LOSS_USD", "").strip()
-LATE_FAVORITE_STOP_LOSS_USD = float(_fav_stop_usd_raw) if _fav_stop_usd_raw and float(_fav_stop_usd_raw) > 0 else None
+# 2026-10-21：補上 fallback 到變體。原本只讀 env，所以模擬盤變體設了 favoriteStopLossUsd
+# 的話實盤會變成「沒有金額停損」——跟模擬盤不一致。MIN_PRICE／MAX_PRICE／STOP_LOSS_PRICE／
+# STOP_LOSS_PCT 本來就都有 fallback，只有這個漏掉。空／0 = 明確關閉。
+LATE_FAVORITE_STOP_LOSS_USD = (
+    (float(_fav_stop_usd_raw) if float(_fav_stop_usd_raw) > 0 else None)
+    if _fav_stop_usd_raw else _LIVE_VARIANT.get("favoriteStopLossUsd")
+)
 # 2026-10-19 依使用者要求：比例停損——帳面虧損 >= 下注額 × 這個比例就賣出。固定金額門檻搭配
 # 會複利成長的部位是規模不一致的，所以健檢改成直接存比例。空／0 = 關閉；沒設就吃變體的值。
 _fav_stop_pct_raw = os.environ.get("POLY_LIVE_FAVORITE_STOP_LOSS_PCT", "").strip()

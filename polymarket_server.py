@@ -866,11 +866,18 @@ def _mid_momentum_hold_variant(asset: dict) -> dict:
     }
 
 
+# 2026-10-21 依使用者要求：實盤① 改用 btc-15m-mid-favorite-087-095，所以只開放這一組給實盤選用。
+# 工廠本身一律 simOnly=True（中段買領先方在 eth-alt／sol-15m 是顯著為負的：gt -3.5／-4.1），
+# 這裡只針對 btc-15m 解鎖，其他資產維持純觀察。
+_LIVE_ELIGIBLE_FACTORY_IDS = {"btc-15m-mid-favorite-087-095"}
+
 for _asset in ASSETS:
     if _asset.get("marketMakerOnly"):
         continue
     for _mk in (_early_directional_exit_variant, _mid_favorite_variant, _mid_momentum_hold_variant):
         _nv = _mk(_asset)
+        if _nv["id"] in _LIVE_ELIGIBLE_FACTORY_IDS:
+            _nv["simOnly"] = False
         if not any(v["id"] == _nv["id"] for v in AB_VARIANTS):
             AB_VARIANTS.append(_nv)
 del _asset, _mk, _nv
